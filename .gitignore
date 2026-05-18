@@ -9,3 +9,4 @@ dist/
 .idea/
 apps/desktop/src-tauri/gen/
 apps/desktop/dist/
+.claude/settings.local.json
