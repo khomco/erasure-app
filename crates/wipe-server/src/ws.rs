@@ -1,4 +1,4 @@
-//! WebSocket endpoint that streams live job updates + fleet events.
+//! WebSocket endpoint that streams live Job broadcasts + fleet events.
 
 use axum::{
     extract::{
@@ -16,10 +16,12 @@ use crate::app::AppState;
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsEnvelope {
-    // Wire-format key stays "job_update"; the Rust variant was renamed
-    // along with the underlying type for glossary alignment.
-    #[serde(rename = "job_update")]
-    JobUpdateMessage(wipe_engine::JobUpdateMessage),
+    /// One of: `JobStateChanged`, `ActivityAdded`, `ErasureUpdate` —
+    /// see `wipe_engine::JobBroadcast`. Wire shape: the inner tagged
+    /// enum is embedded under `payload`.
+    JobBroadcast {
+        payload: wipe_engine::JobBroadcast,
+    },
     FleetEvent(wipe_fleet::FleetEvent),
     Hello { tool_version: String },
     Heartbeat,
@@ -59,8 +61,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     loop {
         tokio::select! {
             r = job_rx.recv() => match r {
-                Ok(update) => {
-                    if send_json(&mut sender, &WsEnvelope::JobUpdateMessage(update)).await.is_err() {
+                Ok(payload) => {
+                    if send_json(&mut sender, &WsEnvelope::JobBroadcast { payload }).await.is_err() {
                         break;
                     }
                 }

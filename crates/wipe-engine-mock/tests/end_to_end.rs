@@ -1,8 +1,14 @@
+//! End-to-end tests for the runner driving the mock backend through
+//! the new outer-Job model (ADR-0001).
+
 use std::sync::Arc;
 use std::time::Duration;
 
-use wipe_common::{Classification, DeviceId, Intent, JobSpec, JobState, OperatorRef};
-use wipe_engine::JobRunner;
+use wipe_common::{
+    Classification, DeviceId, ErasureEventState, Intent, Job, JobActivity, JobSpec, JobState,
+    JobUpdateKind, OperatorRef,
+};
+use wipe_engine::{JobBroadcast, JobRunner};
 use wipe_engine_mock::{MockBackend, MockTiming};
 
 fn op() -> OperatorRef {
@@ -13,82 +19,94 @@ fn op() -> OperatorRef {
     }
 }
 
-async fn wait_terminal(runner: &JobRunner, id: uuid::Uuid) -> wipe_common::Job {
-    for _ in 0..200 {
-        if let Some(j) = runner.get(id) {
-            if j.state.is_terminal() {
-                return j;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("job {id} did not reach terminal state");
-}
-
-#[tokio::test]
-async fn nvme_crypto_erase_happy_path() {
-    let backend = Arc::new(MockBackend::with_catalog(
-        wipe_engine_mock::default_devices_public(),
-        MockTiming::fast(),
-    ));
-    let runner = JobRunner::new(backend);
-
-    let spec = JobSpec {
-        device_id: DeviceId("dev-nvme-0".into()),
+fn job_spec(device_id: &str) -> JobSpec {
+    JobSpec {
+        device_id: DeviceId(device_id.into()),
         classification: Classification::High,
         intent: Intent::Reuse,
-        method: None,
-        verify: true,
-        verify_samples: 4,
         operator: op(),
         asset_tag: Some("ASSET-001".into()),
         site_label: Some("Lab A".into()),
         ticket_ref: Some("TKT-42".into()),
-    };
-    let id = runner.create_job(spec).await.unwrap();
-    runner.start(id).unwrap();
+        work_order_ref: None,
+        customer_ref: None,
+        contract_ref: None,
+        sanitization_profile_ref: None,
+    }
+}
 
-    let job = wait_terminal(&runner, id).await;
-    assert_eq!(job.state, JobState::Completed);
-    assert!(job.verification.unwrap().all_passed);
-    let method = job.resolved_method.unwrap();
-    assert!(matches!(
-        method,
-        wipe_common::Method::NvmeSanitizeCryptoErase { .. }
-    ));
+async fn wait_until<F: Fn(&Job) -> bool>(
+    runner: &JobRunner,
+    id: uuid::Uuid,
+    pred: F,
+) -> Job {
+    for _ in 0..400 {
+        if let Some(j) = runner.get(id) {
+            if pred(&j) {
+                return j;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("job {id} never satisfied predicate; last state = {:?}", runner.get(id).map(|j| j.state));
 }
 
 #[tokio::test]
-async fn sata_failure_propagates() {
+async fn nvme_crypto_erase_happy_path_reaches_erased() {
     let backend = Arc::new(MockBackend::with_catalog(
         wipe_engine_mock::default_devices_public(),
         MockTiming::fast(),
     ));
     let runner = JobRunner::new(backend);
 
-    let spec = JobSpec {
-        device_id: DeviceId("dev-sata-0".into()),
-        classification: Classification::High,
-        intent: Intent::Reuse,
-        method: None,
-        verify: true,
-        verify_samples: 2,
-        operator: op(),
-        asset_tag: None,
-        site_label: None,
-        ticket_ref: None,
-    };
-    let id = runner.create_job(spec).await.unwrap();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
     runner.start(id).unwrap();
 
-    let job = wait_terminal(&runner, id).await;
-    assert_eq!(job.state, JobState::Failed);
-    // The failure should appear in the event log.
-    let had_failure_event = job
-        .events
-        .iter()
-        .any(|e| matches!(e.event, wipe_common::JobUpdateKind::Failed { .. }));
-    assert!(had_failure_event, "expected a Failed event in the job log");
+    let job = wait_until(&runner, id, |j| j.state.is_terminal()).await;
+    assert_eq!(job.state, JobState::Erased);
+
+    // The activity chain must contain one Erasure (Completed) and one
+    // Verification (all_passed).
+    let erasure = job
+        .latest_erasure()
+        .expect("Job should have an Erasure activity");
+    assert_eq!(erasure.state, ErasureEventState::Completed);
+    assert!(matches!(
+        erasure.resolved_method,
+        Some(wipe_common::Method::NvmeSanitizeCryptoErase { .. })
+    ));
+
+    let verification = job.activities.iter().find_map(|a| match a {
+        JobActivity::Verification(v) => Some(v),
+        _ => None,
+    });
+    let v = verification.expect("Job should have a Verification activity");
+    assert!(v.report.all_passed);
+    assert_eq!(v.erasure_event_id, erasure.id);
+}
+
+#[tokio::test]
+async fn sata_failure_keeps_outer_job_in_progress_for_operator_decision() {
+    let backend = Arc::new(MockBackend::with_catalog(
+        wipe_engine_mock::default_devices_public(),
+        MockTiming::fast(),
+    ));
+    let runner = JobRunner::new(backend);
+
+    let id = runner.create_job(job_spec("dev-sata-0")).await.unwrap();
+    runner.start(id).unwrap();
+
+    // Wait for the inner ErasureEvent to reach Failed; the outer Job
+    // must stay in InProgress (operator decides what to do next).
+    let job = wait_until(&runner, id, |j| {
+        j.latest_erasure()
+            .map(|e| matches!(e.state, ErasureEventState::Failed))
+            .unwrap_or(false)
+    })
+    .await;
+    assert_eq!(job.state, JobState::InProgress);
+    let erasure = job.latest_erasure().unwrap();
+    assert_eq!(erasure.state, ErasureEventState::Failed);
 }
 
 #[tokio::test]
@@ -98,7 +116,6 @@ async fn enumerate_returns_default_catalog() {
         MockTiming::fast(),
     ));
     let runner = JobRunner::new(backend.clone());
-    // The runner doesn't expose enumerate; tests go through the backend.
     let devices = wipe_engine::DeviceBackend::enumerate(&*backend).await.unwrap();
     assert_eq!(devices.len(), 4);
     assert!(devices.iter().any(|d| d.id == DeviceId("dev-nvme-0".into())));
@@ -106,7 +123,7 @@ async fn enumerate_returns_default_catalog() {
 }
 
 #[tokio::test]
-async fn event_stream_observes_full_lifecycle() {
+async fn broadcast_stream_observes_outer_and_inner_transitions() {
     let backend = Arc::new(MockBackend::with_catalog(
         wipe_engine_mock::default_devices_public(),
         MockTiming::fast(),
@@ -114,41 +131,43 @@ async fn event_stream_observes_full_lifecycle() {
     let runner = JobRunner::new(backend);
     let mut rx = runner.subscribe();
 
-    let spec = JobSpec {
-        device_id: DeviceId("dev-nvme-1".into()),
-        classification: Classification::High,
-        intent: Intent::Reuse,
-        method: None,
-        verify: true,
-        verify_samples: 2,
-        operator: op(),
-        asset_tag: None,
-        site_label: None,
-        ticket_ref: None,
-    };
-    let id = runner.create_job(spec).await.unwrap();
+    let id = runner.create_job(job_spec("dev-nvme-1")).await.unwrap();
     runner.start(id).unwrap();
 
-    let mut saw_running = false;
-    let mut saw_completed = false;
+    let mut saw_inprogress = false;
+    let mut saw_erased = false;
+    let mut saw_inner_running = false;
     let mut saw_command_issued = false;
-    for _ in 0..200 {
+    let mut saw_verification_activity = false;
+    for _ in 0..400 {
         tokio::select! {
             r = rx.recv() => {
-                if let Ok(update) = r {
-                    match update.event.event {
-                        wipe_common::JobUpdateKind::StateChanged { to: JobState::Running, .. } => saw_running = true,
-                        wipe_common::JobUpdateKind::StateChanged { to: JobState::Completed, .. } => saw_completed = true,
-                        wipe_common::JobUpdateKind::CommandIssued(_) => saw_command_issued = true,
+                if let Ok(b) = r {
+                    match b {
+                        JobBroadcast::JobStateChanged { to: JobState::InProgress, .. } => saw_inprogress = true,
+                        JobBroadcast::JobStateChanged { to: JobState::Erased, .. } => saw_erased = true,
+                        JobBroadcast::ErasureUpdate { update, .. } => {
+                            if let JobUpdateKind::StateChanged { to: ErasureEventState::Running, .. } = update.event {
+                                saw_inner_running = true;
+                            }
+                            if let JobUpdateKind::CommandIssued(_) = update.event {
+                                saw_command_issued = true;
+                            }
+                        }
+                        JobBroadcast::ActivityAdded { activity: JobActivity::Verification(_), .. } => {
+                            saw_verification_activity = true;
+                        }
                         _ => {}
                     }
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
         }
-        if saw_completed { break; }
+        if saw_erased { break; }
     }
-    assert!(saw_running, "should have observed Running state");
-    assert!(saw_command_issued, "should have observed CommandIssued event");
-    assert!(saw_completed, "should have observed Completed state");
+    assert!(saw_inprogress, "should have observed outer InProgress transition");
+    assert!(saw_inner_running, "should have observed inner Running transition");
+    assert!(saw_command_issued, "should have observed CommandIssued update");
+    assert!(saw_verification_activity, "should have observed a Verification activity");
+    assert!(saw_erased, "should have observed outer Erased disposition");
 }

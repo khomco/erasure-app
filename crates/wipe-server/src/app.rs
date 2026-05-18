@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use wipe_cert::{SignedCertificate, SigningKey};
-use wipe_engine::{DeviceBackend, JobRunner};
+use wipe_engine::{DeviceBackend, JobBroadcast, JobRunner};
 use wipe_fleet::FleetService;
 
 use crate::handlers;
@@ -25,6 +25,7 @@ pub struct AppState {
     pub fleet: Option<Arc<FleetService>>,
     pub signing_key: Arc<SigningKey>,
     pub certs: Arc<RwLock<HashMap<Uuid, SignedCertificate>>>,
+    pub manifests: Arc<RwLock<HashMap<Uuid, wipe_common::DestructionManifest>>>,
     pub tool_version: String,
     /// Directory containing the built frontend (`index.html` + `assets/`).
     /// When set, the server serves the SPA at `/` with HTML5 history fallback.
@@ -52,6 +53,7 @@ impl AppState {
             fleet,
             signing_key,
             certs: Arc::new(RwLock::new(HashMap::new())),
+            manifests: Arc::new(RwLock::new(HashMap::new())),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             static_dir,
         };
@@ -59,24 +61,31 @@ impl AppState {
         state
     }
 
-    /// Watches the job runner's broadcast channel; on Completed, generates +
-    /// signs a Certificate and stashes it for later retrieval.
+    /// Watches the job runner's broadcast channel. On `Erased`, generates +
+    /// signs a Certificate. On `PendingCoSign` we generate the cert and
+    /// hold it; the supervisor co-signature is attached when the linked
+    /// manifest is signed (see `handlers::cosign_manifest`).
     fn spawn_cert_generator(&self) {
         let mut rx = self.runner.subscribe();
         let state = self.clone();
         tokio::spawn(async move {
-            while let Ok(update) = rx.recv().await {
-                let is_completed = matches!(
-                    update.event.event,
-                    wipe_common::JobUpdateKind::StateChanged {
-                        to: wipe_common::JobState::Completed,
-                        ..
-                    }
+            while let Ok(b) = rx.recv().await {
+                let (job_id, new_state) = match b {
+                    JobBroadcast::JobStateChanged { job_id, to, .. } => (job_id, to),
+                    _ => continue,
+                };
+                let needs_cert = matches!(
+                    new_state,
+                    wipe_common::JobState::Erased | wipe_common::JobState::PendingCoSign
                 );
-                if !is_completed {
+                if !needs_cert {
                     continue;
                 }
-                let Some(job) = state.runner.get(update.job_id) else {
+                let Some(job) = state.runner.get(job_id) else {
+                    continue;
+                };
+                let Some(device) = job.latest_erasure().map(|e| e.device_snapshot.clone()) else {
+                    tracing::warn!(%job_id, "no erasure activity; skipping cert generation");
                     continue;
                 };
                 let issuer = wipe_cert::CertIssuer {
@@ -86,27 +95,38 @@ impl AppState {
                 };
                 let validation = wipe_cert::ValidationBlock {
                     validated: false,
-                    media_class: job.device_snapshot.media_type.class_label().into(),
+                    media_class: device.media_type.class_label().into(),
                     validation_ref: None,
                     validation_expires: None,
                 };
                 let media_status = wipe_cert::MediaStatus {
-                    operational: true,
+                    operational: !matches!(new_state, wipe_common::JobState::PendingCoSign),
                     damaged: false,
                     notes: None,
                 };
+                // For PendingCoSign we temporarily synthesize a Destroyed
+                // disposition on the cert so the document is meaningful;
+                // the manifest cosign flow finalises the Job to Destroyed.
+                let mut job_for_cert = job.clone();
+                if new_state == wipe_common::JobState::PendingCoSign {
+                    job_for_cert.state = wipe_common::JobState::Destroyed;
+                    if job_for_cert.ended_at.is_none() {
+                        job_for_cert.ended_at = Some(time::OffsetDateTime::now_utc());
+                    }
+                }
                 let Some(cert) =
-                    wipe_cert::Certificate::from_job(&job, issuer, validation, media_status)
+                    wipe_cert::Certificate::from_job(&job_for_cert, issuer, validation, media_status)
                 else {
+                    tracing::warn!(%job_id, "Certificate::from_job returned None");
                     continue;
                 };
                 match wipe_cert::sign(cert, &state.signing_key) {
                     Ok(signed) => {
-                        info!(job_id = %update.job_id, "certificate signed and stored");
-                        state.certs.write().insert(update.job_id, signed);
+                        info!(%job_id, ?new_state, "certificate signed and stored");
+                        state.certs.write().insert(job_id, signed);
                     }
                     Err(e) => {
-                        tracing::error!(?e, job_id = %update.job_id, "failed to sign cert");
+                        tracing::error!(?e, %job_id, "failed to sign cert");
                     }
                 }
             }
@@ -130,7 +150,20 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/:id", get(handlers::get_job))
         .route("/api/jobs/:id/start", post(handlers::start_job))
         .route("/api/jobs/:id/abort", post(handlers::abort_job))
+        .route(
+            "/api/jobs/:id/escalate-to-destroy",
+            post(handlers::escalate_to_destroy),
+        )
         .route("/api/jobs/:id/certificate", get(handlers::get_certificate))
+        .route(
+            "/api/manifests",
+            get(handlers::list_manifests).post(handlers::create_manifest),
+        )
+        .route("/api/manifests/:id", get(handlers::get_manifest))
+        .route(
+            "/api/manifests/:id/cosign",
+            post(handlers::cosign_manifest),
+        )
         .route("/api/events", get(ws::ws_events));
 
     // Mount static frontend at `/` if a dist directory is configured.
@@ -170,7 +203,8 @@ or build the frontend and rerun:</p>
 <pre><code>cd apps/desktop &amp;&amp; pnpm install &amp;&amp; pnpm build
 wipestation serve --static-dir apps/desktop/dist</code></pre>
 <p>API routes are at <code>/api/health</code>, <code>/api/devices</code>,
-<code>/api/jobs</code>, <code>/api/events</code> (WebSocket), and friends.</p>
+<code>/api/jobs</code>, <code>/api/manifests</code>, <code>/api/events</code>
+(WebSocket), and friends.</p>
 </body></html>"#;
     axum::response::Html(body)
 }
