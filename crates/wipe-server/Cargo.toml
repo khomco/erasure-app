@@ -1,0 +1,32 @@
+[package]
+name = "wipe-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wipe-common = { path = "../wipe-common" }
+wipe-engine = { path = "../wipe-engine" }
+wipe-engine-mock = { path = "../wipe-engine-mock" }
+wipe-cert = { path = "../wipe-cert" }
+wipe-fleet = { path = "../wipe-fleet" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+parking_lot = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = "0.24"
+base64 = { workspace = true }

@@ -1,0 +1,23 @@
+[package]
+name = "wipe-cert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+wipe-engine = { path = "../wipe-engine" }
+wipe-engine-mock = { path = "../wipe-engine-mock" }
+tokio = { workspace = true }
+
+[dependencies]
+wipe-common = { path = "../wipe-common" }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+rand_core = { workspace = true }

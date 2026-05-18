@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition;
+    @apply disabled:opacity-50 disabled:pointer-events-none;
+  }
+  .btn-primary {
+    @apply bg-indigo-500 hover:bg-indigo-400 text-white;
+  }
+  .btn-ghost {
+    @apply text-slate-300 hover:bg-slate-800;
+  }
+  .btn-danger {
+    @apply bg-rose-600 hover:bg-rose-500 text-white;
+  }
+  .card {
+    @apply rounded-lg border border-slate-800 bg-slate-900/60 p-4;
+  }
+  .pill {
+    @apply inline-flex items-center gap-1 rounded-full border border-slate-700 bg-slate-800/60 px-2 py-0.5 text-xs font-medium;
+  }
+  .pill-success {
+    @apply border-emerald-700 bg-emerald-900/40 text-emerald-300;
+  }
+  .pill-warning {
+    @apply border-amber-700 bg-amber-900/40 text-amber-200;
+  }
+  .pill-danger {
+    @apply border-rose-700 bg-rose-900/40 text-rose-200;
+  }
+  .pill-info {
+    @apply border-indigo-700 bg-indigo-900/40 text-indigo-200;
+  }
+  .field {
+    @apply block w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm placeholder-slate-500 focus:border-indigo-500 focus:outline-none;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400;
+  }
+}
