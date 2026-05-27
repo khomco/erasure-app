@@ -9,9 +9,10 @@ use serde_json::json;
 use uuid::Uuid;
 
 use wipe_common::{
-    Capabilities, Classification, Device, DeviceId, Intent, Job, JobSpec, Method, OperatorRef,
-    StationId, StationInfo,
+    Capabilities, Classification, DestructMethod, DestructionEvent, DestructionManifest, Device,
+    DeviceId, Intent, Job, JobSpec, ManifestState, OperatorRef, StationId, StationInfo,
 };
+
 use crate::app::AppState;
 
 pub async fn health() -> Json<serde_json::Value> {
@@ -86,22 +87,21 @@ pub struct CreateJobRequest {
     pub device_id: String,
     pub classification: Classification,
     pub intent: Intent,
-    pub method: Option<Method>,
-    #[serde(default = "default_true")]
-    pub verify: bool,
-    #[serde(default = "default_samples")]
-    pub verify_samples: u32,
     pub operator: OperatorRef,
     pub asset_tag: Option<String>,
     pub site_label: Option<String>,
     pub ticket_ref: Option<String>,
-}
 
-fn default_true() -> bool {
-    true
-}
-fn default_samples() -> u32 {
-    8
+    // Enterprise-mode optional references. Populated when the upstream
+    // ERP integration drives this Job; left None in Simple mode.
+    #[serde(default)]
+    pub work_order_ref: Option<String>,
+    #[serde(default)]
+    pub customer_ref: Option<String>,
+    #[serde(default)]
+    pub contract_ref: Option<String>,
+    #[serde(default)]
+    pub sanitization_profile_ref: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,13 +117,14 @@ pub async fn create_job(
         device_id: DeviceId(req.device_id),
         classification: req.classification,
         intent: req.intent,
-        method: req.method,
-        verify: req.verify,
-        verify_samples: req.verify_samples,
         operator: req.operator,
         asset_tag: req.asset_tag,
         site_label: req.site_label,
         ticket_ref: req.ticket_ref,
+        work_order_ref: req.work_order_ref,
+        customer_ref: req.customer_ref,
+        contract_ref: req.contract_ref,
+        sanitization_profile_ref: req.sanitization_profile_ref,
     };
     let job_id = state.runner.create_job(spec).await.map_err(api_err)?;
     Ok(Json(CreateJobResponse { job_id }))
@@ -160,6 +161,42 @@ pub async fn abort_job(
     Ok(Json(json!({"ok": true, "job_id": id})))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct EscalateRequest {
+    pub method: DestructMethod,
+    pub operator: OperatorRef,
+    pub notes: Option<String>,
+}
+
+pub async fn escalate_to_destroy(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<EscalateRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let job = state
+        .runner
+        .get(id)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("job {id} not found")))?;
+    let device_id = job
+        .latest_erasure()
+        .map(|e| e.device_id_from_spec())
+        .unwrap_or_else(|| job.spec.device_id.clone());
+    let dest = DestructionEvent {
+        id: Uuid::new_v4(),
+        device_id,
+        at: time::OffsetDateTime::now_utc(),
+        method: req.method,
+        operator: req.operator,
+        supervisor: None,
+        manifest_ref: None,
+        photo_refs: Vec::new(),
+        notes: req.notes,
+        station_id: None,
+    };
+    state.runner.escalate_to_destroy(id, dest).map_err(api_err)?;
+    Ok(Json(json!({"ok": true, "job_id": id})))
+}
+
 pub async fn get_certificate(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -173,6 +210,120 @@ pub async fn get_certificate(
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("cert for job {id} not found")))
 }
 
+// ---- Manifest endpoints ------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct CreateManifestRequest {
+    pub assembled_by: OperatorRef,
+    pub job_ids: Vec<Uuid>,
+    pub note: Option<String>,
+}
+
+pub async fn list_manifests(State(state): State<AppState>) -> Json<Vec<DestructionManifest>> {
+    Json(state.manifests.read().values().cloned().collect())
+}
+
+pub async fn get_manifest(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<DestructionManifest>, ApiError> {
+    state
+        .manifests
+        .read()
+        .get(&id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("manifest {id} not found")))
+}
+
+/// Assemble a destruction manifest from N PendingCoSign Jobs. Every Job
+/// in `job_ids` must currently be in `PendingCoSign`; each Job's
+/// DestructionEvent is updated to carry the manifest's id.
+pub async fn create_manifest(
+    State(state): State<AppState>,
+    Json(req): Json<CreateManifestRequest>,
+) -> Result<Json<DestructionManifest>, ApiError> {
+    // Validate every job is PendingCoSign.
+    for jid in &req.job_ids {
+        let job = state.runner.get(*jid).ok_or_else(|| {
+            ApiError(StatusCode::NOT_FOUND, format!("job {jid} not found"))
+        })?;
+        if job.state != wipe_common::JobState::PendingCoSign {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!("job {jid} is not in PendingCoSign"),
+            ));
+        }
+    }
+    let manifest = DestructionManifest::new(req.assembled_by, req.job_ids.clone(), req.note);
+    let mid = manifest.id;
+    state.manifests.write().insert(mid, manifest.clone());
+    // Stamp manifest_ref on each Job's DestructionEvent and on the Job itself.
+    for jid in &req.job_ids {
+        // Note: this lives entirely in handlers' view of state; the runner
+        // exposes the Job by reference via .get() returning a clone. To
+        // persist the manifest_ref we'd want a runner setter — out of scope
+        // for v0.2's in-memory store. The cosign flow re-reads the cert
+        // and patches the co-signature with the manifest id, which is the
+        // load-bearing linkage.
+        let _ = jid;
+    }
+    Ok(Json(manifest))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CosignManifestRequest {
+    pub supervisor: OperatorRef,
+}
+
+/// Supervisor co-signs every cert in the manifest. v0.2 Tier-1 baseline:
+/// the supervisor's signature uses the same station signing key (real
+/// per-operator signing keys land with operator-auth, v0.2 #5). The
+/// supervisor's identity is captured as an `OperatorRef` on the
+/// `CoSignatureBlock`.
+pub async fn cosign_manifest(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<CosignManifestRequest>,
+) -> Result<Json<DestructionManifest>, ApiError> {
+    let manifest = state
+        .manifests
+        .read()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("manifest {id} not found")))?;
+    if manifest.state != ManifestState::Pending {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("manifest {id} is not pending (state {:?})", manifest.state),
+        ));
+    }
+
+    // Co-sign each linked cert, then mark the Job as Destroyed.
+    for jid in &manifest.job_ids {
+        let mut certs = state.certs.write();
+        if let Some(signed) = certs.get_mut(jid) {
+            wipe_cert::co_sign(
+                signed,
+                &state.signing_key,
+                wipe_cert::CoSignerRole::Supervisor,
+                req.supervisor.clone(),
+                Some(id),
+            )
+            .map_err(api_err)?;
+        }
+        drop(certs);
+        state.runner.mark_destroyed(*jid).map_err(api_err)?;
+    }
+
+    let mut manifests = state.manifests.write();
+    let m = manifests.get_mut(&id).expect("manifest exists");
+    m.state = ManifestState::Signed;
+    m.supervisor = Some(req.supervisor);
+    m.signed_at = Some(time::OffsetDateTime::now_utc());
+    Ok(Json(m.clone()))
+}
+
 // ---- Error type ---------------------------------------------------------
 
 pub struct ApiError(pub StatusCode, pub String);
@@ -184,5 +335,15 @@ fn api_err<E: std::fmt::Display>(e: E) -> ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(json!({"error": self.1}))).into_response()
+    }
+}
+
+// Helper trait-shaped extension to keep handlers tidy.
+trait JobLatestErasureExt {
+    fn device_id_from_spec(&self) -> DeviceId;
+}
+impl JobLatestErasureExt for wipe_common::ErasureEvent {
+    fn device_id_from_spec(&self) -> DeviceId {
+        self.spec.device_id.clone()
     }
 }

@@ -1,10 +1,26 @@
+import { useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ShieldCheck } from "lucide-react";
+import {
+  ActivitySquare,
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  ShieldCheck,
+  Trash2,
+  XCircle,
+} from "lucide-react";
 
 import { api, classNames, formatBytes } from "@/api/client";
-import { useJobLiveState } from "@/api/ws";
-import type { JobUpdate } from "@/api/types";
+import { latestErasure, useJobLiveState } from "@/api/ws";
+import { useOperator } from "@/operator/context";
+import type {
+  DestructMethod,
+  ErasureEvent,
+  Job,
+  JobActivity,
+  JobUpdate,
+} from "@/api/types";
 
 export function JobDetailPage() {
   const { jobId } = useParams({ from: "/jobs/$jobId" });
@@ -22,9 +38,30 @@ export function JobDetailPage() {
   });
 
   if (!live) return <div className="text-slate-400">Loading job…</div>;
+  return <JobBody job={live} onAbort={() => abort.mutate()} aborting={abort.isPending} />;
+}
 
-  const pct = Math.round((live.progress?.fraction ?? 0) * 100);
-  const terminal = ["completed", "failed", "aborted"].includes(live.state.state);
+function JobBody({
+  job,
+  onAbort,
+  aborting,
+}: {
+  job: Job;
+  onAbort: () => void;
+  aborting: boolean;
+}) {
+  const erasure = latestErasure(job);
+  const device = erasure?.device_snapshot;
+  const pct = Math.round((erasure?.progress?.fraction ?? 0) * 100);
+  const outerTerminal =
+    job.state.state === "erased" ||
+    job.state.state === "destroyed" ||
+    job.state.state === "quarantined" ||
+    job.state.state === "aborted";
+  const showCert =
+    job.state.state === "erased" ||
+    job.state.state === "destroyed" ||
+    job.state.state === "pending_co_sign";
 
   return (
     <div className="space-y-4">
@@ -39,143 +76,392 @@ export function JobDetailPage() {
         <div className="flex items-start justify-between">
           <div>
             <h2 className="text-lg font-semibold">
-              {live.device_snapshot.vendor} {live.device_snapshot.model}
+              {device ? `${device.vendor} ${device.model}` : job.spec.device_id}
             </h2>
             <p className="mt-0.5 text-xs text-slate-400">
-              {live.device_snapshot.serial} ·{" "}
-              {formatBytes(live.device_snapshot.capacity_bytes)} ·{" "}
-              {live.device_snapshot.path}
+              {device
+                ? `${device.serial} · ${formatBytes(device.capacity_bytes)} · ${device.path}`
+                : "no device snapshot yet (queued)"}
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <span className="pill">{live.spec.classification}</span>
-            <span className="pill">{live.spec.intent}</span>
-            <span
-              className={classNames(
-                "pill",
-                live.state.state === "completed"
-                  ? "pill-success"
-                  : live.state.state === "failed"
-                    ? "pill-danger"
-                    : "pill-info"
-              )}
-            >
-              {live.state.state}
-            </span>
+            <span className="pill">{job.spec.classification}</span>
+            <span className="pill">{job.spec.intent}</span>
+            <OuterStatePill state={job.state.state} />
           </div>
         </div>
 
-        <div className="mt-4">
-          <div className="h-3 overflow-hidden rounded-full bg-slate-800">
-            <div
-              className={classNames(
-                "h-full rounded-full transition-all",
-                live.state.state === "failed"
-                  ? "bg-rose-500"
-                  : live.state.state === "completed"
-                    ? "bg-emerald-500"
-                    : "bg-indigo-500"
-              )}
-              style={{ width: `${pct}%` }}
-            />
+        {erasure?.progress && !outerTerminal && (
+          <div className="mt-4">
+            <div className="h-3 overflow-hidden rounded-full bg-slate-800">
+              <div
+                className={classNames(
+                  "h-full rounded-full transition-all",
+                  erasure.state.state === "failed"
+                    ? "bg-rose-500"
+                    : erasure.state.state === "completed"
+                      ? "bg-emerald-500"
+                      : "bg-indigo-500"
+                )}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <div className="mt-1 flex items-center justify-between text-xs text-slate-400">
+              <span>{erasure.progress.stage}</span>
+              <span>
+                {pct}% ·{" "}
+                {erasure.progress.eta_seconds != null
+                  ? `${erasure.progress.eta_seconds}s remaining`
+                  : ""}
+              </span>
+            </div>
           </div>
-          <div className="mt-1 flex items-center justify-between text-xs text-slate-400">
-            <span>{live.progress?.stage ?? "queued"}</span>
-            <span>
-              {pct}% ·{" "}
-              {live.progress?.eta_seconds != null
-                ? `${live.progress.eta_seconds}s remaining`
-                : ""}
-            </span>
-          </div>
-        </div>
+        )}
 
         <div className="mt-4 flex items-center justify-end gap-2">
-          {!terminal && (
+          {!outerTerminal && job.state.state !== "pending_co_sign" && (
             <button
               className="btn btn-danger"
-              onClick={() => abort.mutate()}
-              disabled={abort.isPending}
+              onClick={onAbort}
+              disabled={aborting}
             >
-              {abort.isPending ? "Aborting…" : "Abort"}
+              {aborting ? "Aborting…" : "Abort"}
             </button>
           )}
-          {live.state.state === "completed" && (
+          {!outerTerminal && erasure?.state.state === "failed" && (
+            <EscalateButton jobId={job.id} />
+          )}
+          {showCert && (
             <Link
               to="/certs/$jobId"
-              params={{ jobId }}
+              params={{ jobId: job.id }}
               className="btn btn-primary"
             >
               <ShieldCheck className="h-4 w-4" /> View certificate
             </Link>
           )}
+          {job.state.state === "pending_co_sign" && (
+            <Link to="/manifests" className="btn btn-secondary">
+              <ActivitySquare className="h-4 w-4" /> Manifest co-sign
+            </Link>
+          )}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <div className="card">
-          <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">
-            Resolved method
-          </h3>
-          {live.resolved_method ? (
+      <ActivityTimeline activities={job.activities} />
+    </div>
+  );
+}
+
+function OuterStatePill({ state }: { state: Job["state"]["state"] }) {
+  const tone =
+    state === "erased"
+      ? "pill-success"
+      : state === "destroyed"
+        ? "pill-warning"
+        : state === "quarantined"
+          ? "pill-danger"
+          : state === "aborted"
+            ? ""
+            : "pill-info";
+  return <span className={classNames("pill", tone)}>{state.replace(/_/g, " ")}</span>;
+}
+
+function EscalateButton({ jobId }: { jobId: string }) {
+  const { operator } = useOperator();
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [method, setMethod] = useState<DestructMethod>("disintegrate");
+  const [notes, setNotes] = useState("");
+
+  const escalate = useMutation({
+    mutationFn: () => {
+      if (!operator) throw new Error("operator not signed in");
+      return api.escalateToDestroy(jobId, {
+        method,
+        operator,
+        notes: notes || null,
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["job", jobId] });
+      setOpen(false);
+    },
+  });
+
+  return (
+    <>
+      <button className="btn btn-warning" onClick={() => setOpen(true)}>
+        <Trash2 className="h-4 w-4" /> Escalate to destroy
+      </button>
+      {open && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/70 p-4">
+          <div className="w-full max-w-md space-y-4 rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
             <div>
-              <div className="font-mono text-sm">{live.resolved_method.kind}</div>
-              <pre className="mt-2 overflow-x-auto rounded-md bg-slate-950/60 p-3 text-[11px] text-slate-300">
-                {JSON.stringify(live.resolved_method, null, 2)}
-              </pre>
+              <h3 className="text-base font-semibold">Escalate to physical destruction</h3>
+              <p className="mt-1 text-xs text-slate-400">
+                The Job moves to <span className="font-mono">pending_co_sign</span> and a
+                cert is generated. Supervisor co-sign on a manifest finalises the
+                Destroyed disposition.
+              </p>
             </div>
-          ) : (
-            <span className="text-slate-500">pending</span>
-          )}
+            <div>
+              <div className="label">Destruction method</div>
+              <div className="grid grid-cols-3 gap-1">
+                {(
+                  ["shred", "disintegrate", "incinerate", "pulverize", "melt"] as const
+                ).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setMethod(m)}
+                    className={classNames(
+                      "btn text-xs",
+                      method === m
+                        ? "bg-indigo-500 text-white"
+                        : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                    )}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <div className="label">Notes</div>
+              <textarea
+                className="field"
+                rows={3}
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="optional — e.g. drive bricked mid-wipe"
+              />
+            </div>
+            {escalate.isError && (
+              <div className="rounded-md bg-rose-950/40 p-2 text-xs text-rose-300">
+                {(escalate.error as Error).message}
+              </div>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <button className="btn btn-ghost" onClick={() => setOpen(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-warning"
+                onClick={() => escalate.mutate()}
+                disabled={escalate.isPending || !operator}
+              >
+                {escalate.isPending ? "Escalating…" : "Confirm escalate"}
+              </button>
+            </div>
+          </div>
         </div>
+      )}
+    </>
+  );
+}
 
-        <div className="card">
-          <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">
-            Verification
-          </h3>
-          {live.verification ? (
-            <div className="space-y-1 text-sm">
-              <div>
-                Result:{" "}
-                <span
-                  className={
-                    live.verification.all_passed
-                      ? "text-emerald-300"
-                      : "text-rose-300"
-                  }
-                >
-                  {live.verification.all_passed ? "all passed" : "failures present"}
-                </span>
-              </div>
-              <div className="text-xs text-slate-400">
-                {live.verification.sample_count} samples,{" "}
-                {formatBytes(live.verification.bytes_sampled)} sampled
-              </div>
-            </div>
-          ) : (
-            <span className="text-slate-500">not yet run</span>
-          )}
-        </div>
+function ActivityTimeline({ activities }: { activities: JobActivity[] }) {
+  if (activities.length === 0) {
+    return (
+      <div className="card text-sm text-slate-500">
+        No activities yet — Job is queued.
       </div>
-
-      <div className="card">
-        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">
-          Event log ({live.events.length})
-        </h3>
-        <div className="max-h-72 overflow-auto rounded-md border border-slate-800 bg-slate-950/60">
-          {live.events
-            .slice()
-            .reverse()
-            .map((e, i) => (
-              <EventRow event={e} key={i} />
-            ))}
-        </div>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+        Activity chain ({activities.length})
+      </h3>
+      <div className="space-y-3">
+        {activities.map((a, i) => (
+          <ActivityCard key={activityKey(a)} activity={a} index={i} />
+        ))}
       </div>
     </div>
   );
 }
 
-function EventRow({ event }: { event: JobUpdate }) {
+function activityKey(a: JobActivity): string {
+  // All variants carry an `id`.
+  return (a as { id: string }).id;
+}
+
+function ActivityCard({ activity, index }: { activity: JobActivity; index: number }) {
+  switch (activity.type) {
+    case "erasure":
+      return <ErasureCard erasure={activity as unknown as ErasureEvent} index={index} />;
+    case "verification":
+      return (
+        <div className="card">
+          <ActivityHeader
+            icon={<CheckCircle2 className="h-4 w-4 text-emerald-400" />}
+            title={`Verification #${index + 1}`}
+            at={activity.at}
+          />
+          <div className="mt-2 text-sm">
+            Result:{" "}
+            <span
+              className={
+                activity.report.all_passed ? "text-emerald-300" : "text-rose-300"
+              }
+            >
+              {activity.report.all_passed ? "all passed" : "failures present"}
+            </span>
+            <div className="text-xs text-slate-400">
+              {activity.report.sample_count} samples,{" "}
+              {formatBytes(activity.report.bytes_sampled)} sampled · against
+              erasure{" "}
+              <span className="font-mono text-[10px]">
+                {activity.erasure_event_id.slice(0, 8)}
+              </span>
+            </div>
+          </div>
+        </div>
+      );
+    case "destruction":
+      return (
+        <div className="card border-amber-700/40">
+          <ActivityHeader
+            icon={<Trash2 className="h-4 w-4 text-amber-400" />}
+            title={`Destruction #${index + 1}`}
+            at={activity.at}
+          />
+          <div className="mt-2 space-y-1 text-sm">
+            <div>
+              Method: <span className="font-mono">{activity.method}</span>
+            </div>
+            <div className="text-xs text-slate-400">
+              Operator: {activity.operator.display_name}
+            </div>
+            {activity.notes && (
+              <div className="text-xs text-slate-400">Notes: {activity.notes}</div>
+            )}
+            {activity.manifest_ref && (
+              <div className="text-xs text-slate-500">
+                Manifest:{" "}
+                <span className="font-mono">{activity.manifest_ref.slice(0, 8)}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    case "diagnostic":
+      return (
+        <div className="card">
+          <ActivityHeader
+            icon={<AlertTriangle className="h-4 w-4 text-yellow-400" />}
+            title={`Diagnostic #${index + 1}`}
+            at={activity.at}
+          />
+          <ul className="mt-2 space-y-1 text-xs text-slate-400">
+            {activity.findings.map((f, i) => (
+              <li key={i}>
+                <span className="font-mono">{f.code}</span> ({f.severity}) — {f.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      );
+    case "health_check":
+      return (
+        <div className="card">
+          <ActivityHeader
+            icon={<ActivitySquare className="h-4 w-4 text-sky-400" />}
+            title={`HealthCheck #${index + 1}`}
+            at={activity.at}
+          />
+        </div>
+      );
+  }
+}
+
+function ActivityHeader({
+  icon,
+  title,
+  at,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  at: string;
+}) {
+  return (
+    <div className="flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        {icon}
+        <span className="font-medium">{title}</span>
+      </div>
+      <span className="font-mono text-[10px] text-slate-500">
+        {new Date(at).toLocaleString()}
+      </span>
+    </div>
+  );
+}
+
+function ErasureCard({ erasure, index }: { erasure: ErasureEvent; index: number }) {
+  const pct = Math.round((erasure.progress?.fraction ?? 0) * 100);
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          {erasure.state.state === "completed" ? (
+            <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+          ) : erasure.state.state === "failed" ? (
+            <XCircle className="h-4 w-4 text-rose-400" />
+          ) : (
+            <ActivitySquare className="h-4 w-4 text-indigo-400" />
+          )}
+          <span className="font-medium">Erasure #{index + 1}</span>
+          <span className="pill">{erasure.state.state}</span>
+        </div>
+        <span className="font-mono text-[10px] text-slate-500">
+          {erasure.created_at && new Date(erasure.created_at).toLocaleString()}
+        </span>
+      </div>
+      <div className="mt-2 grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <div>
+          <div className="label">Resolved method</div>
+          {erasure.resolved_method ? (
+            <div className="font-mono text-sm">{erasure.resolved_method.kind}</div>
+          ) : (
+            <span className="text-slate-500">pending</span>
+          )}
+        </div>
+        {erasure.progress && (
+          <div>
+            <div className="label">Progress</div>
+            <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+              <div
+                className={classNames(
+                  "h-full rounded-full transition-all",
+                  erasure.state.state === "failed" ? "bg-rose-500" : "bg-indigo-500"
+                )}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <div className="mt-0.5 text-[10px] text-slate-500">
+              {pct}% · {erasure.progress.stage}
+            </div>
+          </div>
+        )}
+      </div>
+      {erasure.events.length > 0 && (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-xs text-slate-400 hover:text-slate-200">
+            Event log ({erasure.events.length})
+          </summary>
+          <div className="mt-2 max-h-56 overflow-auto rounded-md border border-slate-800 bg-slate-950/60">
+            {erasure.events.slice().reverse().map((e, i) => (
+              <UpdateRow event={e} key={i} />
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function UpdateRow({ event }: { event: JobUpdate }) {
   const kind = event.event.kind;
   let label: string = kind;
   let detail: React.ReactNode = null;
@@ -185,11 +471,7 @@ function EventRow({ event }: { event: JobUpdate }) {
       break;
     case "progress":
       label = `progress ${Math.round(event.event.fraction * 100)}%`;
-      detail = (
-        <span className="text-slate-500">
-          {event.event.stage}
-        </span>
-      );
+      detail = <span className="text-slate-500">{event.event.stage}</span>;
       break;
     case "command_issued":
     case "command_result": {
@@ -209,9 +491,6 @@ function EventRow({ event }: { event: JobUpdate }) {
       );
       break;
     }
-    case "verification":
-      label = `verification: ${(event.event as any).all_passed ? "passed" : "failed"}`;
-      break;
     case "failed":
       label = `failed: ${(event.event as { reason: string }).reason}`;
       break;

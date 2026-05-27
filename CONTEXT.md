@@ -561,7 +561,19 @@ In rough priority order for v0.2 and beyond:
    the runner. Single biggest model shift in v0.2 — sequencing
    matters: this lands *before* the Enterprise data model so the
    schema picks up the new shape from day one.
-3. **Enterprise data model — Customer + Contract + WorkOrder + Asset
+3. **At-a-glance bench status on Devices page** *(queued next after
+   ADR-0001 lands)* — overlay each Device card with its current Job's
+   status (in-flight progress · Erased · Failed · PendingCoSign ·
+   Destroyed), color-coded for cross-room scanning, with a "safe to
+   disconnect" affordance on Erased and a warning affordance on
+   Failed. Closes the multi-drive walk-away workflow gap: operators
+   load N drives, walk away for hours, and need to know at a glance
+   which drives are done, which need attention, and which slots are
+   free for fresh intake. Pure frontend wiring — joins `/api/devices`
+   against `/api/jobs` by `device_id`; no schema or backend changes.
+   Re-plug-after-wipe shows prior result *and* explicit "Start new
+   Job" affordance so the operator can choose to re-wipe.
+4. **Enterprise data model — Customer + Contract + WorkOrder + Asset
    + SanitizationProfile** — closes the FIPS 199 gap in §8. Backed by
    SQLite (Enterprise mode only; Simple mode stays schemaless beyond
    Jobs/Certs). WorkOrder identifier shared with the ITAD's ERP via
@@ -569,19 +581,19 @@ In rough priority order for v0.2 and beyond:
    WorkOrder" not "pick classification." Policy inherited via
    WorkOrder → Contract → Default chain. Profiles decoupled from
    Customer (globally owned by the ITAD).
-4. **ITAD-ERP integration tier-zero** — REST in (ERP pushes
+5. **ITAD-ERP integration tier-zero** — REST in (ERP pushes
    Customer/Contract/WorkOrder/Asset records), REST out (ERP queries
    Jobs/Certs by id), webhooks on Job state transitions and cert
    signing, asset-id lookup callbacks for inline classification fetch.
    Differentiator §3 #4; not a Tier-2 cloud feature.
-5. **Operator authentication** — replace localStorage with a real
+6. **Operator authentication** — replace localStorage with a real
    auth call. YubiKey/PIV at the supervisor desk is the headline
    path; OIDC/SAML for cloud tier.
-6. **RBAC** — roles: `loader`, `operator`, `supervisor`, `auditor`.
+7. **RBAC** — roles: `loader`, `operator`, `supervisor`, `auditor`.
    Every action attributed; some actions require supervisor co-sign.
-7. **License token verification** — vendor-signed tokens, embedded
+8. **License token verification** — vendor-signed tokens, embedded
    verifier public key, per-success accounting persisted.
-8. **PDF/A-3 cert wrapping** — JSON-LD inside, human-readable PDF
+9. **PDF/A-3 cert wrapping** — JSON-LD inside, human-readable PDF
    outside, single attestation artifact.
 
 ### v0.3 / beyond

@@ -5,6 +5,7 @@
 
 pub mod device;
 pub mod method;
+pub mod erasure_event;
 pub mod job;
 pub mod evidence;
 pub mod operator;
@@ -14,6 +15,7 @@ pub(crate) mod serde_hex_opt;
 
 pub use device::*;
 pub use method::*;
+pub use erasure_event::*;
 pub use job::*;
 pub use evidence::*;
 pub use operator::*;

@@ -1,8 +1,11 @@
 import type {
   Capabilities,
+  DestructMethod,
+  DestructionManifest,
   Device,
   Job,
   JobSpec,
+  OperatorRef,
   PublicKeyResponse,
   SignedCertificate,
   StationInfo,
@@ -27,6 +30,32 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   return resp.json() as Promise<T>;
 }
 
+export interface CreateJobRequest {
+  device_id: string;
+  classification: JobSpec["classification"];
+  intent: JobSpec["intent"];
+  operator: OperatorRef;
+  asset_tag?: string | null;
+  site_label?: string | null;
+  ticket_ref?: string | null;
+  work_order_ref?: string | null;
+  customer_ref?: string | null;
+  contract_ref?: string | null;
+  sanitization_profile_ref?: string | null;
+}
+
+export interface EscalateRequest {
+  method: DestructMethod;
+  operator: OperatorRef;
+  notes?: string | null;
+}
+
+export interface CreateManifestRequest {
+  assembled_by: OperatorRef;
+  job_ids: string[];
+  note?: string | null;
+}
+
 export const api = {
   health: () => jsonFetch<{ ok: boolean }>("/api/health"),
   station: () => jsonFetch<StationInfo>("/api/station"),
@@ -38,7 +67,7 @@ export const api = {
     jsonFetch<Capabilities>(`/api/devices/${encodeURIComponent(id)}/capabilities`),
   jobs: () => jsonFetch<Job[]>("/api/jobs"),
   job: (id: string) => jsonFetch<Job>(`/api/jobs/${id}`),
-  createJob: (spec: Omit<JobSpec, "method"> & { method?: JobSpec["method"] }) =>
+  createJob: (spec: CreateJobRequest) =>
     jsonFetch<{ job_id: string }>("/api/jobs", {
       method: "POST",
       body: JSON.stringify(spec),
@@ -47,8 +76,25 @@ export const api = {
     jsonFetch<{ ok: boolean }>(`/api/jobs/${id}/start`, { method: "POST" }),
   abortJob: (id: string) =>
     jsonFetch<{ ok: boolean }>(`/api/jobs/${id}/abort`, { method: "POST" }),
+  escalateToDestroy: (id: string, body: EscalateRequest) =>
+    jsonFetch<{ ok: boolean }>(`/api/jobs/${id}/escalate-to-destroy`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   certificate: (id: string) =>
     jsonFetch<SignedCertificate>(`/api/jobs/${id}/certificate`),
+  manifests: () => jsonFetch<DestructionManifest[]>("/api/manifests"),
+  manifest: (id: string) => jsonFetch<DestructionManifest>(`/api/manifests/${id}`),
+  createManifest: (body: CreateManifestRequest) =>
+    jsonFetch<DestructionManifest>("/api/manifests", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  cosignManifest: (id: string, supervisor: OperatorRef) =>
+    jsonFetch<DestructionManifest>(`/api/manifests/${id}/cosign`, {
+      method: "POST",
+      body: JSON.stringify({ supervisor }),
+    }),
 };
 
 export function formatBytes(n: number): string {

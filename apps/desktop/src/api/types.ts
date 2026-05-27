@@ -1,4 +1,8 @@
 // Mirrors the serde-serialized shapes from wipe-common. Keep in sync.
+//
+// Per ADR-0001 (v0.2): the outer `Job` is the outcome-bearing unit that
+// composes typed activities; the v0.1 `Job` (one attempted erasure) is
+// now `ErasureEvent`.
 
 export type Classification = "low" | "moderate" | "high";
 export type Intent = "reuse" | "recycle" | "destroy";
@@ -62,6 +66,13 @@ export interface Capabilities {
   frozen: boolean;
 }
 
+export type DestructMethod =
+  | "shred"
+  | "disintegrate"
+  | "incinerate"
+  | "pulverize"
+  | "melt";
+
 export type Method =
   | { kind: "nvme_sanitize_block_erase"; ause: boolean; no_deallocate: boolean }
   | { kind: "nvme_sanitize_crypto_erase"; ause: boolean; no_deallocate: boolean }
@@ -69,24 +80,38 @@ export type Method =
   | { kind: "ata_secure_erase"; enhanced: boolean }
   | { kind: "block_overwrite"; pattern: unknown; passes: number }
   | { kind: "opal_revert" }
-  | { kind: "destroy"; method: string };
+  | { kind: "destroy"; method: DestructMethod };
 
-export type JobStateLabel =
+/** Inner state of one ErasureEvent (one wipe attempt). */
+export type ErasureEventStateLabel =
   | "queued"
   | "probing"
-  | "confirming"
   | "unfreezing"
+  | "confirming"
   | "running"
-  | "verifying"
-  | "generating_cert"
-  | "signing"
   | "completed"
   | "failed"
+  | "aborted";
+
+export interface ErasureEventStateWire {
+  state: ErasureEventStateLabel;
+}
+
+/** Outer Job state — the Asset's terminal disposition machine. */
+export type JobStateLabel =
+  | "queued"
+  | "in_progress"
+  | "pending_co_sign"
+  | "erased"
+  | "destroyed"
+  | "quarantined"
   | "aborted";
 
 export interface JobStateWire {
   state: JobStateLabel;
 }
+
+export type AssetDisposition = "erased" | "destroyed" | "quarantined";
 
 export interface Progress {
   fraction: number;
@@ -103,6 +128,20 @@ export interface OperatorRef {
 }
 
 export interface JobSpec {
+  device_id: string;
+  classification: Classification;
+  intent: Intent;
+  operator: OperatorRef;
+  asset_tag: string | null;
+  site_label: string | null;
+  ticket_ref: string | null;
+  work_order_ref: string | null;
+  customer_ref: string | null;
+  contract_ref: string | null;
+  sanitization_profile_ref: string | null;
+}
+
+export interface ErasureEventSpec {
   device_id: string;
   classification: Classification;
   intent: Intent;
@@ -144,11 +183,17 @@ export interface VerificationReport {
 }
 
 export type JobUpdateKind =
-  | { kind: "state_changed"; from: JobStateWire; to: JobStateWire }
-  | { kind: "progress"; fraction: number; eta_seconds: number | null; stage: string; bytes_processed: number | null; bytes_total: number | null }
-  | { kind: "command_issued" } & CommandEvidence
-  | { kind: "command_result" } & CommandEvidence
-  | { kind: "verification" } & VerificationReport
+  | { kind: "state_changed"; from: ErasureEventStateWire; to: ErasureEventStateWire }
+  | {
+      kind: "progress";
+      fraction: number;
+      eta_seconds: number | null;
+      stage: string;
+      bytes_processed: number | null;
+      bytes_total: number | null;
+    }
+  | ({ kind: "command_issued" } & CommandEvidence)
+  | ({ kind: "command_result" } & CommandEvidence)
   | { kind: "warning"; code: string; message: string }
   | { kind: "failed"; reason: string };
 
@@ -157,20 +202,96 @@ export interface JobUpdate {
   event: JobUpdateKind;
 }
 
-export interface Job {
+/** One attempted wipe of one device. Several may exist inside one Job. */
+export interface ErasureEvent {
   id: string;
   device_snapshot: Device;
   capabilities_snapshot: Capabilities;
-  spec: JobSpec;
+  spec: ErasureEventSpec;
   resolved_method: Method | null;
-  state: JobStateWire;
+  state: ErasureEventStateWire;
   progress: Progress | null;
   events: JobUpdate[];
   created_at: string;
   started_at: string | null;
   ended_at: string | null;
-  verification: VerificationReport | null;
+  station_id: string | null;
+}
+
+export interface DiagnosticFinding {
+  code: string;
+  severity: "info" | "warning" | "critical";
+  message: string;
+}
+
+export interface DiagnosticEvent {
+  id: string;
+  device_id: string;
+  at: string;
+  findings: DiagnosticFinding[];
+  station_id: string | null;
+}
+
+export interface HealthCheckEvent {
+  id: string;
+  device_id: string;
+  at: string;
+  attributes: unknown;
+  station_id: string | null;
+}
+
+export interface VerificationEvent {
+  id: string;
+  erasure_event_id: string;
+  device_id: string;
+  at: string;
+  report: VerificationReport;
+  station_id: string | null;
+}
+
+export interface DestructionEvent {
+  id: string;
+  device_id: string;
+  at: string;
+  method: DestructMethod;
+  operator: OperatorRef;
+  supervisor: OperatorRef | null;
+  manifest_ref: string | null;
+  photo_refs: string[];
+  notes: string | null;
+  station_id: string | null;
+}
+
+export type JobActivity =
+  | { type: "diagnostic"; id: string; device_id: string; at: string; findings: DiagnosticFinding[]; station_id: string | null }
+  | { type: "health_check"; id: string; device_id: string; at: string; attributes: unknown; station_id: string | null }
+  | ({ type: "erasure" } & ErasureEvent)
+  | ({ type: "verification" } & VerificationEvent)
+  | ({ type: "destruction" } & DestructionEvent);
+
+export interface Job {
+  id: string;
+  spec: JobSpec;
+  state: JobStateWire;
+  activities: JobActivity[];
+  manifest_id: string | null;
   certificate_id: string | null;
+  created_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+}
+
+export type ManifestStateLabel = "pending" | "signed" | "rejected";
+
+export interface DestructionManifest {
+  id: string;
+  created_at: string;
+  assembled_by: OperatorRef;
+  job_ids: string[];
+  state: ManifestStateLabel;
+  note: string | null;
+  supervisor: OperatorRef | null;
+  signed_at: string | null;
 }
 
 export interface StationInfo {
@@ -182,6 +303,19 @@ export interface StationInfo {
   started_at: string;
   active_jobs: number;
   last_seen: string | null;
+}
+
+export interface CoSignatureBlock {
+  signature: {
+    algorithm: string;
+    public_key_id: string;
+    canonical_sha256_hex: string;
+    signature_b64: string;
+  };
+  role: "supervisor" | "auditor";
+  manifest_ref: string | null;
+  signer: OperatorRef;
+  signed_at: string;
 }
 
 export interface SignedCertificate {
@@ -200,23 +334,23 @@ export interface SignedCertificate {
       asset_tag: string | null;
       ticket_ref: string | null;
       site_label: string | null;
+      customer_ref?: string | null;
+      work_order_ref?: string | null;
+      contract_ref?: string | null;
     };
     device: Device;
     capabilities_snapshot: Capabilities;
+    disposition: AssetDisposition;
     sanitization: {
       category: Category;
       method: Method;
       method_human: string;
       standard_refs: Array<{ standard: string; section: string }>;
     };
-    evidence: {
-      command_evidence: CommandEvidence[];
-      verification: VerificationReport | null;
-      started_at: string;
-      ended_at: string;
-      duration_seconds: number;
-      events: JobUpdate[];
-    };
+    activities: JobActivity[];
+    started_at: string;
+    ended_at: string;
+    duration_seconds: number;
     validation: {
       validated: boolean;
       media_class: string;
@@ -224,6 +358,7 @@ export interface SignedCertificate {
       validation_expires: string | null;
     };
     media_status: { operational: boolean; damaged: boolean; notes: string | null };
+    audit_verification_ref?: { id: string; at: string | null } | null;
   };
   signature: {
     algorithm: string;
@@ -231,6 +366,7 @@ export interface SignedCertificate {
     canonical_sha256_hex: string;
     signature_b64: string;
   };
+  co_signatures?: CoSignatureBlock[];
 }
 
 export interface PublicKeyResponse {
