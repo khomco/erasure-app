@@ -11,6 +11,7 @@ import { JobsPage } from "./pages/JobsPage";
 import { JobDetailPage } from "./pages/JobDetailPage";
 import { CertificatePage } from "./pages/CertificatePage";
 import { FleetPage } from "./pages/FleetPage";
+import { ManifestsPage } from "./pages/ManifestsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -59,12 +60,19 @@ const fleetRoute = createRoute({
   component: FleetPage,
 });
 
+const manifestsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/manifests",
+  component: ManifestsPage,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   jobsRoute,
   jobDetailRoute,
   certRoute,
   fleetRoute,
+  manifestsRoute,
 ]);
 
 const router = createRouter({ routeTree });

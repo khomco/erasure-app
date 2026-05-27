@@ -93,7 +93,6 @@ function EraseWizard({ device, onClose }: { device: Device; onClose: () => void 
   const [intent, setIntent] = useState<Intent>("reuse");
   const [assetTag, setAssetTag] = useState("");
   const [ticket, setTicket] = useState("");
-  const [verifySamples, setVerifySamples] = useState(8);
 
   const create = useMutation({
     mutationFn: async () => {
@@ -104,8 +103,6 @@ function EraseWizard({ device, onClose }: { device: Device; onClose: () => void 
         device_id: device.id,
         classification,
         intent,
-        verify: true,
-        verify_samples: verifySamples,
         operator,
         asset_tag: assetTag || null,
         site_label: null,
@@ -210,17 +207,6 @@ function EraseWizard({ device, onClose }: { device: Device; onClose: () => void 
               value={ticket}
               onChange={(e) => setTicket(e.target.value)}
               placeholder="optional"
-            />
-          </div>
-          <div>
-            <div className="label">Verification samples</div>
-            <input
-              className="field"
-              type="number"
-              min={1}
-              max={64}
-              value={verifySamples}
-              onChange={(e) => setVerifySamples(Number(e.target.value))}
             />
           </div>
         </div>

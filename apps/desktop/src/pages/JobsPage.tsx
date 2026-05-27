@@ -1,17 +1,21 @@
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, CircleOff, Loader2, XCircle } from "lucide-react";
+import { CheckCircle2, CircleOff, FileSignature, Loader2, Trash2, XCircle } from "lucide-react";
 
 import { api, classNames, formatBytes } from "@/api/client";
 import type { Job, JobStateLabel } from "@/api/types";
-import { useEventStream } from "@/api/ws";
+import { latestErasure, useEventStream } from "@/api/ws";
 
 function StateIcon({ state }: { state: JobStateLabel }) {
-  if (state === "completed")
+  if (state === "erased")
     return <CheckCircle2 className="h-4 w-4 text-emerald-400" />;
-  if (state === "failed") return <XCircle className="h-4 w-4 text-rose-400" />;
+  if (state === "destroyed")
+    return <Trash2 className="h-4 w-4 text-amber-400" />;
+  if (state === "quarantined") return <XCircle className="h-4 w-4 text-rose-400" />;
   if (state === "aborted")
     return <CircleOff className="h-4 w-4 text-slate-400" />;
+  if (state === "pending_co_sign")
+    return <FileSignature className="h-4 w-4 text-indigo-300" />;
   return <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />;
 }
 
@@ -46,6 +50,15 @@ export function JobsPage() {
 }
 
 function JobRow({ job }: { job: Job }) {
+  const erasure = latestErasure(job);
+  const device = erasure?.device_snapshot;
+  const progress = erasure?.progress;
+  const isOuterTerminal =
+    job.state.state === "erased" ||
+    job.state.state === "destroyed" ||
+    job.state.state === "quarantined" ||
+    job.state.state === "aborted";
+
   return (
     <Link
       to="/jobs/$jobId"
@@ -57,32 +70,34 @@ function JobRow({ job }: { job: Job }) {
           <StateIcon state={job.state.state} />
           <div className="min-w-0">
             <div className="truncate font-medium">
-              {job.device_snapshot.vendor} {job.device_snapshot.model}
+              {device ? `${device.vendor} ${device.model}` : job.spec.device_id}
             </div>
             <div className="truncate text-xs text-slate-400">
-              {job.device_snapshot.serial} · {formatBytes(job.device_snapshot.capacity_bytes)} ·{" "}
+              {device
+                ? `${device.serial} · ${formatBytes(device.capacity_bytes)} · `
+                : ""}
               {job.spec.classification}/{job.spec.intent}
             </div>
           </div>
         </div>
         <div className="flex items-center gap-3">
-          {job.progress && job.state.state !== "completed" && (
+          {progress && !isOuterTerminal && (
             <div className="w-32">
               <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
                 <div
                   className={classNames(
                     "h-full rounded-full transition-all",
-                    job.state.state === "failed" ? "bg-rose-500" : "bg-indigo-500"
+                    erasure?.state.state === "failed" ? "bg-rose-500" : "bg-indigo-500"
                   )}
-                  style={{ width: `${Math.round(job.progress.fraction * 100)}%` }}
+                  style={{ width: `${Math.round(progress.fraction * 100)}%` }}
                 />
               </div>
               <div className="mt-0.5 text-[10px] text-slate-500">
-                {Math.round(job.progress.fraction * 100)}% · {job.progress.stage}
+                {Math.round(progress.fraction * 100)}% · {progress.stage}
               </div>
             </div>
           )}
-          <span className="pill">{job.state.state}</span>
+          <span className="pill">{job.state.state.replace(/_/g, " ")}</span>
         </div>
       </div>
     </Link>

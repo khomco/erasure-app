@@ -1,12 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { Job, JobUpdate, StationInfo } from "./types";
+import type { ErasureEvent, Job, JobActivity, JobStateLabel, JobUpdate, StationInfo } from "./types";
 
-// Broadcast envelope: a JobUpdate plus the job_id it belongs to. Wire
-// format key stays "job_update" — only the TS alias was renamed.
-type JobUpdateMessage = { job_id: string; event: JobUpdate };
+/**
+ * The server's unified Job broadcast envelope (see wipe_engine::JobBroadcast).
+ * One of three variants — outer Job state change, a new typed activity
+ * was appended, or an inner ErasureEvent update.
+ */
+export type JobBroadcast =
+  | {
+      kind: "job_state_changed";
+      job_id: string;
+      from: { state: JobStateLabel };
+      to: { state: JobStateLabel };
+      at: string;
+    }
+  | { kind: "activity_added"; job_id: string; activity: JobActivity }
+  | { kind: "erasure_update"; job_id: string; erasure_event_id: string; update: JobUpdate };
 
-type FleetEvent =
+export type FleetEvent =
   | { PeerDiscovered: StationInfo }
   | { PeerUpdated: StationInfo }
   | { PeerLost: string }
@@ -15,12 +27,11 @@ type FleetEvent =
 export type WsEnvelope =
   | { type: "hello"; tool_version: string }
   | { type: "heartbeat" }
-  | { type: "job_update"; job_id: string; event: JobUpdate }
+  | { type: "job_broadcast"; payload: JobBroadcast }
   | { type: "fleet_event"; PeerDiscovered?: StationInfo; PeerUpdated?: StationInfo; PeerLost?: string; LeadChanged?: string | null };
 
 function buildWsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  // Vite proxy handles /api ws upgrades transparently.
   return `${proto}//${window.location.host}/api/events`;
 }
 
@@ -62,7 +73,7 @@ export function useEventStream(onMessage: (env: WsEnvelope) => void): WsConnecti
           const env = JSON.parse(msg.data) as WsEnvelope;
           setLast(env);
           handlerRef.current(env);
-        } catch (e) {
+        } catch {
           // Ignore malformed messages.
         }
       };
@@ -83,37 +94,67 @@ export function useEventStream(onMessage: (env: WsEnvelope) => void): WsConnecti
 }
 
 /**
- * Hook: track a single job's live state by subscribing to the WS stream
- * and folding the latest events into its state. Initial state comes from
- * the REST endpoint.
+ * Hook: track a single outer Job's live state by folding broadcast events
+ * into its activity chain and outer state. Initial state comes from the
+ * REST endpoint.
  */
 export function useJobLiveState(initial: Job | undefined): Job | undefined {
   const [job, setJob] = useState<Job | undefined>(initial);
   useEffect(() => setJob(initial), [initial?.id]);
   useEventStream((env) => {
-    if (env.type !== "job_update") return;
-    if (!initial || env.job_id !== initial.id) return;
+    if (env.type !== "job_broadcast") return;
+    const b = env.payload;
+    const targetId = "job_id" in b ? b.job_id : null;
+    if (!initial || targetId !== initial.id) return;
     setJob((prev) => {
       if (!prev) return prev;
-      const nextEvents = [...prev.events, env.event];
-      let nextState = prev.state;
-      let nextProgress = prev.progress;
-      if (env.event.event.kind === "state_changed") {
-        nextState = env.event.event.to;
+      switch (b.kind) {
+        case "job_state_changed":
+          return { ...prev, state: b.to };
+        case "activity_added":
+          return { ...prev, activities: [...prev.activities, b.activity] };
+        case "erasure_update": {
+          const next = prev.activities.map((a) => {
+            if (a.type !== "erasure" || a.id !== b.erasure_event_id) return a;
+            const erasure = a as JobActivity & { type: "erasure" };
+            const nextEvents = [...(erasure as unknown as ErasureEvent).events, b.update];
+            let nextState = (erasure as unknown as ErasureEvent).state;
+            let nextProgress = (erasure as unknown as ErasureEvent).progress;
+            if (b.update.event.kind === "state_changed") {
+              nextState = b.update.event.to;
+            }
+            if (b.update.event.kind === "progress") {
+              nextProgress = {
+                fraction: b.update.event.fraction,
+                eta_seconds: b.update.event.eta_seconds,
+                stage: b.update.event.stage,
+                bytes_processed: b.update.event.bytes_processed,
+                bytes_total: b.update.event.bytes_total,
+              };
+            }
+            return {
+              ...erasure,
+              events: nextEvents,
+              state: nextState,
+              progress: nextProgress,
+            };
+          });
+          return { ...prev, activities: next };
+        }
       }
-      if (env.event.event.kind === "progress") {
-        nextProgress = {
-          fraction: env.event.event.fraction,
-          eta_seconds: env.event.event.eta_seconds,
-          stage: env.event.event.stage,
-          bytes_processed: env.event.event.bytes_processed,
-          bytes_total: env.event.event.bytes_total,
-        };
-      }
-      return { ...prev, events: nextEvents, state: nextState, progress: nextProgress };
     });
   });
   return job;
 }
 
-export type { JobUpdateMessage, FleetEvent };
+/** Convenience: most-recent ErasureEvent activity on a Job, if any. */
+export function latestErasure(job: Job | undefined): ErasureEvent | undefined {
+  if (!job) return undefined;
+  for (let i = job.activities.length - 1; i >= 0; i--) {
+    const a = job.activities[i];
+    if (a.type === "erasure") {
+      return a as unknown as ErasureEvent;
+    }
+  }
+  return undefined;
+}
