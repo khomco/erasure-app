@@ -71,3 +71,27 @@ for the higher-level activity records.
   `ErasureEventState`, `JobSpec` → `ErasureEventSpec` (or kept and
   re-scoped), `JobEvent` → `JobUpdate`. New `Job`, `JobState`, `JobSpec`
   introduced for the outer entity. Bundled in v0.2 item #2 (see §11).
+
+## Addendum (2026-08-06) — as-implemented corrections
+
+The decision above shipped. Two Consequences did not land as written;
+recorded here rather than edited above, so the original intent stays
+readable.
+
+1. **"Existing certs remain valid … migration is additive" is not true
+   of the code.** `CERT_FORMAT_VERSION` was bumped to `2`, but
+   `Certificate::disposition` and `Certificate::activities` are
+   required fields with no `#[serde(default)]`, and nothing anywhere
+   reads `cert_format_version`. A v1-shaped cert therefore fails to
+   deserialize outright — `wipestation verify-cert` rejects it with
+   `missing field 'disposition'` before it ever reaches signature
+   checking. In practice nothing is broken (no v1 certs exist outside
+   development), but the compatibility claim is unearned. Resolving it
+   is tracked as the cert-versioning question in CONTEXT §12.
+2. **`JobSpec` was kept and re-scoped, not renamed.** The outer `Job`
+   owns `JobSpec`; the inner attempt owns `ErasureEventSpec`. The ADR
+   left this as an either/or; the code took the "kept and re-scoped"
+   branch.
+
+`DiagnosticEvent` and `HealthCheckEvent` landed as schema-only types —
+see CONTEXT §11 v0.2 #10 for the remaining runtime work.

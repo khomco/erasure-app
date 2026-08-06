@@ -190,13 +190,11 @@ synonym, push back or update this list.
 
 ### Job orchestration
 
-> **Glossary-vs-code drift in flight.** The new model below is
-> CANONICAL in the glossary; the code today uses the older one-attempt
-> meaning of `Job`. The rename (Job → ErasureEvent; new outer Job;
-> JobEvent → JobUpdate) is tracked as v0.2 item #2 in §11 and the
-> rationale is captured in ADR-0001. New design discussions use the
-> glossary terms; cite the existing code by its current names where
-> precision matters.
+> **Glossary and code agree.** The ADR-0001 model below shipped in
+> v0.2 (§11 #2): `Job` → `ErasureEvent`, a new outer `Job`,
+> `JobEvent` → `JobUpdate`. `JobEvent` no longer exists anywhere in
+> the codebase. Use these terms in code, docs and design discussion
+> without qualification.
 
 - **Job** — the goal-oriented unit of work: process this **Asset**
   (or freeform `Device`+`asset_tag` in Simple mode) to a terminal
@@ -204,8 +202,20 @@ synonym, push back or update this list.
   **Certificate** covering the full evidence chain. *Avoid: erasure,
   wipe, "the run".*
 - **JobState** — outer state machine: `Queued → InProgress →
-  (Erased | Destroyed | Quarantined | Aborted)`. Reflects the Asset's
-  terminal disposition, not the progress of any single attempt.
+  (Erased | PendingCoSign → Destroyed | Quarantined | Aborted)`.
+  Reflects the Asset's terminal disposition, not the progress of any
+  single attempt.
+- **PendingCoSign** — the audit-honest waypoint on the Destroy path: the
+  Asset has been physically destroyed (or scheduled for it), a
+  **DestructionEvent** has captured the evidence, and the Job is waiting
+  for supervisor co-sign on its **DestructionManifest**. The certificate
+  is generated *at* PendingCoSign with `media_status.operational =
+  false`; co-sign attaches the second signature and moves the Job to
+  `Destroyed`. Not a terminal state. *Avoid: "pending", "awaiting
+  approval" — the co-signature is the specific thing being waited on.*
+- **AssetDisposition** — the resolved terminal outcome
+  (`Erased | Destroyed | Quarantined`) stated explicitly on the
+  certificate so an auditor never re-derives it from the activity chain.
 - **ErasureEvent** — one attempted wipe within a Job. Carries the
   inner state machine, the chosen `Method`, the captured
   `CommandEvidence`, the resulting `VerificationReport`, and the
@@ -214,30 +224,57 @@ synonym, push back or update this list.
   instant-purge counts as one ErasureEvent that completes in
   milliseconds. *Avoid: erasure, wipe-attempt, "the job" — that's
   the outer unit.*
-- **ErasureEventState** — inner state machine (today this is the
-  code's `JobState`): `Queued → Probing → (Unfreezing) → Confirming
-  → Running → Verifying → GeneratingCert → Signing → Completed`,
-  with `Failed` and `Aborted` as terminal escapes.
-- **DiagnosticEvent / HealthCheckEvent / VerificationEvent /
-  DestructionEvent** — other typed events a Job may compose alongside
-  ErasureEvents. Not implemented in v0.1; introduced when v0.2 lands
-  the full event-composition runtime. DestructionEvent carries
-  chain-of-custody evidence (operator, photo references, supervisor
-  co-sign) and is what permits a Job to reach `Destroyed` after
-  erasure attempts are exhausted.
+- **ErasureEventState** — inner state machine: `Queued → Probing →
+  (Unfreezing) → Confirming → Running → Verifying → GeneratingCert →
+  Signing → Completed`, with `Failed` and `Aborted` as terminal
+  escapes. Note that a `Failed` ErasureEvent does **not** fail the
+  Job — the Job stays `InProgress` awaiting an operator decision
+  (retry, fall back to another Method, or escalate to Destroy).
+- **JobActivity** — the sum type of everything a Job composes:
+  `Diagnostic | HealthCheck | Erasure | Verification | Destruction`.
+  A Job carries `activities: Vec<JobActivity>` in event order and the
+  certificate serialises the same list. *Avoid: "job event" — that
+  collides with JobUpdate.*
+- **VerificationEvent** — post-erasure sampled-read check, appended by
+  the runner as a sibling activity naming the ErasureEvent it ran
+  against. **Live.** (This settles one of the §12 open questions in
+  favour of sibling-event over embedded-in-ErasureEvent; the inner
+  `Verifying` state still exists and is what produces the report.)
+- **DestructionEvent** — chain-of-custody record for physical
+  destruction: method, operator, optional supervisor, manifest
+  reference, optional photo references, notes. **Live** — appended by
+  `escalate_to_destroy`; it is what permits a Job to reach `Destroyed`
+  once erasure attempts are exhausted. `photo_refs` is a schema slot
+  with no capture UX (v0.3 #12).
+- **DiagnosticEvent / HealthCheckEvent** — pre-flight typed events.
+  **Schema-only**: the types and `JobActivity` variants exist and
+  serialise into the cert, but the runner never emits them. Whether
+  they run always or only when a SanitizationProfile asks is still
+  open (§12).
+- **DestructionManifest** — an auditor-facing grouping of N
+  `PendingCoSign` Jobs assembled for a single supervisor co-sign
+  action, matching paper-shredder convention. Carries
+  `assembled_by`, `job_ids`, `state`
+  (`Pending | Signed | Rejected`), the co-signing `supervisor` and
+  `signed_at`. Distinct from **Batch**: a Batch is an ad-hoc
+  operator-UX selection, a Manifest is a persisted evidentiary
+  record that a supervisor signs. Tier 1 ships local-sync co-sign at
+  the lead station; async remote co-sign is a Tier-2 cloud feature on
+  the same schema. *Avoid: "destruction batch", "shred list".*
 - **JobSpec** — what was asked for at Job creation: target Asset (or
   Device + asset_tag in Simple mode), classification, intent, optional
   method override, verify config, operator, WorkOrder/ticket/site
   references.
 - **JobUpdate** — low-level streamed record from a running event
   (StateChanged, Progress, CommandIssued, CommandResult, Warning,
-  Failed). The thing fanned out over the WebSocket. *Today the code
-  calls this `JobEvent`*; rename pending to free "Event" for the
-  higher-level activity records above. The collision is the *only*
-  reason for this rename — JobUpdate is not a new concept.
+  Failed). The thing fanned out over the WebSocket. Renamed from
+  `JobEvent` to free "Event" for the higher-level activity records
+  above; that collision was the *only* reason for the rename —
+  JobUpdate is not a new concept.
 - **JobRunner** — owns a `DeviceBackend` and runs Jobs to terminal
-  disposition. Today only orchestrates ErasureEvent-shaped work; will
-  grow to orchestrate the other typed events as they land.
+  disposition. Orchestrates Erasure, Verification and Destruction
+  activities; will grow to orchestrate Diagnostic and HealthCheck when
+  those stop being schema-only.
 
 ### Operator & work
 
@@ -524,7 +561,13 @@ upsell that ITADs happily pay for because they pass cost through.
 
 Single binary, identical code; tier is a `--hub-url` configuration.
 
-## 10. What v0.1 shipped
+## 10. What has shipped
+
+### 10.1 v0.1 baseline
+
+Historical record of the v0.1 vertical slice, kept as-shipped. Where
+v0.2 has since moved something, §10.2 says so — do not edit this table
+to match current code.
 
 | Surface | State |
 | --- | --- |
@@ -543,36 +586,46 @@ Single binary, identical code; tier is a `--hub-url` configuration.
 | 25 tests across 6 crates passing | ✅ |
 | README + ARCHITECTURE | ✅ |
 
+### 10.2 v0.2 shipped so far
+
+| Surface | Ref | State |
+| --- | --- | --- |
+| Outer-Job composition — `Job` → `ErasureEvent`, new outer `Job` + `JobState`, `JobActivity` sum type, `JobEvent` → `JobUpdate` | §11 #2 / ADR-0001 | ✅ |
+| Destroy path — `DestructionEvent`, `PendingCoSign`, `DestructionManifest`, supervisor co-sign producing a second independent signature | ADR-0001 | ✅ |
+| Certificate schema v2 — carries the `activities` chain and an explicit `AssetDisposition`; v1 certs remain valid as single-ErasureEvent Jobs | ADR-0001 | ✅ |
+| REST: `POST /api/jobs/:id/escalate-to-destroy`, `GET|POST /api/manifests`, `GET /api/manifests/:id`, `POST /api/manifests/:id/cosign` | ADR-0001 | ✅ |
+| React UI: activity timeline on Job Detail + **Manifests page** (assembly + co-sign) | ADR-0001 | ✅ |
+| At-a-glance bench status overlay on the Devices page | §11 #3 | ✅ |
+| 28 tests across 6 crates passing | — | ✅ |
+| `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits |
+
 ## 11. Deferred — known and committed
 
-In rough priority order for v0.2 and beyond:
+In rough priority order for v0.2 and beyond. Item numbering is stable —
+shipped items keep their number and are struck through rather than
+removed, so that §10.2, ADRs and commit messages that cite "v0.2 #N"
+keep resolving.
 
 ### v0.2 candidates
 
 1. **Real Linux ioctl backend** (`wipe-engine-linux`) — the trait seam
-   exists; consumers don't change. Needs hardware.
-2. **Job as outcome-bearing composition** (ADR-0001) — rename current
-   `Job` → `ErasureEvent`; introduce a new outer `Job` with state
-   machine `Queued → InProgress → Erased/Destroyed/Quarantined/
-   Aborted`; introduce typed-event composition (Diagnostic,
-   HealthCheck, ErasureEvent, Verification, Destruction). Renames
-   `JobEvent` → `JobUpdate` to free "Event" for the activity records.
-   Touches the cert schema, the wizard, the WebSocket payloads, and
-   the runner. Single biggest model shift in v0.2 — sequencing
-   matters: this lands *before* the Enterprise data model so the
-   schema picks up the new shape from day one.
-3. **At-a-glance bench status on Devices page** *(queued next after
-   ADR-0001 lands)* — overlay each Device card with its current Job's
-   status (in-flight progress · Erased · Failed · PendingCoSign ·
-   Destroyed), color-coded for cross-room scanning, with a "safe to
-   disconnect" affordance on Erased and a warning affordance on
-   Failed. Closes the multi-drive walk-away workflow gap: operators
-   load N drives, walk away for hours, and need to know at a glance
-   which drives are done, which need attention, and which slots are
-   free for fresh intake. Pure frontend wiring — joins `/api/devices`
-   against `/api/jobs` by `device_id`; no schema or backend changes.
-   Re-plug-after-wipe shows prior result *and* explicit "Start new
-   Job" affordance so the operator can choose to re-wipe.
+   exists; consumers don't change. Needs hardware. **Now the single
+   largest gap: everything downstream of the `DeviceBackend` seam is
+   built and tested, but the only implementation is the mock, which
+   synthesises the very command evidence the product's value rests on.**
+2. ~~**Job as outcome-bearing composition** (ADR-0001)~~ — **SHIPPED**
+   (see §10.2). Renamed `Job` → `ErasureEvent`, introduced the outer
+   `Job` + `JobState` with `PendingCoSign` on the Destroy path,
+   introduced `JobActivity` composition, renamed `JobEvent` →
+   `JobUpdate`, moved the cert schema to v2, and added the
+   `DestructionManifest` supervisor co-sign flow. Diagnostic and
+   HealthCheck landed as schema only — see #10 below for the remainder.
+3. ~~**At-a-glance bench status on Devices page**~~ — **SHIPPED** (see
+   §10.2). Device cards are joined against `/api/jobs` by `device_id`
+   and colour-coded by slot status, with a "safe to disconnect"
+   affordance on Erased, a "needs attention" affordance on Failed, and
+   a "Start new" affordance for re-plug-after-wipe. Pure frontend
+   wiring; no schema or backend changes.
 4. **Enterprise data model — Customer + Contract + WorkOrder + Asset
    + SanitizationProfile** — closes the FIPS 199 gap in §8. Backed by
    SQLite (Enterprise mode only; Simple mode stays schemaless beyond
@@ -595,8 +648,19 @@ In rough priority order for v0.2 and beyond:
    verifier public key, per-success accounting persisted.
 9. **PDF/A-3 cert wrapping** — JSON-LD inside, human-readable PDF
    outside, single attestation artifact.
+10. **Diagnostic / HealthCheck runtime** — the remainder of ADR-0001.
+    `DiagnosticEvent` and `HealthCheckEvent` shipped as schema-only
+    types and `JobActivity` variants; the runner never emits them and
+    `HealthCheckEvent.attributes` is still an untyped
+    `serde_json::Value`. Blocked on the §12 question of whether they
+    run always or only when a SanitizationProfile requests them, and
+    on what a Critical finding should do to the Job.
 
 ### v0.3 / beyond
+
+> Numbering below starts at 7 for historical reasons and is **not**
+> continuous with the v0.2 list above. It is left as-is because
+> existing references (e.g. "v0.3 #12" in §5) resolve against it.
 
 7. **Hub mode** — same binary, `--hub` flag; tenant-aware; cert
    archive; cross-LAN fleet view.
@@ -627,12 +691,18 @@ and resolve. None of these have a decided answer.
 - When erasure attempts on the same Asset are **exhausted** (N
   consecutive ErasureEvent failures), do we auto-route the Job to a
   pending-Destroy state for supervisor sign-off, or always require an
-  explicit supervisor action to escalate?
-- **Verification** — first-class `VerificationEvent` in the Job's
-  composed events, or stays embedded in each ErasureEvent's state
-  machine? Audit prose flows better as a sibling event ("Verification
-  passed against ErasureEvent 2"); the runner is simpler if it stays
-  embedded.
+  explicit supervisor action to escalate? *Code today takes the
+  explicit path: a failed ErasureEvent leaves the Job `InProgress` and
+  escalation happens only via `POST /api/jobs/:id/escalate-to-destroy`.
+  There is no auto-routing and no N-failure counter — v0.3 #13.*
+- ~~**Verification** — first-class `VerificationEvent`, or embedded in
+  each ErasureEvent's state machine?~~ **RESOLVED in code (ADR-0001):
+  both, deliberately.** The inner `Verifying` state runs the sampled
+  reads and produces the `VerificationReport`; the runner then appends
+  a sibling `JobActivity::Verification` naming the ErasureEvent it ran
+  against, so audit prose reads "Verification passed against
+  ErasureEvent 2". If this dual shape proves confusing, that is an ADR,
+  not a bug fix.
 - **DiagnosticEvent / HealthCheckEvent timing** — always run
   pre-erasure, or only when a SanitizationProfile requests them?
   What happens if Diagnostics finds a condition the operator wasn't
@@ -650,8 +720,18 @@ and resolve. None of these have a decided answer.
 - For raw block reads on Linux, do we use `O_DIRECT` from Rust
   natively, or is there a perf/correctness argument for a small
   C-helper crate?
-- Cert format version `1` — when (and how) do we cut version `2`?
-  Embedded migration shims vs verifier-side multi-version support?
+- Cert format version — **v2 was cut by ADR-0001, but no
+  multi-version support was built with it.** `CERT_FORMAT_VERSION` is
+  `2`, nothing reads the field, and `disposition` / `activities` are
+  required, so a v1 cert fails to deserialize with `missing field
+  'disposition'` before signature checking. Harmless today (no v1
+  certs exist outside development) and a real problem the first time a
+  cert outlives a schema bump — an auditor's whole value proposition
+  is that an old cert stays verifiable. Decide before v1.0: embedded
+  migration shims, verifier-side multi-version support, or an explicit
+  "certs are verifiable only by their own major version" stance that
+  we publish. *Whatever we pick needs a test that verifies a
+  previous-version cert fixture.*
 - Should the **Validate** registry live on the station, the lead, or
   only the hub/cloud? Implications for air-gap customers.
 - Lead election — do we need to add quorum / Raft when fleets grow,
@@ -694,10 +774,9 @@ and resolve. None of these have a decided answer.
   test that the Enterprise migration set is purely additive, and a
   CI gate that fails if a Simple-mode field is added that's
   incompatible with an Enterprise schema.
-- **JobEvent → JobUpdate rename** — bundled with the v0.2 #2 model
-  shift, or done earlier as a standalone rename? Earlier is cleaner
-  for design discussions (the glossary and code agree sooner); later
-  bundles all the breakage into one PR.
+- ~~**JobEvent → JobUpdate rename** — bundled with the v0.2 #2 model
+  shift, or standalone?~~ **RESOLVED: bundled.** Shipped as part of
+  ADR-0001 part 1; `JobEvent` no longer exists in the codebase.
 - **Lead aspirational responsibilities** — §5 says Lead *"holds
   canonical config, audit aggregation, license state"*; today
   election picks a Lead but nothing differentiates Lead behaviour.
@@ -740,11 +819,22 @@ and resolve. None of these have a decided answer.
   terminal disposition (Erased / Destroyed / Quarantined / Aborted);
   composes one or more typed events; signs one Certificate.
 - **ErasureEvent** — one attempted wipe within a Job; multiple
-  possible per Job (retries, method fallback). Replaces what the v0.1
-  code currently calls `Job`.
+  possible per Job (retries, method fallback). This is what the v0.1
+  code called `Job`.
+- **JobActivity** — the sum type a Job composes:
+  Diagnostic | HealthCheck | Erasure | Verification | Destruction.
 - **JobUpdate** — the low-level streamed record of a running event
-  (state change, progress, command, warning). Today's code calls this
-  `JobEvent`; rename pending.
+  (state change, progress, command, warning). Renamed from `JobEvent`
+  in v0.2; `JobEvent` no longer exists.
+- **PendingCoSign** — non-terminal Job state on the Destroy path:
+  destruction evidence captured, cert generated, awaiting supervisor
+  co-sign on the DestructionManifest.
+- **DestructionManifest** — auditor-facing grouping of N PendingCoSign
+  Jobs signed off by one supervisor action; on co-sign each member
+  Job's cert gains a second, independently verifiable signature and
+  the Job becomes Destroyed. **Not** a Batch.
+- **AssetDisposition** — the resolved terminal outcome
+  (Erased / Destroyed / Quarantined) stated explicitly on the cert.
 - **Asset** — a specific device-as-customer-property; persists across
   Jobs; distinct from `Device` (hardware metadata).
 - **WorkOrder** — the shared ERP-issued id under which a Customer's

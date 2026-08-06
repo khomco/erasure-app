@@ -44,14 +44,31 @@ echo "==> Starting station B on :7879..."
   --key-path "$KEY_B" > "$LOG_B" 2>&1 &
 PID_B=$!
 
-# Wait for both APIs to be responsive.
-for port in 7878 7879; do
+# Wait for both APIs to be responsive, and assert that the station answering
+# is the one *this script* started. A bare health check is not enough: a stale
+# wipestation left running from an earlier session answers /api/health quite
+# happily, and the demo would then run against it and report someone else's
+# results as its own.
+for pair in "7878:demo-station-A" "7879:demo-station-B"; do
+  port="${pair%%:*}"
+  want="${pair##*:}"
+  got=""
   for _ in $(seq 1 30); do
-    if curl -fsS "http://127.0.0.1:${port}/api/health" > /dev/null 2>&1; then
-      break
-    fi
+    got=$(curl -fsS "http://127.0.0.1:${port}/api/station" 2>/dev/null | jq -r '.id // empty')
+    if [[ "$got" == "$want" ]]; then break; fi
     sleep 0.2
   done
+  if [[ "$got" != "$want" ]]; then
+    if [[ -z "$got" ]]; then
+      echo "FAILED: no station answered on :${port} within 6s."
+    else
+      echo "FAILED: :${port} is owned by station '${got}', not '${want}'."
+      echo "  Something else is already bound to that port — probably a stale"
+      echo "  wipestation from an earlier session. Find and stop it with:"
+      echo "    lsof -nP -iTCP:${port} -sTCP:LISTEN"
+    fi
+    exit 1
+  fi
 done
 
 echo "==> Both stations up."
@@ -97,13 +114,21 @@ JOB_A=$(curl -s -X POST http://127.0.0.1:7878/api/jobs \
 curl -s -X POST "http://127.0.0.1:7878/api/jobs/${JOB_A}/start" > /dev/null
 echo "    Job ${JOB_A} started"
 
-# Poll until completed.
+# Poll until the outer Job reaches a terminal disposition (ADR-0001).
+# `completed` is an ErasureEventState, not a JobState — do not test for it here.
+STATE=""
 for _ in $(seq 1 50); do
   STATE=$(curl -s "http://127.0.0.1:7878/api/jobs/${JOB_A}" | jq -r '.state.state')
-  if [[ "$STATE" == "completed" || "$STATE" == "failed" ]]; then break; fi
+  case "$STATE" in
+    erased|destroyed|quarantined|aborted) break ;;
+  esac
   sleep 0.3
 done
 echo "    Job final state: $STATE"
+if [[ "$STATE" != "erased" ]]; then
+  echo "    FAILED: expected the demo job to reach 'erased', got '${STATE}'"
+  exit 1
+fi
 
 # Retrieve and verify the signed certificate.
 sleep 0.5

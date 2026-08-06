@@ -5,20 +5,45 @@ local web UI, an HTTP API, and per-station mDNS fleet discovery. Single
 binary, single executable target, ships with command-level evidentiary
 certificates that anyone can verify offline.
 
-> **Status:** v0.1 vertical slice with a mock device backend. No real
-> hardware ioctl yet — replace `wipe-engine-mock` with `wipe-engine-linux`
-> (planned) when a Linux box with real drives is available.
+> **Status:** v0.1 vertical slice with a mock device backend, plus the
+> ADR-0001 outer-Job model landed in v0.2. No real hardware ioctl yet —
+> replace `wipe-engine-mock` with `wipe-engine-linux` (planned) when a
+> Linux box with real drives is available. **Nothing in this repo has
+> ever erased a real drive**; the mock backend synthesises the command
+> evidence it reports.
+
+## Domain model (ADR-0001)
+
+A **Job** is the outcome-bearing unit: process one Asset to a terminal
+disposition. It composes a `Vec<JobActivity>` — `Diagnostic`,
+`HealthCheck`, `Erasure`, `Verification`, `Destruction` — and signs one
+`Certificate` covering the whole evidence chain.
+
+| Layer | State machine |
+| --- | --- |
+| Outer `Job` | `Queued → InProgress → (Erased \| PendingCoSign → Destroyed \| Quarantined \| Aborted)` |
+| Inner `ErasureEvent` | `Queued → Probing → (Unfreezing) → Confirming → Running → Verifying → GeneratingCert → Signing → Completed`, with `Failed` / `Aborted` escapes |
+
+One Job may hold several `ErasureEvent`s (retries, method fallback). When
+erasure is exhausted, the Job escalates to `PendingCoSign`, is rolled
+into a `DestructionManifest`, and reaches `Destroyed` on supervisor
+co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
+
+> Pre-ADR-0001 the type called `Job` meant "one attempted erasure". That
+> type is now `ErasureEvent`, and the old `JobEvent` stream is now
+> `JobUpdate`. Both renames have shipped — the code and the CONTEXT.md
+> glossary agree.
 
 ## What's in the box
 
 | Crate | Purpose |
 | --- | --- |
-| `wipe-common` | Shared domain types (`Device`, `Method`, `Capabilities`, `Job`, `StationInfo`, …) and the NIST R2 method selector |
-| `wipe-engine` | `DeviceBackend` trait + `JobRunner` state machine; broadcasts `JobUpdate` events |
-| `wipe-engine-mock` | Fake fleet of 4 drives (NVMe x2, SATA SSD, HDD) with simulated progress, failure injection, evidence capture |
-| `wipe-cert` | JSON-LD certificate schema + canonical serialization + detached Ed25519 sign / verify |
+| `wipe-common` | Shared domain types (`Device`, `Method`, `Capabilities`, `Job`, `JobActivity`, `ErasureEvent`, `DestructionManifest`, `StationInfo`, …) and the NIST R2 method selector |
+| `wipe-engine` | `DeviceBackend` trait + `JobRunner`; runs the outer-Job and inner-ErasureEvent state machines and broadcasts `JobUpdate` records |
+| `wipe-engine-mock` | Fake fleet of 4 drives (NVMe x2, SATA SSD, HDD) with simulated progress, failure injection, synthesised evidence |
+| `wipe-cert` | JSON-LD certificate schema (v2 — carries the activity chain) + canonical serialization + detached Ed25519 sign / verify + supervisor co-signature |
 | `wipe-fleet` | mDNS service advertise / browse + deterministic lead election |
-| `wipe-server` | Axum REST API + WebSocket event stream; auto-signs certs on `Completed` |
+| `wipe-server` | Axum REST API + WebSocket event stream; auto-signs certs when a Job reaches `Erased` or `PendingCoSign`; destruction-manifest assembly and co-sign |
 | `wipe-cli` | `wipestation serve / inspect / verify-cert` binary |
 | `apps/desktop` | Vite + React + TanStack Router + Tailwind frontend, plus Tauri 2 shell |
 
@@ -28,7 +53,7 @@ certificates that anyone can verify offline.
 # Prereqs: rustup-installed stable toolchain, pnpm, jq
 # (the CI/demo scripts source ~/.cargo/env automatically).
 
-# Run all Rust tests (25 across 6 crates):
+# Run all Rust tests (28 across 6 crates):
 cargo test --workspace -- --test-threads=1
 
 # Build + typecheck the frontend:
@@ -80,14 +105,41 @@ on :5173, which proxies `/api/*` to :7878).
 
 ## End-to-end flow
 
+### Erase path
+
 1. `POST /api/jobs` with a `JobSpec` (device, classification, intent, operator).
-2. `POST /api/jobs/:id/start` — runner transitions Queued → Probing → Confirming → (Unfreezing) → Running → Verifying → GeneratingCert → Signing → Completed, emitting events at every step.
+2. `POST /api/jobs/:id/start` — the Job moves `Queued → InProgress` and the
+   runner appends an `ErasureEvent`, driving it through Probing →
+   (Unfreezing) → Confirming → Running → Verifying → GeneratingCert →
+   Signing → Completed and emitting a `JobUpdate` at every step. On
+   success it appends a `VerificationEvent` and the Job reaches `Erased`.
 3. `GET /api/jobs/:id/certificate` — returns a `SignedCertificate` containing:
    * The job spec, the operator (with email — required by R2), and asset/ticket linkage
-   * The captured `CommandEvidence` (interface, opcode, action, raw CDB, log pages) for every command issued
+   * The full `activities` chain, and within each `ErasureEvent` the captured
+     `CommandEvidence` (interface, opcode, action, raw CDB, log pages) for
+     every command issued
    * The `VerificationReport` (sampled reads, SHA-256, entropy)
+   * The resolved `AssetDisposition`, stated explicitly so an auditor need
+     not re-derive it from the chain
    * A detached Ed25519 signature over the canonical (sorted-keys) JSON
 4. Anyone with the public key can `wipestation verify-cert` it offline — no vendor lookup, no online check.
+
+### Destroy path
+
+When erasure is exhausted, `POST /api/jobs/:id/escalate-to-destroy` appends a
+`DestructionEvent` and moves the Job to `PendingCoSign` — at which point its
+certificate is generated, with `media_status.operational = false`. The Job is
+then rolled into a manifest via `POST /api/manifests`, and
+`POST /api/manifests/:id/cosign` records the supervisor, attaches a **second,
+independent signature** to each member Job's certificate, and moves those Jobs
+to `Destroyed`.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/manifests` | List destruction manifests |
+| `POST /api/manifests` | Assemble a manifest from N `PendingCoSign` Jobs |
+| `GET /api/manifests/:id` | Fetch one manifest |
+| `POST /api/manifests/:id/cosign` | Supervisor co-sign → member Jobs become `Destroyed` |
 
 ## Design highlights
 
@@ -98,22 +150,37 @@ on :5173, which proxies `/api/*` to :7878).
 - **PXE-ephemeral by design** — no persistent local state for cert content; certs are signed in-RAM and shipped to lead/hub/cloud or downloaded. (Persistence layers will land alongside the real hardware backend.)
 - **Single binary, three frontends** — the Tauri window, the Axum HTTP API (for tablets and automation), and a future Ratatui TUI all wrap the same engine.
 
-## Test inventory (25 tests, all passing)
+## Test inventory (28 tests, all passing)
 
 | Crate / file | Tests | Covers |
 | --- | --- | --- |
 | `wipe-common/tests/method_selection.rs` | 7 | R2 decision flow across NVMe/SATA/HDD; destroy intent; frozen device handling; evidence serde round-trip |
 | `wipe-cert/src/canonical.rs` (inline) | 4 | Canonical JSON: sorted keys, nested sort, finite-only numbers, integer preservation |
-| `wipe-cert/tests/sign_verify.rs` | 6 | sign+verify happy path, unknown-key rejection, tamper detection, JSON round-trip, deterministic public-key-id, verifying-key round-trip |
-| `wipe-engine-mock/tests/end_to_end.rs` | 4 | NVMe crypto-erase happy path, SATA failure propagation, enumerate, event-stream lifecycle observation |
+| `wipe-cert/tests/sign_verify.rs` | 8 | sign+verify happy path, unknown-key rejection, tamper detection, JSON round-trip, activity chain carries erasure + verification, supervisor co-signature verifies independently, deterministic public-key-id, verifying-key round-trip |
+| `wipe-engine-mock/tests/end_to_end.rs` | 4 | NVMe crypto-erase happy path reaches `Erased`; SATA failure keeps the outer Job `InProgress` for an operator decision; enumerate; broadcast stream observes outer *and* inner transitions |
 | `wipe-fleet/tests/two_instance.rs` | 2 | Solo lead election, two-instance mutual discovery + cross-station election agreement |
-| `wipe-server/tests/http_e2e.rs` | 2 | Full HTTP flow → signed cert → offline verify; aborted job emits no cert |
+| `wipe-server/tests/http_e2e.rs` | 3 | Full HTTP flow → signed cert → offline verify; aborted job emits no cert; destroy-via-manifest-cosign produces two signatures |
 
 Plus the `scripts/demo.sh` end-to-end shell drives two real station processes, mDNS discovery, a real cert issuance, and three negative tests (correct key passes, wrong key rejected, tampered cert rejected).
 
-## What's deliberately not in v0.1
+## Frontend surfaces
+
+| Page | What it shows |
+| --- | --- |
+| **Devices** | Bench view — one card per attached device, joined against its current Job by `device_id` and colour-coded by slot status (idle / wiping / erased / failed / pending co-sign / destroyed / quarantined / aborted), with a "safe to disconnect" affordance on Erased and a "needs attention" affordance on Failed |
+| **Jobs** | All Jobs with outer state and activity counts |
+| **Job Detail** | Live activity timeline over the `JobUpdate` WebSocket stream |
+| **Certificate** | Signed-cert viewer, including the activity chain and both signatures on the destroy path |
+| **Manifests** | Destruction-manifest assembly and supervisor co-sign |
+| **Fleet** | mDNS-discovered peers and the elected lead |
+
+## Not implemented yet
 
 - Real Linux ioctl backend (`wipe-engine-linux` — drop in alongside the mock).
+- `DiagnosticEvent` and `HealthCheckEvent` are **schema-only**: the types and
+  the `JobActivity` variants exist and serialise into the cert, but the runner
+  never emits them. `Erasure`, `Verification` and `Destruction` are live.
+- `DestructionEvent.photo_refs` is a schema slot; there is no photo-capture UX.
 - Cloud / Hub mode (the protocol seam exists; the server just needs an HTTP client to register).
 - License enforcement, RBAC, SAML/OIDC, customer cert portal.
 - PDF/A-3 cert rendering (JSON-LD only for now; PDF wraps the JSON later).

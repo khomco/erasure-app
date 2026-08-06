@@ -15,8 +15,9 @@
 +----------------------------------------------------------------+
 |  wipe-server  (Axum)                                           |
 |   • /api/devices, /api/jobs, /api/jobs/:id/certificate         |
-|   • /api/events (WS) — JobUpdate + FleetEvent fan-out          |
-|   • Auto-signs Certificate on JobState::Completed              |
+|   • /api/jobs/:id/escalate-to-destroy, /api/manifests[/:id]    |
+|   • /api/events (WS) — JobBroadcast + FleetEvent fan-out       |
+|   • Auto-signs Certificate on JobState::Erased|PendingCoSign   |
 +----------------------------------------------------------------+
                 |               |               |
                 v               v               v
@@ -69,7 +70,23 @@ future `wipe-engine-linux` will issue `NVMe_IOCTL_ADMIN_CMD` / `SG_IO`
 ioctls and read `/dev/sdX` with `O_DIRECT`. The orchestrator does not
 change.
 
-## Job lifecycle
+## Job lifecycle (ADR-0001)
+
+Two nested state machines. The **outer `Job`** tracks the Asset's
+disposition; the **inner `ErasureEvent`** tracks one wipe attempt.
+
+Outer — `JobState`:
+
+```
+Queued ─▶ InProgress ─┬─▶ Erased
+                      │
+                      ├─▶ PendingCoSign ─▶ Destroyed   (supervisor co-sign
+                      │                                  on a manifest)
+                      ├─▶ Quarantined
+                      └─▶ Aborted                       (operator)
+```
+
+Inner — `ErasureEventState`, one per attempt:
 
 ```
 Queued ─▶ Probing ─▶ (Unfreezing?) ─▶ Confirming ─▶ Running ─▶ Verifying
@@ -84,24 +101,48 @@ Queued ─▶ Probing ─▶ (Unfreezing?) ─▶ Confirming ─▶ Running ─�
                                        └─▶ Aborted  (operator)
 ```
 
-Every transition emits a `JobEvent::StateChanged`. Each command issued emits
-a `JobEvent::CommandIssued` and a `JobEvent::CommandResult`. Progress
-updates emit `JobEvent::Progress`. Verification emits `JobEvent::Verification`.
-These flow over the runner's broadcast channel → WebSocket → frontend.
+A `Failed` ErasureEvent does **not** fail the Job — the Job stays
+`InProgress` awaiting an operator decision (retry, method fallback, or
+`escalate-to-destroy`). A Job accumulates its attempts and results in
+`activities: Vec<JobActivity>`; on a successful attempt the runner
+appends a sibling `JobActivity::Verification`, and on escalation a
+`JobActivity::Destruction`. `Diagnostic` and `HealthCheck` variants
+exist in the type but the runner never emits them.
+
+Every transition emits a `JobUpdate` of kind `StateChanged` (renamed
+from `JobEvent` in v0.2). Each command issued emits `CommandIssued` and
+`CommandResult`; progress emits `Progress`; verification emits
+`Verification`. The runner's broadcast channel carries three envelope
+kinds — `JobBroadcast::JobStateChanged` (outer transitions),
+`JobBroadcast::ActivityAdded` (a typed activity was appended), and
+`JobBroadcast::ErasureUpdate` (a `JobUpdate` from inside a running
+attempt) — which flow channel → WebSocket → frontend.
 
 ## Certificate flow
 
-1. Job reaches `JobState::Completed`.
+1. Job reaches `JobState::Erased` **or** `JobState::PendingCoSign`.
+   (There is no `JobState::Completed` — that name belongs to the inner
+   `ErasureEventState`.)
 2. `wipe-server::AppState::spawn_cert_generator()` (a broadcast subscriber)
    wakes up.
-3. It calls `Certificate::from_job(...)` which flattens the job's evidence
-   into a JSON-LD payload.
+3. It calls `Certificate::from_job(...)` which flattens the job's
+   `activities` chain into a JSON-LD payload (schema v2), stamping
+   `media_status.operational = false` on the `PendingCoSign` path and
+   recording the resolved `AssetDisposition`.
 4. `wipe_cert::sign(cert, signing_key)` canonicalizes the JSON (BTreeMap key
    sorting at every depth, finite-number check), hashes it with SHA-256,
    signs with Ed25519, and emits a `SignedCertificate { certificate,
    signature }`.
 5. The signed cert is stashed in `AppState::certs` and served by
    `GET /api/jobs/:id/certificate`.
+6. **Destroy path only.** When the linked `DestructionManifest` is
+   co-signed, `wipe_cert::co_sign(...)` appends a `CoSignatureBlock`
+   over the *same* canonical bytes the primary signer used, carrying the
+   co-signer's role, identity, `manifest_ref` and timestamp. Because the
+   payload is unchanged, a verifier holding only the supervisor's public
+   key can independently confirm "this party attested to this exact
+   cert" without trusting the station key. `co_signatures` is empty on
+   Erased certs.
 
 `wipe_cert::verify(signed, &[trusted_keys])`:
 - Re-canonicalizes the embedded certificate to compute the actual
