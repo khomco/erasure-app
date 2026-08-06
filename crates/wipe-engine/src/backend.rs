@@ -80,3 +80,19 @@ pub type DynBackend = std::sync::Arc<dyn DeviceBackend>;
 pub fn backend_err<E: std::fmt::Display>(e: E) -> WipeError {
     WipeError::Backend(e.to_string())
 }
+
+/// Simulated hot-plug, for demos, tests and the identify-mode flow.
+///
+/// Deliberately *not* part of [`DeviceBackend`]: attaching a drive is
+/// something an operator's hands do, not something a sanitization backend
+/// offers. A real backend will never implement this, and the server only
+/// mounts the `/api/sim/*` routes when something does.
+pub trait DeviceSimulator: Send + Sync {
+    /// Plug a previously-detached device back in, or the next spare from the
+    /// catalog. Returns the device that appeared.
+    fn attach(&self, id: Option<&DeviceId>) -> Option<Device>;
+    /// Pull a device out. Returns the device that disappeared.
+    fn detach(&self, id: &DeviceId) -> Option<Device>;
+    /// Devices currently unplugged but available to plug back in.
+    fn detached(&self) -> Vec<Device>;
+}

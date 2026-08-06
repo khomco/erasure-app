@@ -438,3 +438,60 @@ impl JobLatestErasureExt for wipe_common::ErasureEvent {
         self.spec.device_id.clone()
     }
 }
+
+// ---- Simulated hot-plug -------------------------------------------------
+//
+// Only mounted when the backend implements `DeviceSimulator` — i.e. the mock.
+// These exist so identify mode can be driven end to end without touching real
+// hardware; a station running a real backend returns 404 from `with_simulator`
+// never having been called.
+
+#[derive(Debug, Deserialize)]
+pub struct SimDeviceRequest {
+    /// Omit on attach to plug the most recently detached drive back in.
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+fn simulator(
+    state: &AppState,
+) -> Result<&std::sync::Arc<dyn wipe_engine::DeviceSimulator>, ApiError> {
+    state.simulator.as_ref().ok_or_else(|| {
+        ApiError(
+            StatusCode::NOT_FOUND,
+            "this station's backend does not simulate hot-plug".into(),
+        )
+    })
+}
+
+pub async fn sim_attach(
+    State(state): State<AppState>,
+    Json(req): Json<SimDeviceRequest>,
+) -> Result<Json<Device>, ApiError> {
+    let sim = simulator(&state)?;
+    let id = req.device_id.map(DeviceId);
+    sim.attach(id.as_ref())
+        .map(Json)
+        .ok_or_else(|| ApiError(StatusCode::CONFLICT, "no detached device to attach".into()))
+}
+
+pub async fn sim_detach(
+    State(state): State<AppState>,
+    Json(req): Json<SimDeviceRequest>,
+) -> Result<Json<Device>, ApiError> {
+    let sim = simulator(&state)?;
+    let id = DeviceId(
+        req.device_id
+            .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "device_id is required".into()))?,
+    );
+    sim.detach(&id).map(Json).ok_or_else(|| {
+        ApiError(
+            StatusCode::NOT_FOUND,
+            format!("device {id} is not attached"),
+        )
+    })
+}
+
+pub async fn sim_detached(State(state): State<AppState>) -> Result<Json<Vec<Device>>, ApiError> {
+    Ok(Json(simulator(&state)?.detached()))
+}

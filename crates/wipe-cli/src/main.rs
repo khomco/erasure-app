@@ -331,8 +331,12 @@ async fn cmd_serve(
         println!("  ^ the UI will ask the operator to point at a control plane or accept the loss");
     }
 
-    let mut state = AppState::with_static_dir(backend, fleet, signing_key, resolved_dist)
-        .with_topology_store(store);
+    let mut state = AppState::with_static_dir(backend.clone(), fleet, signing_key, resolved_dist)
+        .with_topology_store(store)
+        // The mock can fake hot-plug, which is what identify mode is driven
+        // by. A real backend will not implement DeviceSimulator and the
+        // /api/sim/* routes stay unavailable.
+        .with_simulator(backend);
     // A --bay-topology file or --bay-profile seeds the bench only when the
     // store had nothing; a saved layout is the operator's and outranks it.
     if state.bay_topology.read().is_none() {

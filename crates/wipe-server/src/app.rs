@@ -41,6 +41,9 @@ pub struct AppState {
     /// Where saved configuration goes, and whether it survives reboot
     /// (ADR-0003). Detected at startup, never guessed by the operator.
     pub topology_store: Arc<dyn crate::store::TopologyStore>,
+    /// Present only when the backend can fake hot-plug. Gates the
+    /// `/api/sim/*` routes so a real hardware station never exposes them.
+    pub simulator: Option<Arc<dyn wipe_engine::DeviceSimulator>>,
 }
 
 impl AppState {
@@ -75,6 +78,7 @@ impl AppState {
                 "No configuration store was wired in.".into(),
                 false,
             )),
+            simulator: None,
         };
         state.spawn_cert_generator();
         state
@@ -106,6 +110,12 @@ impl AppState {
             }
         }
         self.topology_store = store;
+        self
+    }
+
+    /// Attach a hot-plug simulator, enabling the `/api/sim/*` routes.
+    pub fn with_simulator(mut self, sim: Arc<dyn wipe_engine::DeviceSimulator>) -> Self {
+        self.simulator = Some(sim);
         self
     }
 
@@ -250,6 +260,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/manifests/:id", get(handlers::get_manifest))
         .route("/api/manifests/:id/cosign", post(handlers::cosign_manifest))
+        .route("/api/sim/devices/attach", post(handlers::sim_attach))
+        .route("/api/sim/devices/detach", post(handlers::sim_detach))
+        .route("/api/sim/devices", get(handlers::sim_detached))
         .route("/api/events", get(ws::ws_events));
 
     // Mount static frontend at `/` if a dist directory is configured.

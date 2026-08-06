@@ -35,11 +35,7 @@ fn job_spec(device_id: &str) -> JobSpec {
     }
 }
 
-async fn wait_until<F: Fn(&Job) -> bool>(
-    runner: &JobRunner,
-    id: uuid::Uuid,
-    pred: F,
-) -> Job {
+async fn wait_until<F: Fn(&Job) -> bool>(runner: &JobRunner, id: uuid::Uuid, pred: F) -> Job {
     for _ in 0..400 {
         if let Some(j) = runner.get(id) {
             if pred(&j) {
@@ -48,7 +44,10 @@ async fn wait_until<F: Fn(&Job) -> bool>(
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("job {id} never satisfied predicate; last state = {:?}", runner.get(id).map(|j| j.state));
+    panic!(
+        "job {id} never satisfied predicate; last state = {:?}",
+        runner.get(id).map(|j| j.state)
+    );
 }
 
 #[tokio::test]
@@ -116,9 +115,13 @@ async fn enumerate_returns_default_catalog() {
         MockTiming::fast(),
     ));
     let runner = JobRunner::new(backend.clone());
-    let devices = wipe_engine::DeviceBackend::enumerate(&*backend).await.unwrap();
+    let devices = wipe_engine::DeviceBackend::enumerate(&*backend)
+        .await
+        .unwrap();
     assert_eq!(devices.len(), 4);
-    assert!(devices.iter().any(|d| d.id == DeviceId("dev-nvme-0".into())));
+    assert!(devices
+        .iter()
+        .any(|d| d.id == DeviceId("dev-nvme-0".into())));
     let _ = runner;
 }
 
@@ -163,11 +166,85 @@ async fn broadcast_stream_observes_outer_and_inner_transitions() {
             }
             _ = tokio::time::sleep(Duration::from_millis(25)) => {}
         }
-        if saw_erased { break; }
+        if saw_erased {
+            break;
+        }
     }
-    assert!(saw_inprogress, "should have observed outer InProgress transition");
-    assert!(saw_inner_running, "should have observed inner Running transition");
-    assert!(saw_command_issued, "should have observed CommandIssued update");
-    assert!(saw_verification_activity, "should have observed a Verification activity");
+    assert!(
+        saw_inprogress,
+        "should have observed outer InProgress transition"
+    );
+    assert!(
+        saw_inner_running,
+        "should have observed inner Running transition"
+    );
+    assert!(
+        saw_command_issued,
+        "should have observed CommandIssued update"
+    );
+    assert!(
+        saw_verification_activity,
+        "should have observed a Verification activity"
+    );
     assert!(saw_erased, "should have observed outer Erased disposition");
+}
+
+// --- hot-plug (identify mode drives this) ----------------------------------
+
+#[tokio::test]
+async fn detaching_a_device_removes_it_from_enumeration() {
+    use wipe_engine::{DeviceBackend, DeviceSimulator};
+    let backend = MockBackend::fast_catalog();
+    let before = backend.enumerate().await.unwrap();
+    assert!(before.len() >= 2);
+
+    let target = before[1].id.clone();
+    let pulled = backend.detach(&target).expect("device was attached");
+    assert_eq!(pulled.id, target);
+
+    let after = backend.enumerate().await.unwrap();
+    assert_eq!(after.len(), before.len() - 1);
+    assert!(!after.iter().any(|d| d.id == target));
+    assert!(backend.detached().iter().any(|d| d.id == target));
+}
+
+#[tokio::test]
+async fn attaching_puts_the_same_device_back() {
+    use wipe_engine::{DeviceBackend, DeviceSimulator};
+    let backend = MockBackend::fast_catalog();
+    let before = backend.enumerate().await.unwrap();
+    let target = before[0].id.clone();
+
+    backend.detach(&target).unwrap();
+    let plugged = backend.attach(Some(&target)).expect("re-attach");
+    assert_eq!(plugged.id, target);
+
+    let after = backend.enumerate().await.unwrap();
+    assert_eq!(after.len(), before.len());
+    assert!(after.iter().any(|d| d.id == target));
+    assert!(backend.detached().is_empty());
+    // Capabilities must come back with it, or the next Job would fail to probe.
+    assert!(backend.capabilities(&target).await.is_ok());
+}
+
+#[tokio::test]
+async fn detaching_an_unknown_device_is_a_no_op() {
+    use wipe_engine::{DeviceBackend, DeviceSimulator};
+    let backend = MockBackend::fast_catalog();
+    assert!(backend.detach(&DeviceId::from("dev-not-here")).is_none());
+    assert!(backend
+        .attach(Some(&DeviceId::from("dev-not-here")))
+        .is_none());
+}
+
+#[tokio::test]
+async fn attach_with_no_id_takes_the_most_recently_detached() {
+    use wipe_engine::{DeviceBackend, DeviceSimulator};
+    let backend = MockBackend::fast_catalog();
+    let devs = backend.enumerate().await.unwrap();
+    backend.detach(&devs[0].id).unwrap();
+    backend.detach(&devs[1].id).unwrap();
+
+    let back = backend.attach(None).expect("something to re-attach");
+    assert_eq!(back.id, devs[1].id, "last one pulled is first one back");
 }

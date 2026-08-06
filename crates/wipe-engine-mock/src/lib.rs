@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use wipe_common::{
     AtaSecurityCaps, BusType, Capabilities, CommandEvidence, Device, DeviceId, MediaType, Method,
-    NvmeSanitizeCaps, SedStatus, VerificationMethod, VerificationReport, WipeError, WipeResult,
-    SampleResult,
+    NvmeSanitizeCaps, SampleResult, SedStatus, VerificationMethod, VerificationReport, WipeError,
+    WipeResult,
 };
 use wipe_engine::{BackendHandle, BackendProgress, DeviceBackend};
 
@@ -53,10 +53,21 @@ impl MockTiming {
 }
 
 pub struct MockBackend {
-    devices: Vec<Device>,
-    caps: HashMap<DeviceId, Capabilities>,
+    /// Behind a lock because the catalog is hot-pluggable: identify mode and
+    /// demos need drives to appear and disappear at runtime, exactly as they
+    /// do when an operator pushes a tray home.
+    catalog: Arc<Mutex<Catalog>>,
     state: Arc<Mutex<MockState>>,
     timing: MockTiming,
+}
+
+#[derive(Default)]
+struct Catalog {
+    /// Currently attached, in enumeration order.
+    devices: Vec<Device>,
+    caps: HashMap<DeviceId, Capabilities>,
+    /// Detached but known, so a demo can plug the same drive back in.
+    detached: Vec<Device>,
 }
 
 #[derive(Default)]
@@ -92,8 +103,11 @@ impl MockBackend {
             caps.insert(d.id.clone(), default_caps_for(d));
         }
         Self {
-            devices,
-            caps,
+            catalog: Arc::new(Mutex::new(Catalog {
+                devices,
+                caps,
+                detached: Vec::new(),
+            })),
             state: Arc::new(Mutex::new(MockState::default())),
             timing,
         }
@@ -102,7 +116,7 @@ impl MockBackend {
     /// Inject capability overrides for a specific device — used in tests
     /// to simulate frozen drives, missing Sanitize, etc.
     pub fn override_caps(&mut self, id: &DeviceId, caps: Capabilities) {
-        self.caps.insert(id.clone(), caps);
+        self.catalog.lock().caps.insert(id.clone(), caps);
     }
 
     fn duration_for(&self, method: &Method) -> f32 {
@@ -110,9 +124,7 @@ impl MockBackend {
             Method::NvmeSanitizeBlockErase { .. }
             | Method::NvmeSanitizeCryptoErase { .. }
             | Method::NvmeSanitizeOverwrite { .. } => self.timing.nvme_sanitize_secs,
-            Method::AtaSecureErase { .. } | Method::OpalRevert => {
-                self.timing.ata_secure_erase_secs
-            }
+            Method::AtaSecureErase { .. } | Method::OpalRevert => self.timing.ata_secure_erase_secs,
             Method::BlockOverwrite { passes, .. } => {
                 self.timing.block_overwrite_secs * (*passes as f32).max(1.0)
             }
@@ -124,11 +136,13 @@ impl MockBackend {
 #[async_trait]
 impl DeviceBackend for MockBackend {
     async fn enumerate(&self) -> WipeResult<Vec<Device>> {
-        Ok(self.devices.clone())
+        Ok(self.catalog.lock().devices.clone())
     }
 
     async fn capabilities(&self, id: &DeviceId) -> WipeResult<Capabilities> {
-        self.caps
+        self.catalog
+            .lock()
+            .caps
             .get(id)
             .cloned()
             .ok_or_else(|| WipeError::DeviceNotFound(id.to_string()))
@@ -141,7 +155,7 @@ impl DeviceBackend for MockBackend {
     }
 
     async fn issue(&self, id: &DeviceId, method: &Method) -> WipeResult<BackendHandle> {
-        if !self.caps.contains_key(id) {
+        if !self.catalog.lock().caps.contains_key(id) {
             return Err(WipeError::DeviceNotFound(id.to_string()));
         }
         let op_id = Uuid::new_v4();
@@ -151,6 +165,8 @@ impl DeviceBackend for MockBackend {
         // Built-in failure injection: a device whose serial contains "FAIL"
         // fails at 70%.
         let fail_at = self
+            .catalog
+            .lock()
             .devices
             .iter()
             .find(|d| d.id == *id)
@@ -217,6 +233,8 @@ impl DeviceBackend for MockBackend {
             })
         } else {
             let bytes_total: u64 = self
+                .catalog
+                .lock()
                 .devices
                 .iter()
                 .find(|d| d.id == op.device)
@@ -245,9 +263,12 @@ impl DeviceBackend for MockBackend {
         samples: u32,
     ) -> WipeResult<VerificationReport> {
         let device = self
+            .catalog
+            .lock()
             .devices
             .iter()
             .find(|d| d.id == *id)
+            .cloned()
             .ok_or_else(|| WipeError::DeviceNotFound(id.to_string()))?;
 
         let seed = if self.timing.deterministic {
@@ -322,7 +343,10 @@ fn shannon_entropy_bits_per_byte(data: &[u8]) -> f32 {
 
 fn issue_evidence(method: &Method) -> CommandEvidence {
     match method {
-        Method::NvmeSanitizeBlockErase { ause, no_deallocate } => CommandEvidence {
+        Method::NvmeSanitizeBlockErase {
+            ause,
+            no_deallocate,
+        } => CommandEvidence {
             interface: "nvme-admin".into(),
             opcode: Some(0x84),
             action: Some(0x02),
@@ -338,7 +362,10 @@ fn issue_evidence(method: &Method) -> CommandEvidence {
             duration_ms: 0,
             note: Some("issued (mock)".into()),
         },
-        Method::NvmeSanitizeCryptoErase { ause, no_deallocate } => CommandEvidence {
+        Method::NvmeSanitizeCryptoErase {
+            ause,
+            no_deallocate,
+        } => CommandEvidence {
             interface: "nvme-admin".into(),
             opcode: Some(0x84),
             action: Some(0x04),
@@ -559,5 +586,35 @@ fn default_caps_for(device: &Device) -> Capabilities {
             frozen: false,
         },
         _ => Capabilities::default(),
+    }
+}
+
+impl wipe_engine::DeviceSimulator for MockBackend {
+    /// Plug a drive in. With no id, re-attaches the most recently detached —
+    /// which is what an operator walking a bench actually does.
+    fn attach(&self, id: Option<&DeviceId>) -> Option<Device> {
+        let mut cat = self.catalog.lock();
+        let idx = match id {
+            Some(want) => cat.detached.iter().position(|d| d.id == *want)?,
+            None => cat.detached.len().checked_sub(1)?,
+        };
+        let device = cat.detached.remove(idx);
+        cat.caps
+            .insert(device.id.clone(), default_caps_for(&device));
+        cat.devices.push(device.clone());
+        Some(device)
+    }
+
+    fn detach(&self, id: &DeviceId) -> Option<Device> {
+        let mut cat = self.catalog.lock();
+        let idx = cat.devices.iter().position(|d| d.id == *id)?;
+        let device = cat.devices.remove(idx);
+        cat.caps.remove(&device.id);
+        cat.detached.push(device.clone());
+        Some(device)
+    }
+
+    fn detached(&self) -> Vec<Device> {
+        self.catalog.lock().detached.clone()
     }
 }
