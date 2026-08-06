@@ -1,11 +1,33 @@
-import { useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useMemo, useState } from "react";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Cpu, HardDrive, Database, AlertTriangle, ChevronRight, UserCircle2, X } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronRight,
+  CircleOff,
+  Cpu,
+  Database,
+  FileSignature,
+  HardDrive,
+  Loader2,
+  Trash2,
+  Unplug,
+  UserCircle2,
+  X,
+} from "lucide-react";
 
 import { api, classNames, formatBytes } from "@/api/client";
 import { useOperator } from "@/operator/context";
-import type { Classification, Device, Intent } from "@/api/types";
+import { latestErasure, useEventStream } from "@/api/ws";
+import type {
+  Classification,
+  Device,
+  ErasureEvent,
+  Intent,
+  Job,
+  JobStateLabel,
+} from "@/api/types";
 
 function deviceIcon(d: Device) {
   switch (d.media_type) {
@@ -19,9 +41,102 @@ function deviceIcon(d: Device) {
   }
 }
 
+/**
+ * Per-device card state. The page joins `/api/devices` against
+ * `/api/jobs` by `device_id` and derives a single status per slot —
+ * the at-a-glance signal that lets an operator walk the bench and
+ * know what's done, what's still running, and what needs attention
+ * without clicking through.
+ */
+type SlotStatus =
+  | { kind: "idle" }
+  | { kind: "wiping"; job: Job; erasure: ErasureEvent }
+  | { kind: "erased"; job: Job }
+  | { kind: "failed"; job: Job; erasure: ErasureEvent }
+  | { kind: "pending_co_sign"; job: Job }
+  | { kind: "destroyed"; job: Job }
+  | { kind: "quarantined"; job: Job }
+  | { kind: "aborted"; job: Job };
+
+function deriveSlotStatus(job: Job | undefined): SlotStatus {
+  if (!job) return { kind: "idle" };
+  const state: JobStateLabel = job.state.state;
+  const erasure = latestErasure(job);
+  switch (state) {
+    case "queued":
+    case "in_progress":
+      if (erasure && erasure.state.state === "failed") {
+        return { kind: "failed", job, erasure };
+      }
+      if (erasure) {
+        return { kind: "wiping", job, erasure };
+      }
+      // Job is queued/in_progress with no erasure yet — treat as wiping
+      // with no progress data so the operator sees a busy indicator.
+      return {
+        kind: "wiping",
+        job,
+        erasure: {
+          // synthetic stub so renderers have a shape; never persisted
+          id: "",
+          device_snapshot: {} as Device,
+          capabilities_snapshot: {} as never,
+          spec: {} as never,
+          resolved_method: null,
+          state: { state: "queued" },
+          progress: null,
+          events: [],
+          created_at: job.created_at,
+          started_at: null,
+          ended_at: null,
+          station_id: null,
+        },
+      };
+    case "erased":
+      return { kind: "erased", job };
+    case "pending_co_sign":
+      return { kind: "pending_co_sign", job };
+    case "destroyed":
+      return { kind: "destroyed", job };
+    case "quarantined":
+      return { kind: "quarantined", job };
+    case "aborted":
+      return { kind: "aborted", job };
+  }
+}
+
 export function DevicesPage() {
-  const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
+  const devices = useQuery({
+    queryKey: ["devices"],
+    queryFn: api.devices,
+    refetchInterval: 4000,
+  });
+  const jobs = useQuery({
+    queryKey: ["jobs"],
+    queryFn: api.jobs,
+    refetchInterval: 1500,
+  });
+  const qc = useQueryClient();
+  // Live broadcast → re-fetch jobs immediately rather than waiting for poll.
+  useEventStream((env) => {
+    if (env.type === "job_broadcast") {
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    }
+  });
+
   const [selected, setSelected] = useState<Device | null>(null);
+
+  const deviceToLatestJob = useMemo(() => {
+    const map = new Map<string, Job>();
+    for (const job of jobs.data ?? []) {
+      const did = job.spec.device_id;
+      const existing = map.get(did);
+      if (!existing || job.created_at > existing.created_at) {
+        map.set(did, job);
+      }
+    }
+    return map;
+  }, [jobs.data]);
 
   if (devices.isLoading) {
     return <div className="text-slate-400">Probing attached storage…</div>;
@@ -43,35 +158,19 @@ export function DevicesPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-lg font-semibold">Attached devices</h2>
-        <span className="text-xs text-slate-500">{list.length} found</span>
+        <h2 className="text-lg font-semibold">Bench</h2>
+        <span className="text-xs text-slate-500">
+          {list.length} device{list.length === 1 ? "" : "s"} attached
+        </span>
       </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {list.map((d) => (
-          <button
+          <DeviceCard
             key={d.id}
-            onClick={() => setSelected(d)}
-            className="card text-left transition hover:border-indigo-500/40 hover:bg-slate-900/80"
-          >
-            <div className="flex items-start justify-between">
-              <div className="flex items-start gap-3">
-                {deviceIcon(d)}
-                <div>
-                  <div className="font-medium">{d.model}</div>
-                  <div className="text-xs text-slate-400">
-                    {d.vendor} · {d.serial}
-                  </div>
-                </div>
-              </div>
-              <ChevronRight className="h-4 w-4 text-slate-500" />
-            </div>
-            <div className="mt-3 flex items-center gap-2">
-              <span className="pill">{d.media_type}</span>
-              <span className="pill">{d.bus}</span>
-              <span className="pill">{formatBytes(d.capacity_bytes)}</span>
-            </div>
-            <div className="mt-2 font-mono text-[11px] text-slate-500">{d.path}</div>
-          </button>
+            device={d}
+            status={deriveSlotStatus(deviceToLatestJob.get(d.id))}
+            onStart={() => setSelected(d)}
+          />
         ))}
       </div>
       {selected && (
@@ -79,6 +178,273 @@ export function DevicesPage() {
       )}
     </div>
   );
+}
+
+function DeviceCard({
+  device,
+  status,
+  onStart,
+}: {
+  device: Device;
+  status: SlotStatus;
+  onStart: () => void;
+}) {
+  const tone = toneFor(status);
+  return (
+    <div
+      className={classNames(
+        "card relative transition",
+        tone.border,
+        tone.bg
+      )}
+    >
+      <div className="flex items-start justify-between">
+        <div className="flex items-start gap-3">
+          {deviceIcon(device)}
+          <div>
+            <div className="font-medium">{device.model}</div>
+            <div className="text-xs text-slate-400">
+              {device.vendor} · {device.serial}
+            </div>
+          </div>
+        </div>
+        <StatusBadge status={status} />
+      </div>
+      <div className="mt-3 flex items-center gap-2">
+        <span className="pill">{device.media_type}</span>
+        <span className="pill">{device.bus}</span>
+        <span className="pill">{formatBytes(device.capacity_bytes)}</span>
+      </div>
+      <div className="mt-2 font-mono text-[11px] text-slate-500">{device.path}</div>
+
+      <StatusBody status={status} />
+
+      <div className="mt-3 flex items-center justify-end gap-2">
+        <Actions status={status} device={device} onStart={onStart} />
+      </div>
+    </div>
+  );
+}
+
+interface Tone {
+  border: string;
+  bg: string;
+  pill: string;
+}
+
+function toneFor(status: SlotStatus): Tone {
+  switch (status.kind) {
+    case "idle":
+      return { border: "", bg: "", pill: "" };
+    case "wiping":
+      return {
+        border: "border-indigo-500/60",
+        bg: "bg-indigo-500/5",
+        pill: "pill-info",
+      };
+    case "erased":
+      return {
+        border: "border-emerald-500/60",
+        bg: "bg-emerald-500/5",
+        pill: "pill-success",
+      };
+    case "failed":
+      return {
+        border: "border-amber-500/60",
+        bg: "bg-amber-500/5",
+        pill: "pill-warning",
+      };
+    case "pending_co_sign":
+      return {
+        border: "border-indigo-400/60",
+        bg: "bg-indigo-400/5",
+        pill: "pill-info",
+      };
+    case "destroyed":
+      return {
+        border: "border-orange-500/60",
+        bg: "bg-orange-500/5",
+        pill: "pill-warning",
+      };
+    case "quarantined":
+      return {
+        border: "border-rose-500/60",
+        bg: "bg-rose-500/5",
+        pill: "pill-danger",
+      };
+    case "aborted":
+      return { border: "border-slate-700", bg: "", pill: "" };
+  }
+}
+
+function StatusBadge({ status }: { status: SlotStatus }) {
+  const tone = toneFor(status);
+  const { icon, label } = badgeContent(status);
+  return (
+    <span className={classNames("pill", tone.pill)}>
+      {icon}
+      {label}
+    </span>
+  );
+}
+
+function badgeContent(status: SlotStatus): { icon: React.ReactNode; label: string } {
+  switch (status.kind) {
+    case "idle":
+      return { icon: <HardDrive className="h-3 w-3" />, label: "idle" };
+    case "wiping":
+      return {
+        icon: <Loader2 className="h-3 w-3 animate-spin" />,
+        label: "wiping",
+      };
+    case "erased":
+      return { icon: <CheckCircle2 className="h-3 w-3" />, label: "erased" };
+    case "failed":
+      return {
+        icon: <AlertTriangle className="h-3 w-3" />,
+        label: "needs attention",
+      };
+    case "pending_co_sign":
+      return {
+        icon: <FileSignature className="h-3 w-3" />,
+        label: "pending co-sign",
+      };
+    case "destroyed":
+      return { icon: <Trash2 className="h-3 w-3" />, label: "destroyed" };
+    case "quarantined":
+      return {
+        icon: <AlertTriangle className="h-3 w-3" />,
+        label: "quarantined",
+      };
+    case "aborted":
+      return { icon: <CircleOff className="h-3 w-3" />, label: "aborted" };
+  }
+}
+
+function StatusBody({ status }: { status: SlotStatus }) {
+  switch (status.kind) {
+    case "idle":
+      return null;
+    case "wiping": {
+      const pct = Math.round((status.erasure.progress?.fraction ?? 0) * 100);
+      const stage = status.erasure.progress?.stage ?? "starting…";
+      const eta = status.erasure.progress?.eta_seconds;
+      return (
+        <div className="mt-3">
+          <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+            <div
+              className="h-full rounded-full bg-indigo-500 transition-all"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <div className="mt-1 flex items-center justify-between text-[10px] text-slate-400">
+            <span>{stage}</span>
+            <span>
+              {pct}%{eta != null ? ` · ${eta}s left` : ""}
+            </span>
+          </div>
+        </div>
+      );
+    }
+    case "erased":
+      return (
+        <div className="mt-3 flex items-center gap-2 text-xs text-emerald-300">
+          <Unplug className="h-3.5 w-3.5" />
+          <span className="font-medium">Safe to disconnect</span>
+        </div>
+      );
+    case "failed":
+      return (
+        <div className="mt-3 text-xs text-amber-300">
+          Erasure attempt failed — operator action required.
+        </div>
+      );
+    case "pending_co_sign":
+      return (
+        <div className="mt-3 text-xs text-indigo-300">
+          Awaiting supervisor co-sign on a destruction manifest.
+        </div>
+      );
+    case "destroyed":
+      return (
+        <div className="mt-3 text-xs text-orange-300">
+          Marked destroyed — drive should not be on the bench.
+        </div>
+      );
+    case "quarantined":
+      return (
+        <div className="mt-3 text-xs text-rose-300">
+          Quarantined — set aside for review.
+        </div>
+      );
+    case "aborted":
+      return (
+        <div className="mt-3 text-xs text-slate-400">Previous Job aborted.</div>
+      );
+  }
+}
+
+function Actions({
+  status,
+  device: _device,
+  onStart,
+}: {
+  status: SlotStatus;
+  device: Device;
+  onStart: () => void;
+}) {
+  switch (status.kind) {
+    case "idle":
+      return (
+        <button className="btn btn-primary" onClick={onStart}>
+          Start <ChevronRight className="h-4 w-4" />
+        </button>
+      );
+    case "wiping":
+    case "failed":
+    case "pending_co_sign":
+      return (
+        <Link
+          to="/jobs/$jobId"
+          params={{ jobId: status.job.id }}
+          className="btn btn-secondary"
+        >
+          Open Job <ChevronRight className="h-4 w-4" />
+        </Link>
+      );
+    case "erased":
+      return (
+        <>
+          <button className="btn btn-ghost" onClick={onStart} title="Re-wipe this drive">
+            Start new
+          </button>
+          <Link
+            to="/certs/$jobId"
+            params={{ jobId: status.job.id }}
+            className="btn btn-primary"
+          >
+            View cert
+          </Link>
+        </>
+      );
+    case "destroyed":
+    case "quarantined":
+    case "aborted":
+      return (
+        <>
+          <button className="btn btn-ghost" onClick={onStart} title="Re-wipe this drive">
+            Start new
+          </button>
+          <Link
+            to="/jobs/$jobId"
+            params={{ jobId: status.job.id }}
+            className="btn btn-secondary"
+          >
+            Open Job
+          </Link>
+        </>
+      );
+  }
 }
 
 function EraseWizard({ device, onClose }: { device: Device; onClose: () => void }) {
