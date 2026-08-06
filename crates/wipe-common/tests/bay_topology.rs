@@ -393,3 +393,126 @@ fn a_minimal_hand_written_config_deserializes() {
     let r = t.resolve(&devices(3));
     assert_eq!(placed(&r, "2").as_deref(), Some("dev-1"));
 }
+
+// --- arbitrary + mixed benches ---------------------------------------------
+//
+// The product claim is that a customer describes *their* hardware, whatever it
+// is. These pin the parts of that claim the model is responsible for: several
+// enclosures of different kinds at once, differing grid shapes, and form
+// factors that vary both between and within banks.
+
+fn mixed_bench() -> BayTopology {
+    let rack = grid_bank(
+        "rack", "a", Some("Bank A"), 4, 6,
+        BayFormFactor::Lff35, TrayOrientation::Horizontal,
+        BayOrder::RowMajor, BayOrigin::TopLeft, 1,
+    );
+    let dock = grid_bank(
+        "dock", "a", None, 1, 2,
+        BayFormFactor::Sff25, TrayOrientation::Vertical,
+        BayOrder::RowMajor, BayOrigin::TopLeft, 1,
+    );
+    let carrier = grid_bank(
+        "carrier", "a", None, 4, 2,
+        BayFormFactor::M2, TrayOrientation::Horizontal,
+        BayOrder::ColumnMajor, BayOrigin::TopLeft, 1,
+    );
+
+    BayTopology {
+        schema_version: BAY_TOPOLOGY_SCHEMA_VERSION,
+        label: "Bench 3 — mixed".into(),
+        generated: false,
+        auto_fill_unbound: true,
+        enclosures: vec![
+            Enclosure {
+                id: "rack".into(),
+                label: "Supermicro 846 — 24 bay".into(),
+                kind: EnclosureKind::Rackmount,
+                banks: vec![rack],
+                note: None,
+            },
+            Enclosure {
+                id: "dock".into(),
+                label: "StarTech 2-bay dock".into(),
+                kind: EnclosureKind::Dock,
+                banks: vec![dock],
+                note: None,
+            },
+            Enclosure {
+                id: "carrier".into(),
+                label: "DiskClon NVMe-8".into(),
+                kind: EnclosureKind::NvmeCarrier,
+                banks: vec![carrier],
+                note: None,
+            },
+        ],
+    }
+}
+
+#[test]
+fn a_bench_can_combine_enclosures_of_different_kinds_and_shapes() {
+    let t = mixed_bench();
+    assert_eq!(t.enclosures.len(), 3);
+    assert_eq!(t.bay_count(), 24 + 2 + 8);
+    assert!(t.duplicate_bay_ids().is_empty());
+
+    let kinds: Vec<_> = t.enclosures.iter().map(|e| e.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            EnclosureKind::Rackmount,
+            EnclosureKind::Dock,
+            EnclosureKind::NvmeCarrier
+        ]
+    );
+    // Each enclosure keeps its own grid shape and numbering run.
+    assert_eq!((t.enclosures[0].banks[0].rows, t.enclosures[0].banks[0].cols), (4, 6));
+    assert_eq!((t.enclosures[2].banks[0].rows, t.enclosures[2].banks[0].cols), (4, 2));
+}
+
+#[test]
+fn resolution_spans_every_enclosure_on_the_bench() {
+    // Enumeration fill must walk the whole bench, not stop at the first
+    // enclosure: a 24-bay rack full of drives must not starve the dock.
+    let t = mixed_bench();
+    // More devices than the first enclosure holds, fewer than the whole bench.
+    let devs = devices(30);
+    let r = t.resolve(&devs);
+    assert_eq!(r.occupancy.len(), 30, "every device should land somewhere");
+    assert_eq!(r.unplaced_devices.len(), 0);
+
+    let filled_enclosures: std::collections::BTreeSet<_> = r
+        .occupancy
+        .iter()
+        .map(|o| o.bay_id.0.split('.').next().unwrap().to_string())
+        .collect();
+    assert_eq!(filled_enclosures.len(), 3, "all three enclosures used");
+}
+
+#[test]
+fn form_factor_can_vary_within_a_single_bank() {
+    // A 3.5" caddy carrying a 2.5" sled is ordinary on an ITAD bench.
+    let mut t = mixed_bench();
+    t.enclosures[0].banks[0].bays[2].form_factor = Some(BayFormFactor::Sff25);
+
+    let json = serde_json::to_string(&t).unwrap();
+    let back: BayTopology = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, t, "per-bay override must survive a round trip");
+
+    let bay3 = bay(&back, "3");
+    assert_eq!(bay3.form_factor, Some(BayFormFactor::Sff25));
+    // Bank default is unchanged for its other bays.
+    assert_eq!(back.enclosures[0].banks[0].form_factor, BayFormFactor::Lff35);
+    assert_eq!(bay(&back, "4").form_factor, None);
+}
+
+#[test]
+fn bay_ids_stay_unique_across_enclosures_that_share_bank_names() {
+    // Every enclosure here has a bank called "a" and bays labelled "1".
+    let t = mixed_bench();
+    assert!(t.duplicate_bay_ids().is_empty());
+    let ones: Vec<_> = t.bays().filter(|b| b.label == "1").collect();
+    assert_eq!(ones.len(), 3, "three bays are labelled 1");
+    let ids: std::collections::BTreeSet<_> = ones.iter().map(|b| b.id.clone()).collect();
+    assert_eq!(ids.len(), 3, "but their ids are distinct");
+}
