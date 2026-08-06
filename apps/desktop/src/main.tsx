@@ -12,6 +12,7 @@ import { JobDetailPage } from "./pages/JobDetailPage";
 import { CertificatePage } from "./pages/CertificatePage";
 import { FleetPage } from "./pages/FleetPage";
 import { ManifestsPage } from "./pages/ManifestsPage";
+import { BenchSetupPage } from "./pages/BenchSetupPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -66,6 +67,12 @@ const manifestsRoute = createRoute({
   component: ManifestsPage,
 });
 
+const benchSetupRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/bench-setup",
+  component: BenchSetupPage,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   jobsRoute,
@@ -73,6 +80,7 @@ const routeTree = rootRoute.addChildren([
   certRoute,
   fleetRoute,
   manifestsRoute,
+  benchSetupRoute,
 ]);
 
 const router = createRouter({ routeTree });

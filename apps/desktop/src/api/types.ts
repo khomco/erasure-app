@@ -416,6 +416,16 @@ export interface Bay {
   note?: string | null;
 }
 
+export type BayOrder = "row_major" | "column_major";
+export type BayOrigin = "top_left" | "top_right" | "bottom_left" | "bottom_right";
+
+/** How a bank's labels were generated, so an editor can round-trip them. */
+export interface NumberingRun {
+  order: BayOrder;
+  origin: BayOrigin;
+  label_start: number;
+}
+
 export interface Bank {
   id: string;
   label?: string | null;
@@ -423,6 +433,7 @@ export interface Bank {
   cols: number;
   form_factor: BayFormFactor;
   orientation: TrayOrientation;
+  numbering?: NumberingRun | null;
   bays: Bay[];
 }
 
@@ -441,7 +452,32 @@ export interface BayTopology {
    *  display only — the UI must say so. */
   generated: boolean;
   auto_fill_unbound: boolean;
+  /** Bumped on every save; a stale value is rejected with 409. */
+  revision: number;
   enclosures: Enclosure[];
+}
+
+export type ProblemSeverity = "error" | "warning";
+
+export interface TopologyProblem {
+  severity: ProblemSeverity;
+  code: string;
+  message: string;
+  enclosure_id?: string | null;
+  bank_id?: string | null;
+  bay_id?: string | null;
+}
+
+/** Where configuration goes, and whether it survives a reboot (ADR-0003). */
+export type StoreTier = "local_file" | "control_plane" | "ephemeral";
+
+export interface StoreStatus {
+  tier: StoreTier;
+  survives_reboot: boolean;
+  location: string;
+  /** Tier 3: nowhere to persist and nobody has said what to do about it. */
+  needs_operator_decision: boolean;
+  detail: string;
 }
 
 export interface BayOccupancy {

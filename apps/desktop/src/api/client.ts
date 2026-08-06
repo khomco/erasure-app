@@ -7,7 +7,9 @@ import type {
   JobSpec,
   OperatorRef,
   PublicKeyResponse,
+  BayTopology,
   ResolvedBayTopology,
+  StoreStatus,
   SignedCertificate,
   StationInfo,
 } from "./types";
@@ -65,6 +67,15 @@ export const api = {
   fleetLead: () => jsonFetch<{ lead: string | null; is_lead: boolean }>("/api/fleet/lead"),
   devices: () => jsonFetch<Device[]>("/api/devices"),
   bayTopology: () => jsonFetch<ResolvedBayTopology>("/api/bay-topology"),
+  bayTopologyConfig: () => jsonFetch<BayTopology>("/api/bay-topology/config"),
+  bayTopologyStore: () => jsonFetch<StoreStatus>("/api/bay-topology/store"),
+  acknowledgeEphemeralStore: () =>
+    jsonFetch<StoreStatus>("/api/bay-topology/store/acknowledge", { method: "POST" }),
+  saveBayTopology: (topology: BayTopology) =>
+    jsonFetch<BayTopology>("/api/bay-topology", {
+      method: "PUT",
+      body: JSON.stringify(topology),
+    }),
   deviceCapabilities: (id: string) =>
     jsonFetch<Capabilities>(`/api/devices/${encodeURIComponent(id)}/capabilities`),
   jobs: () => jsonFetch<Job[]>("/api/jobs"),

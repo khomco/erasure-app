@@ -57,6 +57,26 @@ function cellSize(bank: Bank): { w: number; h: number } {
     : { w: face.long, h: face.short };
 }
 
+/**
+ * A bay's own tray size, honouring a per-bay form-factor override.
+ *
+ * The grid cell always comes from the *bank* — the physical slot pitch does
+ * not change — but a 2.5" sled sitting in a 3.5" caddy is ordinary on an ITAD
+ * bench, and should read as a smaller tray inside the same slot rather than
+ * being silently drawn full-size.
+ */
+function traySize(bank: Bank, bay: Bay): { w: number; h: number } {
+  const cell = cellSize(bank);
+  if (!bay.form_factor || bay.form_factor === bank.form_factor) return cell;
+  const face = trayFace(bay.form_factor);
+  const own =
+    bank.orientation === "vertical"
+      ? { w: face.short, h: face.long }
+      : { w: face.long, h: face.short };
+  // Never overflow the slot it lives in.
+  return { w: Math.min(own.w, cell.w), h: Math.min(own.h, cell.h) };
+}
+
 function bankSize(bank: Bank): { w: number; h: number } {
   const cell = cellSize(bank);
   return {
@@ -259,20 +279,40 @@ function BankGroup({
         strokeWidth={1}
       />
       {bank.bays.map((bay) => {
-        const x = BANK_PAD + bay.col * (cell.w + TRAY_GAP);
-        const y = BANK_PAD + bay.row * (cell.h + TRAY_GAP);
+        const slotX = BANK_PAD + bay.col * (cell.w + TRAY_GAP);
+        const slotY = BANK_PAD + bay.row * (cell.h + TRAY_GAP);
+        const tray = traySize(bank, bay);
+        // A smaller tray sits centred in its slot, so the grid pitch still
+        // reads as the physical bay spacing.
+        const x = slotX + (cell.w - tray.w) / 2;
+        const y = slotY + (cell.h - tray.h) / 2;
+        const undersized = tray.w < cell.w || tray.h < cell.h;
         return (
-          <Tray
-            key={bay.id}
-            cell={lookup(bay)}
-            x={x}
-            y={y}
-            w={cell.w}
-            h={cell.h}
-            vertical={vertical}
-            onSelect={onSelect}
-            selected={selectedBayId === bay.id}
-          />
+          <g key={bay.id}>
+            {undersized && (
+              // Outline of the slot the smaller tray is sitting in.
+              <rect
+                x={slotX}
+                y={slotY}
+                width={cell.w}
+                height={cell.h}
+                rx={3}
+                fill="none"
+                stroke="#16202f"
+                strokeDasharray="2 3"
+              />
+            )}
+            <Tray
+              cell={lookup(bay)}
+              x={x}
+              y={y}
+              w={tray.w}
+              h={tray.h}
+              vertical={vertical}
+              onSelect={onSelect}
+              selected={selectedBayId === bay.id}
+            />
+          </g>
         );
       })}
     </g>
@@ -433,10 +473,20 @@ export function BayMap({
     return { bay, device, job, status };
   };
 
+  // Enclosures flow and wrap rather than stacking in one tall column: a bench
+  // with a rack, a dock and a carrier is three separate boxes on a workbench,
+  // not a vertical list, and stacking wasted the whole right-hand side.
   return (
-    <div className="space-y-4">
+    <div className="flex flex-wrap items-start gap-4">
       {resolved.topology.enclosures.map((enc) => (
-        <div key={enc.id} className="overflow-x-auto">
+        // Width comes from the enclosure's own geometry: as a flex item the
+        // SVG's width:100% would otherwise resolve against a content-derived
+        // base and collapse the whole chassis to a thumbnail.
+        <div
+          key={enc.id}
+          className="max-w-full shrink-0"
+          style={{ width: enclosureSize(enc).w }}
+        >
           <EnclosureGroup
             enc={enc}
             lookup={lookup}
@@ -444,7 +494,7 @@ export function BayMap({
             selectedBayId={selectedBayId}
           />
           {enc.note && (
-            <p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-slate-500">
+            <p className="mt-1 max-w-sm text-[11px] leading-relaxed text-slate-500">
               {enc.note}
             </p>
           )}
