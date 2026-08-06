@@ -478,17 +478,31 @@ consumers.
 
 ### PXE-ephemeral discipline
 
+> **The guarantee is about evidence, not configuration** (ADR-0003).
+> **Evidence** — certs, activity chains, signatures, command evidence —
+> is never written to local storage. **Configuration** — bay topology,
+> station label — describes the bench rather than anyone's data, and
+> persists where the station has somewhere to put it. The audit answer
+> below is unchanged: a station pulled off the rack yields no evidence
+> and no customer data.
+
 For PXE-booted stations:
 
 1. Read-only OS image; no writable storage that survives reboot.
-2. All state in RAM; certs streamed to lead/hub/cloud immediately on
-   signing.
+2. All *evidence* in RAM; certs streamed to lead/hub/cloud immediately
+   on signing.
 3. License token fetched from lead/hub at boot, RAM-resident, expires
    if check-in stops.
 4. Signing keys never on the station. Signing happens at the lead
    (YubiKey/PIV at supervisor desk) or in the cloud (KMS).
 5. Audit answer to *"what's on this station if pulled off the rack?"*
-   is *"nothing."*
+   is *"nothing that matters"* — no certificates, no asset records, no
+   customer identifiers. Possibly a bay map describing our own bench.
+6. Station configuration resolves through the tiered store in ADR-0003:
+   local file where writable, else a control plane keyed by station id,
+   else the operator is asked, else per-session ephemeral with the loss
+   stated plainly in the UI. A PXE station typically lands on tier 2 or
+   4, and stays fully functional either way.
 
 ## 8. Operator UX model
 

@@ -47,7 +47,7 @@ The hybrid Bun+Rust design from earlier in scoping collapsed to all-Rust once we
 
 1. **The engine code wants to live in Rust** anyway (ioctl, raw block I/O, audit story).
 2. **Tauri is a Rust app** with an OS-native webview — adding Bun back in would mean two processes and a network hop for what should be a single binary.
-3. **Everything Bun was buying us (HTTP server, SQLite, cert generation) has perfectly good Rust equivalents** that don't add audit surface: Axum, rusqlite (added when persistence lands), ed25519-dalek.
+3. **Everything Bun was buying us (HTTP server, SQLite, cert generation) has perfectly good Rust equivalents** that don't add audit surface: Axum, rusqlite (added when the Enterprise data model lands; station *configuration* uses a plain JSON store — ADR-0003), ed25519-dalek.
 4. **The team scaling concern** flips around: if the team needs to maintain Rust for the engine, doubling down on one language is easier than maintaining a polyglot codebase.
 
 The frontend stays TypeScript because that's where TS earns its keep — the React + Tailwind ecosystem is genuinely faster than any native UI toolkit for the table-heavy, wizard-driven, dashboard-style UI this product needs.
@@ -155,6 +155,29 @@ attempt) — which flow channel → WebSocket → frontend.
 This is the offline-verification path. The CLI command
 `wipestation verify-cert` exposes it; auditors only need the published
 public key.
+
+## Station configuration store
+
+Evidence never touches local storage. *Configuration* — today just the bay
+topology — does, through a `TopologyStore` seam whose tier the station
+detects for itself at startup (ADR-0003):
+
+```
+  writable config path?  ──yes──▶  LocalFile     atomic write, survives reboot
+        │ no
+  control plane set?     ──yes──▶  ControlPlane  PUT/GET keyed by station id
+        │ no                                     (client seam; hub is future work)
+        ▼
+  Tier 3: ask the operator ──acknowledged──▶ Ephemeral   RAM only, stated in the UI
+```
+
+Detection is a write probe — create a temp file in the target directory and
+remove it — rather than an inference from mount flags or uid, which get
+read-only NFS, overlayfs and full disks wrong.
+
+The current tier is operational state an operator may have to explain, so it
+is served at `GET /api/bay-topology/store` and shown in the UI rather than
+buried in a log line.
 
 ## Fleet discovery
 

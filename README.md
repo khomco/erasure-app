@@ -147,7 +147,7 @@ to `Destroyed`.
 - **Command-level evidence** — every command the backend issues produces a [`CommandEvidence`](crates/wipe-common/src/evidence.rs) record (opcode, action, status, log page bytes). Auditors read the actual proof, not a marketing summary.
 - **Offline-verifiable certs** — JSON-LD payload, canonicalized via deterministic key-sorting, signed with Ed25519. Embedded `canonical_sha256_hex` defends against silent payload modification.
 - **mDNS fleet discovery** — every station advertises `_wipestation._tcp.local.` with TXT metadata. Tablets/operators discover and select stations from the LAN. Lead election is deterministic by `(started_at, id)` — no Raft round needed for small fleets.
-- **PXE-ephemeral by design** — no persistent local state for cert content; certs are signed in-RAM and shipped to lead/hub/cloud or downloaded. (Persistence layers will land alongside the real hardware backend.)
+- **PXE-ephemeral by design** — **no persistent local state for evidence**: certs are signed in-RAM and shipped to lead/hub/cloud or downloaded, never written to local storage. *Configuration* (the bay topology) is a different matter and does persist where the station has somewhere to put it — see [ADR-0003](docs/adr/0003-station-config-persistence.md) for the tiered store and why the distinction is drawn.
 - **Single binary, three frontends** — the Tauri window, the Axum HTTP API (for tablets and automation), and a future Ratatui TUI all wrap the same engine.
 
 ## Test inventory (50 tests, all passing)
