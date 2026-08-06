@@ -53,7 +53,7 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
 # Prereqs: rustup-installed stable toolchain, pnpm, jq
 # (the CI/demo scripts source ~/.cargo/env automatically).
 
-# Run all Rust tests (28 across 6 crates):
+# Run all Rust tests (50 across 6 crates):
 cargo test --workspace -- --test-threads=1
 
 # Build + typecheck the frontend:
@@ -150,11 +150,12 @@ to `Destroyed`.
 - **PXE-ephemeral by design** — no persistent local state for cert content; certs are signed in-RAM and shipped to lead/hub/cloud or downloaded. (Persistence layers will land alongside the real hardware backend.)
 - **Single binary, three frontends** — the Tauri window, the Axum HTTP API (for tablets and automation), and a future Ratatui TUI all wrap the same engine.
 
-## Test inventory (28 tests, all passing)
+## Test inventory (50 tests, all passing)
 
 | Crate / file | Tests | Covers |
 | --- | --- | --- |
 | `wipe-common/tests/method_selection.rs` | 7 | R2 decision flow across NVMe/SATA/HDD; destroy intent; frozen device handling; evidence serde round-trip |
+| `wipe-common/tests/bay_topology.rs` | 22 | Bay grid construction and vendor numbering runs (row/column-major, four origins, label offsets); bay→device resolution across every binding kind; declared bindings beating enumeration fill; no device placed twice; disabled bays skipped; overflow reported; generated-fallback flagging; serde round-trip and a hand-written config |
 | `wipe-cert/src/canonical.rs` (inline) | 4 | Canonical JSON: sorted keys, nested sort, finite-only numbers, integer preservation |
 | `wipe-cert/tests/sign_verify.rs` | 8 | sign+verify happy path, unknown-key rejection, tamper detection, JSON round-trip, activity chain carries erasure + verification, supervisor co-signature verifies independently, deterministic public-key-id, verifying-key round-trip |
 | `wipe-engine-mock/tests/end_to_end.rs` | 4 | NVMe crypto-erase happy path reaches `Erased`; SATA failure keeps the outer Job `InProgress` for an operator decision; enumerate; broadcast stream observes outer *and* inner transitions |
@@ -167,12 +168,50 @@ Plus the `scripts/demo.sh` end-to-end shell drives two real station processes, m
 
 | Page | What it shows |
 | --- | --- |
-| **Devices** | Bench view — one card per attached device, joined against its current Job by `device_id` and colour-coded by slot status (idle / wiping / erased / failed / pending co-sign / destroyed / quarantined / aborted), with a "safe to disconnect" affordance on Erased and a "needs attention" affordance on Failed |
+| **Devices** | Bench view, in two modes — a **bay map** that mirrors the station's physical drive bays (see below), and a **card grid** with one card per attached device. Both join `/api/devices` against `/api/jobs` by `device_id` and colour-code by slot status (empty / idle / wiping / erased / failed / pending co-sign / destroyed / quarantined / aborted), with a "safe to disconnect" affordance on Erased and a "needs attention" affordance on Failed |
 | **Jobs** | All Jobs with outer state and activity counts |
 | **Job Detail** | Live activity timeline over the `JobUpdate` WebSocket stream |
 | **Certificate** | Signed-cert viewer, including the activity chain and both signatures on the destroy path |
 | **Manifests** | Destruction-manifest assembly and supervisor co-sign |
 | **Fleet** | mDNS-discovered peers and the elected lead |
+
+## Bay map — mirroring the physical bench
+
+A station can declare the drive bays it physically has, so the Devices page
+renders a layout the operator recognises instead of a grid of cards in
+enumeration order. The hierarchy is `BayTopology → Enclosure → Bank → Bay`;
+everything is parameterised (grid shape, tray orientation, form factor,
+numbering run, bay→device binding) rather than templated per chassis. See
+[ADR-0002](docs/adr/0002-configurable-bay-topology.md).
+
+```bash
+# List the built-in presets
+wipestation bay-presets
+
+# Run against one
+wipestation serve --fast --bay-profile arma-4u-32
+
+# Or dump a preset as a starting point for your own bench and edit it
+wipestation bay-presets --dump arma-4u-32 > bench.json
+wipestation serve --bay-topology bench.json
+```
+
+| Preset | Shape |
+| --- | --- |
+| `arma-4u-32` | 4U rackmount: two banks of 2×8 front-loading trays either side of a ventilation column |
+| `dock-2bay` | Two-bay top-loading hot-swap dock |
+| `nvme-carrier-8` | Eight-socket M.2 NVMe carrier |
+
+`GET /api/bay-topology` returns the geometry with each bay's `device_id`
+already resolved — the frontend renders, it never re-implements the binding
+rules. Bindings resolve `by` SES device slot, `/dev` path, serial, WWN or
+explicit device id; unbound bays fall back to enumeration order unless
+`auto_fill_unbound` is off. Devices that no bay claimed are reported in
+`unplaced_devices` and surfaced in the UI rather than silently dropped.
+
+**A station with no bay config does not get a plausible-looking chassis.** It
+gets a single auto-sized bank flagged `generated: true`, and the UI says the
+positions are enumeration order, not physical bays.
 
 ## Not implemented yet
 

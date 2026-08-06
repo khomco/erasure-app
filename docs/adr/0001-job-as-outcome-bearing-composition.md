@@ -94,4 +94,4 @@ readable.
    branch.
 
 `DiagnosticEvent` and `HealthCheckEvent` landed as schema-only types —
-see CONTEXT §11 v0.2 #10 for the remaining runtime work.
+see CONTEXT §11 v0.2 #11 for the remaining runtime work.

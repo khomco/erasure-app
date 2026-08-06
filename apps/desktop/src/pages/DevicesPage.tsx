@@ -19,15 +19,16 @@ import {
 
 import { api, classNames, formatBytes } from "@/api/client";
 import { useOperator } from "@/operator/context";
-import { latestErasure, useEventStream } from "@/api/ws";
-import type {
-  Classification,
-  Device,
-  ErasureEvent,
-  Intent,
-  Job,
-  JobStateLabel,
-} from "@/api/types";
+import { useEventStream } from "@/api/ws";
+import { BayMap, type BayCellData } from "@/bench/BayMap";
+import {
+  ATTENTION_KINDS,
+  deriveSlotStatus,
+  SLOT_TONE,
+  type SlotStatus,
+  type SlotStatusKind,
+} from "@/bench/slotStatus";
+import type { Classification, Device, Intent, Job } from "@/api/types";
 
 function deviceIcon(d: Device) {
   switch (d.media_type) {
@@ -41,69 +42,8 @@ function deviceIcon(d: Device) {
   }
 }
 
-/**
- * Per-device card state. The page joins `/api/devices` against
- * `/api/jobs` by `device_id` and derives a single status per slot —
- * the at-a-glance signal that lets an operator walk the bench and
- * know what's done, what's still running, and what needs attention
- * without clicking through.
- */
-type SlotStatus =
-  | { kind: "idle" }
-  | { kind: "wiping"; job: Job; erasure: ErasureEvent }
-  | { kind: "erased"; job: Job }
-  | { kind: "failed"; job: Job; erasure: ErasureEvent }
-  | { kind: "pending_co_sign"; job: Job }
-  | { kind: "destroyed"; job: Job }
-  | { kind: "quarantined"; job: Job }
-  | { kind: "aborted"; job: Job };
-
-function deriveSlotStatus(job: Job | undefined): SlotStatus {
-  if (!job) return { kind: "idle" };
-  const state: JobStateLabel = job.state.state;
-  const erasure = latestErasure(job);
-  switch (state) {
-    case "queued":
-    case "in_progress":
-      if (erasure && erasure.state.state === "failed") {
-        return { kind: "failed", job, erasure };
-      }
-      if (erasure) {
-        return { kind: "wiping", job, erasure };
-      }
-      // Job is queued/in_progress with no erasure yet — treat as wiping
-      // with no progress data so the operator sees a busy indicator.
-      return {
-        kind: "wiping",
-        job,
-        erasure: {
-          // synthetic stub so renderers have a shape; never persisted
-          id: "",
-          device_snapshot: {} as Device,
-          capabilities_snapshot: {} as never,
-          spec: {} as never,
-          resolved_method: null,
-          state: { state: "queued" },
-          progress: null,
-          events: [],
-          created_at: job.created_at,
-          started_at: null,
-          ended_at: null,
-          station_id: null,
-        },
-      };
-    case "erased":
-      return { kind: "erased", job };
-    case "pending_co_sign":
-      return { kind: "pending_co_sign", job };
-    case "destroyed":
-      return { kind: "destroyed", job };
-    case "quarantined":
-      return { kind: "quarantined", job };
-    case "aborted":
-      return { kind: "aborted", job };
-  }
-}
+// Slot status derivation lives in @/bench/slotStatus so the card grid and the
+// bay map cannot disagree about what colour a drive is.
 
 export function DevicesPage() {
   const devices = useQuery({
@@ -124,7 +64,23 @@ export function DevicesPage() {
     }
   });
 
+  const bays = useQuery({
+    queryKey: ["bay-topology"],
+    queryFn: api.bayTopology,
+    // Geometry is static config; only the occupancy moves, and that only
+    // when a drive is physically inserted or pulled.
+    refetchInterval: 5000,
+  });
+
   const [selected, setSelected] = useState<Device | null>(null);
+  const [view, setView] = useState<"bays" | "cards">("bays");
+  const [focusedBayId, setFocusedBayId] = useState<string | null>(null);
+
+  const devicesById = useMemo(() => {
+    const m = new Map<string, Device>();
+    for (const d of devices.data ?? []) m.set(d.id, d);
+    return m;
+  }, [devices.data]);
 
   const deviceToLatestJob = useMemo(() => {
     const map = new Map<string, Job>();
@@ -155,27 +111,165 @@ export function DevicesPage() {
     );
   }
   const list = devices.data ?? [];
+  const resolved = bays.data ?? null;
+
+  const statuses = list.map((d) => deriveSlotStatus(deviceToLatestJob.get(d.id)));
+  const attention = statuses.filter((s) =>
+    ATTENTION_KINDS.includes(s.kind),
+  ).length;
+
+  const onBaySelect = (cell: BayCellData) => {
+    setFocusedBayId(cell.bay.id);
+    // An empty bay has nothing to act on; clicking a populated one opens the
+    // same wizard the card grid does.
+    if (cell.device && cell.status.kind === "empty") return;
+    if (cell.device && cell.status.kind === "idle") setSelected(cell.device);
+  };
+
   return (
     <div className="space-y-4">
-      <div className="flex items-baseline justify-between">
-        <h2 className="text-lg font-semibold">Bench</h2>
-        <span className="text-xs text-slate-500">
-          {list.length} device{list.length === 1 ? "" : "s"} attached
-        </span>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div className="flex items-baseline gap-3">
+          <h2 className="text-lg font-semibold">Bench</h2>
+          {resolved && (
+            <span className="text-xs text-slate-500">
+              {resolved.topology.label}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          {attention > 0 && (
+            <span className="pill pill-warning">
+              <AlertTriangle className="h-3 w-3" />
+              {attention} need{attention === 1 ? "s" : ""} attention
+            </span>
+          )}
+          <span className="text-xs text-slate-500">
+            {list.length} device{list.length === 1 ? "" : "s"} attached
+          </span>
+          <ViewToggle view={view} onChange={setView} />
+        </div>
       </div>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {list.map((d) => (
-          <DeviceCard
-            key={d.id}
-            device={d}
-            status={deriveSlotStatus(deviceToLatestJob.get(d.id))}
-            onStart={() => setSelected(d)}
-          />
-        ))}
-      </div>
+
+      {view === "bays" ? (
+        bays.isLoading ? (
+          <div className="text-slate-400">Reading bay layout…</div>
+        ) : bays.isError ? (
+          <div className="card border-rose-700/60 text-xs text-rose-300">
+            Could not read the bay topology — falling back to cards.
+          </div>
+        ) : resolved ? (
+          <div className="space-y-3">
+            {resolved.topology.generated && (
+              <div className="rounded-md border border-amber-600/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
+                <span className="font-semibold">Bench not configured.</span>{" "}
+                These positions are enumeration order, not physical bays. Start
+                the station with <code>--bay-profile</code> or{" "}
+                <code>--bay-topology</code> to mirror the real hardware.
+              </div>
+            )}
+            <BayMap
+              resolved={resolved}
+              devicesById={devicesById}
+              jobsByDeviceId={deviceToLatestJob}
+              deriveStatus={deriveSlotStatus}
+              onSelect={onBaySelect}
+              selectedBayId={focusedBayId}
+            />
+            <BayLegend />
+            {resolved.unplaced_devices.length > 0 && (
+              <div className="rounded-md border border-amber-600/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
+                <span className="font-semibold">
+                  {resolved.unplaced_devices.length} attached device
+                  {resolved.unplaced_devices.length === 1 ? "" : "s"} not on the
+                  map.
+                </span>{" "}
+                No bay claimed{" "}
+                {resolved.unplaced_devices
+                  .map((id) => devicesById.get(id)?.model ?? id)
+                  .join(", ")}
+                . Switch to Cards to act on them.
+              </div>
+            )}
+          </div>
+        ) : null
+      ) : (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {list.map((d) => (
+            <DeviceCard
+              key={d.id}
+              device={d}
+              status={deriveSlotStatus(deviceToLatestJob.get(d.id))}
+              onStart={() => setSelected(d)}
+            />
+          ))}
+        </div>
+      )}
+
       {selected && (
         <EraseWizard device={selected} onClose={() => setSelected(null)} />
       )}
+    </div>
+  );
+}
+
+function ViewToggle({
+  view,
+  onChange,
+}: {
+  view: "bays" | "cards";
+  onChange: (v: "bays" | "cards") => void;
+}) {
+  return (
+    <div className="flex overflow-hidden rounded-md border border-slate-700 text-xs">
+      {(["bays", "cards"] as const).map((v) => (
+        <button
+          key={v}
+          onClick={() => onChange(v)}
+          className={classNames(
+            "px-2.5 py-1 capitalize transition-colors",
+            view === v
+              ? "bg-slate-700 text-slate-100"
+              : "bg-transparent text-slate-400 hover:bg-slate-800",
+          )}
+        >
+          {v === "bays" ? "Bay map" : "Cards"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Colour key. A bay map is only useful if the colours are unambiguous, and
+ *  `empty` vs `idle` is the pair most worth spelling out. */
+function BayLegend() {
+  const shown: SlotStatusKind[] = [
+    "empty",
+    "idle",
+    "wiping",
+    "erased",
+    "failed",
+    "pending_co_sign",
+    "destroyed",
+    "quarantined",
+  ];
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-slate-400">
+      {shown.map((kind) => (
+        <span key={kind} className="flex items-center gap-1.5">
+          <span
+            className="inline-block h-2.5 w-2.5 rounded-sm"
+            style={{
+              backgroundColor: SLOT_TONE[kind].accent,
+              outline: `1px solid ${SLOT_TONE[kind].stroke}`,
+            }}
+          />
+          {SLOT_TONE[kind].label}
+        </span>
+      ))}
+      <span className="text-slate-600">
+        empty = nothing plugged in · idle = drive present, no Job
+      </span>
     </div>
   );
 }
@@ -234,6 +328,9 @@ interface Tone {
 
 function toneFor(status: SlotStatus): Tone {
   switch (status.kind) {
+    // A card is built from a device, so `empty` never reaches the grid — it
+    // only exists for the bay map, where a Bay outlives whatever was in it.
+    case "empty":
     case "idle":
       return { border: "", bg: "", pill: "" };
     case "wiping":
@@ -290,6 +387,8 @@ function StatusBadge({ status }: { status: SlotStatus }) {
 
 function badgeContent(status: SlotStatus): { icon: React.ReactNode; label: string } {
   switch (status.kind) {
+    case "empty":
+      return { icon: <HardDrive className="h-3 w-3" />, label: "empty" };
     case "idle":
       return { icon: <HardDrive className="h-3 w-3" />, label: "idle" };
     case "wiping":
@@ -326,9 +425,13 @@ function StatusBody({ status }: { status: SlotStatus }) {
     case "idle":
       return null;
     case "wiping": {
-      const pct = Math.round((status.erasure.progress?.fraction ?? 0) * 100);
-      const stage = status.erasure.progress?.stage ?? "starting…";
-      const eta = status.erasure.progress?.eta_seconds;
+      // `erasure` is null while the Job is in progress but has not appended
+      // its first ErasureEvent — show a busy bar at 0% rather than inventing
+      // an event shape.
+      const progress = status.erasure?.progress ?? null;
+      const pct = Math.round((progress?.fraction ?? 0) * 100);
+      const stage = progress?.stage ?? "starting…";
+      const eta = progress?.eta_seconds;
       return (
         <div className="mt-3">
           <div className="h-2 overflow-hidden rounded-full bg-slate-800">

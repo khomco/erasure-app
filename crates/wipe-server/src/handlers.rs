@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use wipe_common::{
     Capabilities, Classification, DestructMethod, DestructionEvent, DestructionManifest, Device,
-    DeviceId, Intent, Job, JobSpec, ManifestState, OperatorRef, StationId, StationInfo,
+    DeviceId, Intent, Job, JobSpec, ManifestState, OperatorRef, ResolvedBayTopology, StationId,
+    StationInfo,
 };
 
 use crate::app::AppState;
@@ -70,15 +71,32 @@ pub async fn list_devices(State(state): State<AppState>) -> Result<Json<Vec<Devi
     Ok(Json(devices))
 }
 
+/// This station's physical bay layout with each bay resolved against the
+/// devices currently attached (ADR-0002).
+///
+/// Resolution happens here rather than in the frontend so the matching rules
+/// have one implementation. An unconfigured station gets a generated
+/// fallback that is flagged `generated: true` — the UI is expected to say so
+/// rather than implying the station really has this hardware.
+pub async fn bay_topology(
+    State(state): State<AppState>,
+) -> Result<Json<ResolvedBayTopology>, ApiError> {
+    let backend = state.runner.backend();
+    let devices = backend.enumerate().await.map_err(api_err)?;
+
+    let resolved = match state.bay_topology.as_ref() {
+        Some(topology) => topology.resolve(&devices),
+        None => wipe_common::generated_bench(devices.len()).resolve(&devices),
+    };
+    Ok(Json(resolved))
+}
+
 pub async fn device_capabilities(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Capabilities>, ApiError> {
     let backend = state.runner.backend();
-    let caps = backend
-        .capabilities(&DeviceId(id))
-        .await
-        .map_err(api_err)?;
+    let caps = backend.capabilities(&DeviceId(id)).await.map_err(api_err)?;
     Ok(Json(caps))
 }
 
@@ -193,7 +211,10 @@ pub async fn escalate_to_destroy(
         notes: req.notes,
         station_id: None,
     };
-    state.runner.escalate_to_destroy(id, dest).map_err(api_err)?;
+    state
+        .runner
+        .escalate_to_destroy(id, dest)
+        .map_err(api_err)?;
     Ok(Json(json!({"ok": true, "job_id": id})))
 }
 
@@ -207,7 +228,12 @@ pub async fn get_certificate(
         .get(&id)
         .cloned()
         .map(Json)
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("cert for job {id} not found")))
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::NOT_FOUND,
+                format!("cert for job {id} not found"),
+            )
+        })
 }
 
 // ---- Manifest endpoints ------------------------------------------------
@@ -245,9 +271,10 @@ pub async fn create_manifest(
 ) -> Result<Json<DestructionManifest>, ApiError> {
     // Validate every job is PendingCoSign.
     for jid in &req.job_ids {
-        let job = state.runner.get(*jid).ok_or_else(|| {
-            ApiError(StatusCode::NOT_FOUND, format!("job {jid} not found"))
-        })?;
+        let job = state
+            .runner
+            .get(*jid)
+            .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("job {jid} not found")))?;
         if job.state != wipe_common::JobState::PendingCoSign {
             return Err(ApiError(
                 StatusCode::CONFLICT,

@@ -374,3 +374,84 @@ export interface PublicKeyResponse {
   public_key_b64: string;
   algorithm: string;
 }
+
+// ---------------------------------------------------------------------------
+// Bench topology (ADR-0002)
+//
+// The station declares its physical drive bays; the server resolves each bay
+// to a device and serves the result at GET /api/bay-topology. The frontend is
+// a renderer — it never re-implements the binding rules.
+// ---------------------------------------------------------------------------
+
+export type EnclosureKind =
+  | "rackmount"
+  | "duplicator"
+  | "dock"
+  | "nvme_carrier"
+  | "usb_caddy"
+  | "internal";
+
+/** Wire values are the sizes an operator would say out loud. */
+export type BayFormFactor = "3.5in" | "2.5in" | "m2" | "u2" | "other";
+
+export type TrayOrientation = "horizontal" | "vertical";
+
+export type BayBinding =
+  | { by: "ses_slot"; slot: number; enclosure?: string | null }
+  | { by: "path"; path: string }
+  | { by: "serial"; serial: string }
+  | { by: "wwn"; wwn: string }
+  | { by: "device_id"; device_id: string }
+  | { by: "unbound" };
+
+export interface Bay {
+  id: string;
+  /** What is silkscreened on the hardware — never our array index. */
+  label: string;
+  row: number;
+  col: number;
+  form_factor?: BayFormFactor | null;
+  binding: BayBinding;
+  disabled: boolean;
+  note?: string | null;
+}
+
+export interface Bank {
+  id: string;
+  label?: string | null;
+  rows: number;
+  cols: number;
+  form_factor: BayFormFactor;
+  orientation: TrayOrientation;
+  bays: Bay[];
+}
+
+export interface Enclosure {
+  id: string;
+  label: string;
+  kind: EnclosureKind;
+  banks: Bank[];
+  note?: string | null;
+}
+
+export interface BayTopology {
+  schema_version: number;
+  label: string;
+  /** True when the station had no config and this layout was invented for
+   *  display only — the UI must say so. */
+  generated: boolean;
+  auto_fill_unbound: boolean;
+  enclosures: Enclosure[];
+}
+
+export interface BayOccupancy {
+  bay_id: string;
+  device_id: string;
+}
+
+export interface ResolvedBayTopology {
+  topology: BayTopology;
+  occupancy: BayOccupancy[];
+  /** Devices the station can see that no bay claimed. */
+  unplaced_devices: string[];
+}

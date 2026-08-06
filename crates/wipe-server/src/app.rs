@@ -30,6 +30,10 @@ pub struct AppState {
     /// Directory containing the built frontend (`index.html` + `assets/`).
     /// When set, the server serves the SPA at `/` with HTML5 history fallback.
     pub static_dir: Option<PathBuf>,
+    /// This station's declared physical bay layout (ADR-0002). `None` means
+    /// unconfigured — the bay-topology handler then generates an
+    /// explicitly-labelled fallback rather than inventing a chassis.
+    pub bay_topology: Option<Arc<wipe_common::BayTopology>>,
 }
 
 impl AppState {
@@ -56,9 +60,17 @@ impl AppState {
             manifests: Arc::new(RwLock::new(HashMap::new())),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             static_dir,
+            bay_topology: None,
         };
         state.spawn_cert_generator();
         state
+    }
+
+    /// Declare this station's physical bay layout. Passing `None` leaves the
+    /// station unconfigured, which is a supported state — see ADR-0002.
+    pub fn with_bay_topology(mut self, topology: Option<wipe_common::BayTopology>) -> Self {
+        self.bay_topology = topology.map(Arc::new);
+        self
     }
 
     /// Watches the job runner's broadcast channel. On `Erased`, generates +
@@ -114,9 +126,12 @@ impl AppState {
                         job_for_cert.ended_at = Some(time::OffsetDateTime::now_utc());
                     }
                 }
-                let Some(cert) =
-                    wipe_cert::Certificate::from_job(&job_for_cert, issuer, validation, media_status)
-                else {
+                let Some(cert) = wipe_cert::Certificate::from_job(
+                    &job_for_cert,
+                    issuer,
+                    validation,
+                    media_status,
+                ) else {
                     tracing::warn!(%job_id, "Certificate::from_job returned None");
                     continue;
                 };
@@ -142,11 +157,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/fleet/peers", get(handlers::list_peers))
         .route("/api/fleet/lead", get(handlers::current_lead))
         .route("/api/devices", get(handlers::list_devices))
+        .route("/api/bay-topology", get(handlers::bay_topology))
         .route(
             "/api/devices/:id/capabilities",
             get(handlers::device_capabilities),
         )
-        .route("/api/jobs", get(handlers::list_jobs).post(handlers::create_job))
+        .route(
+            "/api/jobs",
+            get(handlers::list_jobs).post(handlers::create_job),
+        )
         .route("/api/jobs/:id", get(handlers::get_job))
         .route("/api/jobs/:id/start", post(handlers::start_job))
         .route("/api/jobs/:id/abort", post(handlers::abort_job))
@@ -160,10 +179,7 @@ pub fn router(state: AppState) -> Router {
             get(handlers::list_manifests).post(handlers::create_manifest),
         )
         .route("/api/manifests/:id", get(handlers::get_manifest))
-        .route(
-            "/api/manifests/:id/cosign",
-            post(handlers::cosign_manifest),
-        )
+        .route("/api/manifests/:id/cosign", post(handlers::cosign_manifest))
         .route("/api/events", get(ws::ws_events));
 
     // Mount static frontend at `/` if a dist directory is configured.
@@ -173,11 +189,15 @@ pub fn router(state: AppState) -> Router {
         Some(dir) if dir.exists() => {
             let index = dir.join("index.html");
             info!(?dir, "serving frontend statically");
-            let fallback = ServeDir::new(&dir).fallback(tower_http::services::ServeFile::new(index));
+            let fallback =
+                ServeDir::new(&dir).fallback(tower_http::services::ServeFile::new(index));
             Router::new().fallback_service(fallback)
         }
         Some(dir) => {
-            warn!(?dir, "configured static_dir does not exist — UI will not be served");
+            warn!(
+                ?dir,
+                "configured static_dir does not exist — UI will not be served"
+            );
             Router::new().fallback(api_only_landing)
         }
         None => Router::new().fallback(api_only_landing),

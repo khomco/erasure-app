@@ -7,6 +7,7 @@ import type {
   JobSpec,
   OperatorRef,
   PublicKeyResponse,
+  ResolvedBayTopology,
   SignedCertificate,
   StationInfo,
 } from "./types";
@@ -63,6 +64,7 @@ export const api = {
   fleetPeers: () => jsonFetch<StationInfo[]>("/api/fleet/peers"),
   fleetLead: () => jsonFetch<{ lead: string | null; is_lead: boolean }>("/api/fleet/lead"),
   devices: () => jsonFetch<Device[]>("/api/devices"),
+  bayTopology: () => jsonFetch<ResolvedBayTopology>("/api/bay-topology"),
   deviceCapabilities: (id: string) =>
     jsonFetch<Capabilities>(`/api/devices/${encodeURIComponent(id)}/capabilities`),
   jobs: () => jsonFetch<Job[]>("/api/jobs"),

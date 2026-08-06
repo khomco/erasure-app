@@ -159,6 +159,45 @@ synonym, push back or update this list.
 - **Media class** — coarse grouping used for the *Validate* registry
   (e.g. `ssd-nvme`, `ssd-sata`, `magnetic-hdd`, `emmc`).
 
+### Bench topology
+
+The operator's physical workspace, modelled so the screen can mirror
+the hardware in front of them. See ADR-0002.
+
+- **Enclosure** — one physical housing that presents Bays to the
+  operator: a rackmount chassis, a benchtop duplicator, a hot-swap
+  dock, an NVMe carrier, a single-drive USB caddy. A station has one
+  or more. *Avoid: "chassis" (that's one kind of Enclosure), "machine",
+  "box".*
+- **Bank** — a contiguous grid of Bays within an Enclosure that share a
+  form factor, orientation and numbering run. The chassis on the
+  reference bench has two Banks separated by a ventilation column;
+  modelling them as one 4-column grid would misplace every bay on
+  screen. *Avoid: "column", "group", "cage".*
+- **Bay** — one physical slot that holds at most one Device. Has a
+  stable `BayId`, an operator-facing `label` (what is silkscreened on
+  the hardware, not our index), a grid position within its Bank, and a
+  **BayBinding**. A Bay with no Device resolved is **empty**, which is
+  a distinct and useful state from *idle* — empty means "a drive can
+  go here", idle means "a drive is here and no Job is running". *Avoid:
+  "slot" as a noun for this — `slot` is reserved for the SES device
+  slot number.*
+- **BayBinding** — the rule resolving which Device occupies a Bay:
+  by SES device slot number, by `/dev` path, by serial, by WWN, by
+  explicit `DeviceId`, or unbound. Real hardware will bind by SES slot
+  (SAS-3 expanders report a 0–255 device slot number, 255 meaning "no
+  slot"); the mock backend binds by `DeviceId`; an unconfigured bench
+  falls back to enumeration order.
+- **BayTopology** — a station's declared description of its Enclosures,
+  Banks and Bays. Station-scoped configuration, served over the API so
+  a roaming operator tablet renders the *station's* hardware, not the
+  tablet's. *Avoid: "layout" (too vague), "rack map".*
+- **Bay map** — the on-screen vector rendering of a BayTopology with
+  each Bay carrying its live **slot status**. The screen-to-hardware
+  glance is the whole point: an operator standing at the bench should
+  be able to look at a red bay on screen and reach for the right
+  physical tray without counting.
+
 ### Sanitization
 
 - **Category** (NIST R2) — `Clear` / `Purge` / `Destroy`.
@@ -619,7 +658,7 @@ keep resolving.
    introduced `JobActivity` composition, renamed `JobEvent` →
    `JobUpdate`, moved the cert schema to v2, and added the
    `DestructionManifest` supervisor co-sign flow. Diagnostic and
-   HealthCheck landed as schema only — see #10 below for the remainder.
+   HealthCheck landed as schema only — see #11 below for the remainder.
 3. ~~**At-a-glance bench status on Devices page**~~ — **SHIPPED** (see
    §10.2). Device cards are joined against `/api/jobs` by `device_id`
    and colour-coded by slot status, with a "safe to disconnect"
@@ -648,7 +687,14 @@ keep resolving.
    verifier public key, per-success accounting persisted.
 9. **PDF/A-3 cert wrapping** — JSON-LD inside, human-readable PDF
    outside, single attestation artifact.
-10. **Diagnostic / HealthCheck runtime** — the remainder of ADR-0001.
+10. **Configurable bay topology + bay map** *(in progress)* — a station
+    declares its physical Enclosures/Banks/Bays in config; the server
+    resolves each Bay to a Device and the UI renders a vector bay map
+    with live per-Bay status, so the operator can map screen→hardware
+    at a glance instead of matching serials. Extends #3, which gave
+    per-device status but in device-enumeration order — no relation to
+    where the drive physically is. See ADR-0002.
+11. **Diagnostic / HealthCheck runtime** — the remainder of ADR-0001.
     `DiagnosticEvent` and `HealthCheckEvent` shipped as schema-only
     types and `JobActivity` variants; the runner never emits them and
     `HealthCheckEvent.attributes` is still an untyped
@@ -835,6 +881,15 @@ and resolve. None of these have a decided answer.
   the Job becomes Destroyed. **Not** a Batch.
 - **AssetDisposition** — the resolved terminal outcome
   (Erased / Destroyed / Quarantined) stated explicitly on the cert.
+- **Enclosure / Bank / Bay** — the physical bench hierarchy: an
+  Enclosure (chassis, dock, carrier) holds one or more Banks; a Bank is
+  a grid of Bays; a Bay holds at most one Device. See ADR-0002.
+- **BayBinding** — how a Bay resolves to a Device (SES slot, path,
+  serial, WWN, explicit id, or unbound).
+- **BayTopology** — the station's declared physical layout; served over
+  the API so remote tablets render the station's hardware.
+- **Bay map** — the on-screen vector rendering of a BayTopology with
+  live per-Bay status.
 - **Asset** — a specific device-as-customer-property; persists across
   Jobs; distinct from `Device` (hardware metadata).
 - **WorkOrder** — the shared ERP-issued id under which a Customer's
