@@ -66,6 +66,16 @@ enum Cmd {
         /// to list them and to dump one as a starting point.
         #[arg(long)]
         bay_profile: Option<String>,
+        /// Base URL of a control plane to hold this station's configuration
+        /// when the station has no writable storage (ADR-0003 tier 2). The
+        /// hub itself is future work; with no writable path and no reachable
+        /// control plane the station runs ephemeral and says so.
+        #[arg(long, env = "WIPESTATION_CONTROL_PLANE_URL")]
+        control_plane_url: Option<String>,
+        /// Skip store detection and keep configuration in RAM only. For
+        /// demos and for reproducing what a PXE station sees.
+        #[arg(long)]
+        ephemeral_config: bool,
     },
     /// List built-in bay-topology presets, or dump one as JSON to use as a
     /// starting point for a station config file.
@@ -106,6 +116,8 @@ async fn main() -> Result<()> {
             static_dir,
             bay_topology,
             bay_profile,
+            control_plane_url,
+            ephemeral_config,
         } => {
             cmd_serve(
                 addr,
@@ -116,6 +128,8 @@ async fn main() -> Result<()> {
                 static_dir,
                 bay_topology,
                 bay_profile,
+                control_plane_url,
+                ephemeral_config,
             )
             .await
         }
@@ -139,8 +153,22 @@ fn load_bay_topology(
     profile: Option<String>,
 ) -> Result<Option<wipe_common::BayTopology>> {
     if let Some(path) = path {
-        let raw = fs::read_to_string(&path)
-            .with_context(|| format!("reading bay topology {}", path.display()))?;
+        // Since ADR-0003 this path is read *and* written, so "not there yet"
+        // is a first run rather than a misconfiguration. A file that exists
+        // but is wrong is still a hard error.
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!(
+                    "bay topology: {} does not exist yet — it will be created on first save",
+                    path.display()
+                );
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("reading bay topology {}", path.display()))
+            }
+        };
         let topology: wipe_common::BayTopology = serde_json::from_str(&raw)
             .with_context(|| format!("parsing bay topology {}", path.display()))?;
         if topology.schema_version != wipe_common::BAY_TOPOLOGY_SCHEMA_VERSION {
@@ -228,8 +256,10 @@ async fn cmd_serve(
     static_dir: Option<PathBuf>,
     bay_topology_path: Option<PathBuf>,
     bay_profile: Option<String>,
+    control_plane_url: Option<String>,
+    force_ephemeral: bool,
 ) -> Result<()> {
-    let bay_topology = load_bay_topology(bay_topology_path, bay_profile)?;
+    let seed_topology = load_bay_topology(bay_topology_path.clone(), bay_profile)?;
     let signing_key = Arc::new(load_or_create_signing_key(key_path)?);
     println!(
         "signing key public id: {}",
@@ -248,6 +278,8 @@ async fn cmd_serve(
             MockTiming::default()
         },
     ));
+
+    let resolved_station_id = station_id.clone().unwrap_or_else(|| "standalone".into());
 
     let fleet = if no_fleet {
         None
@@ -276,8 +308,36 @@ async fn cmd_serve(
         None => println!("no frontend bundle found — UI will show an API-only landing page"),
     }
 
-    let state = AppState::with_static_dir(backend, fleet, signing_key, resolved_dist)
-        .with_bay_topology(bay_topology);
+    // Work out where saved configuration goes before serving, so the tier is
+    // in the startup log next to everything else an operator checks (ADR-0003).
+    let store: Arc<dyn wipe_server::TopologyStore> = if force_ephemeral {
+        Arc::new(wipe_server::store::EphemeralStore::new(
+            "Started with --ephemeral-config.".into(),
+            false,
+        ))
+    } else {
+        wipe_server::store::detect_store(&wipe_server::store::StoreConfig {
+            explicit_path: bay_topology_path,
+            control_plane_url,
+            station_id: resolved_station_id,
+        })
+    };
+    let store_status = wipe_server::store::status_of(&store);
+    println!(
+        "config store: {:?} at {} — {}",
+        store_status.tier, store_status.location, store_status.detail
+    );
+    if store_status.needs_operator_decision {
+        println!("  ^ the UI will ask the operator to point at a control plane or accept the loss");
+    }
+
+    let mut state = AppState::with_static_dir(backend, fleet, signing_key, resolved_dist)
+        .with_topology_store(store);
+    // A --bay-topology file or --bay-profile seeds the bench only when the
+    // store had nothing; a saved layout is the operator's and outranks it.
+    if state.bay_topology.read().is_none() {
+        state = state.with_bay_topology(seed_topology);
+    }
     println!("API listening on http://{addr}");
     serve(state, addr).await?;
     Ok(())

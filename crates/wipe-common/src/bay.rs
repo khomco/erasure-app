@@ -181,7 +181,9 @@ impl BayBinding {
 /// One physical slot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bay {
-    /// Stable, unique within the topology. Convention: `<enclosure>.<bank>.<label>`.
+    /// Opaque and stable for the life of the bay. Deliberately *not* derived
+    /// from the label: an operator renaming bay "7" to "A3" must not change
+    /// its identity, or anything holding a reference is silently orphaned.
     pub id: BayId,
     /// What the operator calls this bay — normally what is silkscreened on
     /// the hardware. Never our array index.
@@ -206,6 +208,29 @@ fn unbound() -> BayBinding {
     BayBinding::Unbound
 }
 
+/// How a bank's bay labels were generated.
+///
+/// Recorded so an editor can re-open a saved topology and show — and change —
+/// the numbering, rather than only seeing the expanded result. `bays` stays
+/// authoritative, so per-bay label edits and overrides survive regeneration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NumberingRun {
+    pub order: BayOrder,
+    pub origin: BayOrigin,
+    /// First label in the run. 0- and 1-based both fall out of this.
+    pub label_start: u16,
+}
+
+impl Default for NumberingRun {
+    fn default() -> Self {
+        Self {
+            order: BayOrder::RowMajor,
+            origin: BayOrigin::TopLeft,
+            label_start: 1,
+        }
+    }
+}
+
 /// A contiguous grid of bays sharing a form factor, orientation and
 /// numbering run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,6 +242,11 @@ pub struct Bank {
     pub cols: u16,
     pub form_factor: BayFormFactor,
     pub orientation: TrayOrientation,
+    /// The run the labels came from. `None` means the labels were authored
+    /// by hand and follow no run we can regenerate — an editor should offer
+    /// to renumber rather than silently imposing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numbering: Option<NumberingRun>,
     pub bays: Vec<Bay>,
 }
 
@@ -224,6 +254,12 @@ impl Bank {
     /// The bay at a grid position, if the topology declares one.
     pub fn bay_at(&self, row: u16, col: u16) -> Option<&Bay> {
         self.bays.iter().find(|b| b.row == row && b.col == col)
+    }
+
+    /// The form factor a bay in this bank actually uses, honouring a per-bay
+    /// override. A 2.5" sled in a 3.5" caddy is ordinary on an ITAD bench.
+    pub fn form_factor_of(&self, bay: &Bay) -> BayFormFactor {
+        bay.form_factor.unwrap_or(self.form_factor)
     }
 }
 
@@ -264,6 +300,11 @@ pub struct BayTopology {
     /// that may not be in it.
     #[serde(default = "default_true")]
     pub auto_fill_unbound: bool,
+    /// Bumped on every successful save. A `PUT` carrying a stale revision is
+    /// rejected rather than silently overwriting: two tablets pointed at one
+    /// station is normal on an ITAD floor (ADR-0003).
+    #[serde(default)]
+    pub revision: u32,
     pub enclosures: Vec<Enclosure>,
 }
 
@@ -373,6 +414,165 @@ impl BayTopology {
     }
 }
 
+/// A problem found in a topology. Errors block a save; warnings do not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyProblem {
+    pub severity: ProblemSeverity,
+    /// Machine-readable so the UI can deep-link to the offending thing.
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enclosure_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bank_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bay_id: Option<BayId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemSeverity {
+    Error,
+    Warning,
+}
+
+impl BayTopology {
+    /// Structural validation, shared by the save endpoint and the editor so
+    /// the two can never disagree about what is savable.
+    ///
+    /// Deliberately does not look at attached devices — "no drive here yet" is
+    /// the normal state of a bench, not a configuration problem.
+    pub fn validate(&self) -> Vec<TopologyProblem> {
+        let mut out = Vec::new();
+
+        if self.schema_version != BAY_TOPOLOGY_SCHEMA_VERSION {
+            out.push(TopologyProblem {
+                severity: ProblemSeverity::Error,
+                code: "schema_version".into(),
+                message: format!(
+                    "topology declares schema_version {} but this build understands {}",
+                    self.schema_version, BAY_TOPOLOGY_SCHEMA_VERSION
+                ),
+                enclosure_id: None,
+                bank_id: None,
+                bay_id: None,
+            });
+        }
+
+        for bay_id in self.duplicate_bay_ids() {
+            out.push(TopologyProblem {
+                severity: ProblemSeverity::Error,
+                code: "duplicate_bay_id".into(),
+                message: format!("bay id `{bay_id}` is used more than once"),
+                enclosure_id: None,
+                bank_id: None,
+                bay_id: Some(bay_id),
+            });
+        }
+
+        let mut enclosure_ids = std::collections::BTreeSet::new();
+        for enc in &self.enclosures {
+            if !enclosure_ids.insert(enc.id.clone()) {
+                out.push(TopologyProblem {
+                    severity: ProblemSeverity::Error,
+                    code: "duplicate_enclosure_id".into(),
+                    message: format!("enclosure id `{}` is used more than once", enc.id),
+                    enclosure_id: Some(enc.id.clone()),
+                    bank_id: None,
+                    bay_id: None,
+                });
+            }
+
+            for bank in &enc.banks {
+                if bank.rows == 0 || bank.cols == 0 {
+                    out.push(TopologyProblem {
+                        severity: ProblemSeverity::Error,
+                        code: "empty_grid".into(),
+                        message: format!(
+                            "bank `{}` is {}x{} — a bank needs at least one row and column",
+                            bank.id, bank.rows, bank.cols
+                        ),
+                        enclosure_id: Some(enc.id.clone()),
+                        bank_id: Some(bank.id.clone()),
+                        bay_id: None,
+                    });
+                }
+
+                // Labels are what the operator reads off the metal; two bays
+                // answering to "7" in one bank makes the map unusable.
+                let mut labels = std::collections::BTreeMap::<&str, usize>::new();
+                for bay in &bank.bays {
+                    *labels.entry(bay.label.as_str()).or_default() += 1;
+                    if bay.row >= bank.rows || bay.col >= bank.cols {
+                        out.push(TopologyProblem {
+                            severity: ProblemSeverity::Error,
+                            code: "bay_outside_grid".into(),
+                            message: format!(
+                                "bay `{}` sits at r{}c{}, outside its {}x{} bank",
+                                bay.label, bay.row, bay.col, bank.rows, bank.cols
+                            ),
+                            enclosure_id: Some(enc.id.clone()),
+                            bank_id: Some(bank.id.clone()),
+                            bay_id: Some(bay.id.clone()),
+                        });
+                    }
+                }
+                for (label, n) in labels.into_iter().filter(|(_, n)| *n > 1) {
+                    out.push(TopologyProblem {
+                        severity: ProblemSeverity::Error,
+                        code: "duplicate_bay_label".into(),
+                        message: format!(
+                            "bank `{}` has {n} bays labelled `{label}` — labels must be unique within a bank",
+                            bank.id
+                        ),
+                        enclosure_id: Some(enc.id.clone()),
+                        bank_id: Some(bank.id.clone()),
+                        bay_id: None,
+                    });
+                }
+            }
+        }
+
+        if self.bay_count() == 0 {
+            out.push(TopologyProblem {
+                severity: ProblemSeverity::Warning,
+                code: "no_bays".into(),
+                message: "this bench has no bays".into(),
+                enclosure_id: None,
+                bank_id: None,
+                bay_id: None,
+            });
+        }
+
+        // Enumeration order is a guess about physical position. On a small
+        // dock that is harmless; on a big bench it is the kind of guess an
+        // operator stops double-checking.
+        if self.auto_fill_unbound && self.bay_count() > 8 {
+            out.push(TopologyProblem {
+                severity: ProblemSeverity::Warning,
+                code: "auto_fill_on_large_bench".into(),
+                message: format!(
+                    "{} bays are filled in device-enumeration order, which does not reflect \
+                     physical position — bind them to be sure the map matches the metal",
+                    self.bay_count()
+                ),
+                enclosure_id: None,
+                bank_id: None,
+                bay_id: None,
+            });
+        }
+
+        out
+    }
+
+    pub fn is_savable(&self) -> bool {
+        !self
+            .validate()
+            .iter()
+            .any(|p| p.severity == ProblemSeverity::Error)
+    }
+}
+
 /// One bay's resolved device.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BayOccupancy {
@@ -441,7 +641,11 @@ pub fn grid_bank(
             }
             let label_text = n.to_string();
             bays.push(Bay {
-                id: BayId(format!("{enclosure_id}.{bank_id}.{label_text}")),
+                // Position-derived, not label-derived: renaming a bay must not
+                // change its identity. Positions are stable for a given grid;
+                // resizing a bank is a structural edit that reassigns ids
+                // anyway.
+                id: BayId(format!("{enclosure_id}.{bank_id}.r{row}c{col}")),
                 label: label_text,
                 row,
                 col,
@@ -461,8 +665,44 @@ pub fn grid_bank(
         cols,
         form_factor,
         orientation,
+        numbering: Some(NumberingRun {
+            order,
+            origin,
+            label_start,
+        }),
         bays,
     }
+}
+
+/// Re-run a bank's numbering over its current grid, preserving everything the
+/// operator set by hand.
+///
+/// Used by the editor when rows/cols or the run changes. Bindings, blanked
+/// bays, per-bay form factors and notes are carried across by grid position —
+/// bays that fall outside the new grid are dropped, new positions come in
+/// unbound.
+pub fn renumber_bank(bank: &Bank, enclosure_id: &str, run: NumberingRun) -> Bank {
+    let mut next = grid_bank(
+        enclosure_id,
+        &bank.id,
+        bank.label.as_deref(),
+        bank.rows,
+        bank.cols,
+        bank.form_factor,
+        bank.orientation,
+        run.order,
+        run.origin,
+        run.label_start,
+    );
+    for bay in next.bays.iter_mut() {
+        if let Some(prev) = bank.bay_at(bay.row, bay.col) {
+            bay.binding = prev.binding.clone();
+            bay.disabled = prev.disabled;
+            bay.form_factor = prev.form_factor;
+            bay.note = prev.note.clone();
+        }
+    }
+    next
 }
 
 /// The honest default for a station with no bay configuration: one
@@ -496,6 +736,7 @@ pub fn generated_bench(device_count: usize) -> BayTopology {
         schema_version: BAY_TOPOLOGY_SCHEMA_VERSION,
         label: "Unconfigured bench".to_string(),
         generated: true,
+        revision: 0,
         auto_fill_unbound: true,
         enclosures: vec![Enclosure {
             id: "bench".to_string(),
@@ -566,6 +807,7 @@ pub fn arma_4u_32() -> BayTopology {
         schema_version: BAY_TOPOLOGY_SCHEMA_VERSION,
         label: "Bench 1".to_string(),
         generated: false,
+        revision: 0,
         auto_fill_unbound: true,
         enclosures: vec![Enclosure {
             id: "chassis".to_string(),
@@ -596,6 +838,7 @@ pub fn dock_2bay() -> BayTopology {
         schema_version: BAY_TOPOLOGY_SCHEMA_VERSION,
         label: "Bench 1".to_string(),
         generated: false,
+        revision: 0,
         auto_fill_unbound: true,
         enclosures: vec![Enclosure {
             id: "dock".to_string(),
@@ -626,6 +869,7 @@ pub fn nvme_carrier_8() -> BayTopology {
         schema_version: BAY_TOPOLOGY_SCHEMA_VERSION,
         label: "Bench 1".to_string(),
         generated: false,
+        revision: 0,
         auto_fill_unbound: true,
         enclosures: vec![Enclosure {
             id: "carrier".to_string(),

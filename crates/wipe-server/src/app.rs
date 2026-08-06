@@ -33,7 +33,14 @@ pub struct AppState {
     /// This station's declared physical bay layout (ADR-0002). `None` means
     /// unconfigured — the bay-topology handler then generates an
     /// explicitly-labelled fallback rather than inventing a chassis.
-    pub bay_topology: Option<Arc<wipe_common::BayTopology>>,
+    ///
+    /// Held behind a lock because the builder saves it at runtime and the
+    /// change must take effect without a restart: a bench being configured
+    /// has an operator standing at it.
+    pub bay_topology: Arc<RwLock<Option<wipe_common::BayTopology>>>,
+    /// Where saved configuration goes, and whether it survives reboot
+    /// (ADR-0003). Detected at startup, never guessed by the operator.
+    pub topology_store: Arc<dyn crate::store::TopologyStore>,
 }
 
 impl AppState {
@@ -60,7 +67,14 @@ impl AppState {
             manifests: Arc::new(RwLock::new(HashMap::new())),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             static_dir,
-            bay_topology: None,
+            bay_topology: Arc::new(RwLock::new(None)),
+            // Nothing persists unless a host wires a real store in. Tests and
+            // embedders get an in-RAM one that has already answered the
+            // "where does this go?" question, so no prompt is raised.
+            topology_store: Arc::new(crate::store::EphemeralStore::new(
+                "No configuration store was wired in.".into(),
+                false,
+            )),
         };
         state.spawn_cert_generator();
         state
@@ -68,9 +82,53 @@ impl AppState {
 
     /// Declare this station's physical bay layout. Passing `None` leaves the
     /// station unconfigured, which is a supported state — see ADR-0002.
-    pub fn with_bay_topology(mut self, topology: Option<wipe_common::BayTopology>) -> Self {
-        self.bay_topology = topology.map(Arc::new);
+    pub fn with_bay_topology(self, topology: Option<wipe_common::BayTopology>) -> Self {
+        *self.bay_topology.write() = topology;
         self
+    }
+
+    /// Attach the detected configuration store and adopt whatever it already
+    /// holds, so a station comes back up with the layout it was saved with.
+    pub fn with_topology_store(mut self, store: Arc<dyn crate::store::TopologyStore>) -> Self {
+        match store.load() {
+            Ok(Some(stored)) => {
+                info!(
+                    tier = ?store.tier(), location = %store.location(),
+                    bays = stored.bay_count(), "loaded stored bay topology"
+                );
+                *self.bay_topology.write() = Some(stored);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // A corrupt config must not brick the station — fall back to
+                // the generated bench and let the UI show why.
+                warn!(error = %e, "stored bay topology unreadable; ignoring it");
+            }
+        }
+        self.topology_store = store;
+        self
+    }
+
+    /// Persist a topology and hot-reload it. Bumps `revision`, refusing a save
+    /// that was based on a stale read (ADR-0003).
+    pub fn save_bay_topology(
+        &self,
+        mut topology: wipe_common::BayTopology,
+    ) -> Result<wipe_common::BayTopology, crate::store::StoreError> {
+        let current_revision = self.bay_topology.read().as_ref().map(|t| t.revision);
+        if let Some(stored) = current_revision {
+            if topology.revision != stored {
+                return Err(crate::store::StoreError::RevisionConflict {
+                    stored,
+                    sent: topology.revision,
+                });
+            }
+        }
+        topology.revision = topology.revision.saturating_add(1);
+        topology.generated = false;
+        self.topology_store.save(&topology)?;
+        *self.bay_topology.write() = Some(topology.clone());
+        Ok(topology)
     }
 
     /// Watches the job runner's broadcast channel. On `Erased`, generates +
@@ -157,7 +215,19 @@ pub fn router(state: AppState) -> Router {
         .route("/api/fleet/peers", get(handlers::list_peers))
         .route("/api/fleet/lead", get(handlers::current_lead))
         .route("/api/devices", get(handlers::list_devices))
-        .route("/api/bay-topology", get(handlers::bay_topology))
+        .route(
+            "/api/bay-topology",
+            get(handlers::bay_topology).put(handlers::save_bay_topology),
+        )
+        .route(
+            "/api/bay-topology/config",
+            get(handlers::bay_topology_config),
+        )
+        .route("/api/bay-topology/store", get(handlers::bay_topology_store))
+        .route(
+            "/api/bay-topology/store/acknowledge",
+            post(handlers::acknowledge_ephemeral),
+        )
         .route(
             "/api/devices/:id/capabilities",
             get(handlers::device_capabilities),

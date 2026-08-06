@@ -403,25 +403,47 @@ fn a_minimal_hand_written_config_deserializes() {
 
 fn mixed_bench() -> BayTopology {
     let rack = grid_bank(
-        "rack", "a", Some("Bank A"), 4, 6,
-        BayFormFactor::Lff35, TrayOrientation::Horizontal,
-        BayOrder::RowMajor, BayOrigin::TopLeft, 1,
+        "rack",
+        "a",
+        Some("Bank A"),
+        4,
+        6,
+        BayFormFactor::Lff35,
+        TrayOrientation::Horizontal,
+        BayOrder::RowMajor,
+        BayOrigin::TopLeft,
+        1,
     );
     let dock = grid_bank(
-        "dock", "a", None, 1, 2,
-        BayFormFactor::Sff25, TrayOrientation::Vertical,
-        BayOrder::RowMajor, BayOrigin::TopLeft, 1,
+        "dock",
+        "a",
+        None,
+        1,
+        2,
+        BayFormFactor::Sff25,
+        TrayOrientation::Vertical,
+        BayOrder::RowMajor,
+        BayOrigin::TopLeft,
+        1,
     );
     let carrier = grid_bank(
-        "carrier", "a", None, 4, 2,
-        BayFormFactor::M2, TrayOrientation::Horizontal,
-        BayOrder::ColumnMajor, BayOrigin::TopLeft, 1,
+        "carrier",
+        "a",
+        None,
+        4,
+        2,
+        BayFormFactor::M2,
+        TrayOrientation::Horizontal,
+        BayOrder::ColumnMajor,
+        BayOrigin::TopLeft,
+        1,
     );
 
     BayTopology {
         schema_version: BAY_TOPOLOGY_SCHEMA_VERSION,
         label: "Bench 3 — mixed".into(),
         generated: false,
+        revision: 0,
         auto_fill_unbound: true,
         enclosures: vec![
             Enclosure {
@@ -466,8 +488,14 @@ fn a_bench_can_combine_enclosures_of_different_kinds_and_shapes() {
         ]
     );
     // Each enclosure keeps its own grid shape and numbering run.
-    assert_eq!((t.enclosures[0].banks[0].rows, t.enclosures[0].banks[0].cols), (4, 6));
-    assert_eq!((t.enclosures[2].banks[0].rows, t.enclosures[2].banks[0].cols), (4, 2));
+    assert_eq!(
+        (t.enclosures[0].banks[0].rows, t.enclosures[0].banks[0].cols),
+        (4, 6)
+    );
+    assert_eq!(
+        (t.enclosures[2].banks[0].rows, t.enclosures[2].banks[0].cols),
+        (4, 2)
+    );
 }
 
 #[test]
@@ -502,7 +530,10 @@ fn form_factor_can_vary_within_a_single_bank() {
     let bay3 = bay(&back, "3");
     assert_eq!(bay3.form_factor, Some(BayFormFactor::Sff25));
     // Bank default is unchanged for its other bays.
-    assert_eq!(back.enclosures[0].banks[0].form_factor, BayFormFactor::Lff35);
+    assert_eq!(
+        back.enclosures[0].banks[0].form_factor,
+        BayFormFactor::Lff35
+    );
     assert_eq!(bay(&back, "4").form_factor, None);
 }
 
@@ -515,4 +546,149 @@ fn bay_ids_stay_unique_across_enclosures_that_share_bank_names() {
     assert_eq!(ones.len(), 3, "three bays are labelled 1");
     let ids: std::collections::BTreeSet<_> = ones.iter().map(|b| b.id.clone()).collect();
     assert_eq!(ids.len(), 3, "but their ids are distinct");
+}
+
+// --- editor round-tripping (ADR-0003 / bench-setup builder) ----------------
+
+#[test]
+fn a_bank_remembers_the_run_its_labels_came_from() {
+    // Without this an editor can re-open a saved topology but cannot show,
+    // let alone change, how it was numbered.
+    let t = arma_4u_32();
+    let run = t.enclosures[0].banks[0]
+        .numbering
+        .expect("generated banks record their run");
+    assert_eq!(run.order, BayOrder::ColumnMajor);
+    assert_eq!(run.origin, BayOrigin::TopLeft);
+    assert_eq!(run.label_start, 1);
+    assert_eq!(
+        t.enclosures[0].banks[1].numbering.unwrap().label_start,
+        17,
+        "bank B continues the chassis numbering"
+    );
+}
+
+#[test]
+fn bay_ids_survive_a_label_rename() {
+    // The regression this guards: ids used to embed the label, so renaming a
+    // bay silently orphaned anything referring to it.
+    let mut t = dock_2bay();
+    let before = t.enclosures[0].banks[0].bays[0].id.clone();
+    t.enclosures[0].banks[0].bays[0].label = "A1".into();
+    let after = &t.enclosures[0].banks[0].bays[0];
+    assert_eq!(after.id, before);
+    assert_eq!(after.label, "A1");
+    assert!(t.duplicate_bay_ids().is_empty());
+}
+
+#[test]
+fn renumbering_preserves_operator_edits_by_position() {
+    let mut t = nvme_carrier_8();
+    let bank = &mut t.enclosures[0].banks[0];
+    bank.bays[2].binding = BayBinding::Serial {
+        serial: "SN9".into(),
+    };
+    bank.bays[3].disabled = true;
+    bank.bays[4].form_factor = Some(BayFormFactor::U2);
+    let (kept_pos, disabled_pos, ff_pos) = (
+        (bank.bays[2].row, bank.bays[2].col),
+        (bank.bays[3].row, bank.bays[3].col),
+        (bank.bays[4].row, bank.bays[4].col),
+    );
+
+    let run = NumberingRun {
+        order: BayOrder::RowMajor,
+        origin: BayOrigin::BottomRight,
+        label_start: 0,
+    };
+    let renumbered = renumber_bank(bank, "carrier", run);
+
+    // Labels follow the new run...
+    assert_eq!(renumbered.numbering.unwrap(), run);
+    assert!(renumbered.bays.iter().any(|b| b.label == "0"));
+    // ...and everything the operator set is still on the same physical slot.
+    let at = |p: (u16, u16)| renumbered.bay_at(p.0, p.1).expect("bay at position");
+    assert_eq!(
+        at(kept_pos).binding,
+        BayBinding::Serial {
+            serial: "SN9".into()
+        }
+    );
+    assert!(at(disabled_pos).disabled);
+    assert_eq!(at(ff_pos).form_factor, Some(BayFormFactor::U2));
+}
+
+#[test]
+fn form_factor_of_honours_the_per_bay_override() {
+    // Backs the renderer fix: a 2.5" sled in a 3.5" bank must draw at 2.5".
+    let mut t = arma_4u_32();
+    t.enclosures[0].banks[0].bays[0].form_factor = Some(BayFormFactor::Sff25);
+    let bank = &t.enclosures[0].banks[0];
+    assert_eq!(bank.form_factor_of(&bank.bays[0]), BayFormFactor::Sff25);
+    assert_eq!(bank.form_factor_of(&bank.bays[1]), BayFormFactor::Lff35);
+}
+
+// --- validation ------------------------------------------------------------
+
+#[test]
+fn a_clean_preset_is_savable() {
+    for name in preset_names() {
+        let t = preset(name).unwrap();
+        let errs: Vec<_> = t
+            .validate()
+            .into_iter()
+            .filter(|p| p.severity == ProblemSeverity::Error)
+            .collect();
+        assert!(errs.is_empty(), "{name} should be savable, got {errs:?}");
+        assert!(t.is_savable());
+    }
+}
+
+#[test]
+fn duplicate_labels_within_a_bank_block_the_save() {
+    let mut t = arma_4u_32();
+    t.enclosures[0].banks[0].bays[1].label = "1".into();
+    let problems = t.validate();
+    assert!(!t.is_savable());
+    assert!(problems
+        .iter()
+        .any(|p| p.code == "duplicate_bay_label" && p.severity == ProblemSeverity::Error));
+}
+
+#[test]
+fn a_bay_outside_its_grid_blocks_the_save() {
+    let mut t = dock_2bay();
+    t.enclosures[0].banks[0].bays[0].row = 9;
+    assert!(!t.is_savable());
+    assert!(t.validate().iter().any(|p| p.code == "bay_outside_grid"));
+}
+
+#[test]
+fn an_empty_grid_blocks_the_save() {
+    let mut t = dock_2bay();
+    t.enclosures[0].banks[0].rows = 0;
+    assert!(!t.is_savable());
+    assert!(t.validate().iter().any(|p| p.code == "empty_grid"));
+}
+
+#[test]
+fn auto_fill_on_a_large_bench_warns_but_still_saves() {
+    // Enumeration order is a guess about physical position; on 32 bays that
+    // is the kind of guess an operator stops double-checking.
+    let t = arma_4u_32();
+    assert!(t.auto_fill_unbound);
+    let problems = t.validate();
+    assert!(problems
+        .iter()
+        .any(|p| p.code == "auto_fill_on_large_bench" && p.severity == ProblemSeverity::Warning));
+    assert!(t.is_savable(), "a warning must not block saving");
+}
+
+#[test]
+fn a_small_bench_does_not_warn_about_auto_fill() {
+    let t = dock_2bay();
+    assert!(!t
+        .validate()
+        .iter()
+        .any(|p| p.code == "auto_fill_on_large_bench"));
 }

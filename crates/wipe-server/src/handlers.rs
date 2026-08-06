@@ -84,11 +84,75 @@ pub async fn bay_topology(
     let backend = state.runner.backend();
     let devices = backend.enumerate().await.map_err(api_err)?;
 
-    let resolved = match state.bay_topology.as_ref() {
+    let declared = state.bay_topology.read().clone();
+    let resolved = match declared {
         Some(topology) => topology.resolve(&devices),
         None => wipe_common::generated_bench(devices.len()).resolve(&devices),
     };
     Ok(Json(resolved))
+}
+
+/// The raw stored document, for the bench-setup editor. Unlike
+/// `bay_topology` this does no device resolution — the editor is editing the
+/// bench, not looking at what is plugged into it right now.
+pub async fn bay_topology_config(
+    State(state): State<AppState>,
+) -> Result<Json<wipe_common::BayTopology>, ApiError> {
+    let declared = state.bay_topology.read().clone();
+    let topology = match declared {
+        Some(t) => t,
+        None => {
+            let backend = state.runner.backend();
+            let devices = backend.enumerate().await.map_err(api_err)?;
+            wipe_common::generated_bench(devices.len())
+        }
+    };
+    Ok(Json(topology))
+}
+
+/// Where configuration goes and whether it survives a reboot (ADR-0003).
+pub async fn bay_topology_store(State(state): State<AppState>) -> Json<crate::store::StoreStatus> {
+    Json(crate::store::status_of(&state.topology_store))
+}
+
+/// Operator has accepted that this station cannot persist configuration.
+/// Tier 3 -> tier 4: the difference between a decision and a surprise.
+pub async fn acknowledge_ephemeral(
+    State(state): State<AppState>,
+) -> Json<crate::store::StoreStatus> {
+    state.topology_store.acknowledge();
+    Json(crate::store::status_of(&state.topology_store))
+}
+
+/// Validate and persist a topology, then hot-reload it.
+pub async fn save_bay_topology(
+    State(state): State<AppState>,
+    Json(topology): Json<wipe_common::BayTopology>,
+) -> Result<Json<wipe_common::BayTopology>, ApiError> {
+    let problems = topology.validate();
+    let errors: Vec<_> = problems
+        .iter()
+        .filter(|p| p.severity == wipe_common::ProblemSeverity::Error)
+        .collect();
+    if !errors.is_empty() {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            errors
+                .iter()
+                .map(|p| p.message.clone())
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+    }
+
+    state.save_bay_topology(topology).map(Json).map_err(|e| {
+        let code = match e {
+            crate::store::StoreError::RevisionConflict { .. } => StatusCode::CONFLICT,
+            crate::store::StoreError::Unavailable => StatusCode::CONFLICT,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError(code, e.to_string())
+    })
 }
 
 pub async fn device_capabilities(
