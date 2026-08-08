@@ -1,6 +1,7 @@
 # Bench setup — customer-facing bay layout builder
 
-**Status:** proposed (2026-08-06) — pending review. Nothing here is built yet.
+**Status:** accepted (2026-08-06). The core builder and identify mode are
+built; SES auto-detect waits on `wipe-engine-linux`.
 
 Companion to [ADR-0002](../adr/0002-configurable-bay-topology.md) (the model)
 and [ADR-0003](../adr/0003-station-config-persistence.md) (where a saved layout
@@ -114,8 +115,8 @@ Four modes, in increasing order of trustworthiness:
    >
    > Intake benches want **path**. Reference/golden drives want **serial**.
 
-3. **Learn by hot-swap ("Identify bays")** — the flagship flow, and the answer
-   to "how do we map a chassis nobody has ever seen":
+3. **Learn by hot-swap ("Identify bays")** — **BUILT.** The flagship flow, and
+   the answer to "how do we map a chassis nobody has ever seen":
 
    > Enter identify mode. Pull or insert a drive in a real bay. The station's
    > device list changes; the UI catches the delta and asks
@@ -132,6 +133,25 @@ Four modes, in increasing order of trustworthiness:
    a backend reports device slot numbers. `wipe-engine-linux` does not exist, so
    this ships disabled with an explanatory tooltip rather than being hidden;
    the `BayBinding::SesSlot` variant is already in the model for it.
+
+### As built
+
+Identify mode watches the station's own device list (polled hard, 1s, while
+running — the operator pushes a tray home and expects to be asked at once) and
+diffs snapshots **by device id, not path**: a port can be reused by the next
+drive, and treating that as "still the same device" would silently skip a bay
+the operator is waiting to map. The first snapshot after entering seeds the
+baseline, so drives already in the bench are not queued as if they had just
+appeared.
+
+Answering writes `{ by: "path" }` for the clicked bay and clears any other bay
+that claimed the same path — two bays claiming one port would make the map
+ambiguous, and the most recent answer is the one the operator just gave with
+their hands.
+
+Because the mock backend has no hands, `DeviceSimulator` (`/api/sim/*`, mounted
+only when the backend implements it) stands in for them, and the panel says so
+rather than pretending the drives are real.
 
 ## Templates
 

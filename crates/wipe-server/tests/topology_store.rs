@@ -241,3 +241,69 @@ fn a_saved_topology_survives_a_restart_on_the_local_tier() {
     assert_eq!(after.label, "Bench 7");
     assert_eq!(after.bay_count(), 32);
 }
+
+// --- identify-mode bindings round-trip through the store -------------------
+
+#[test]
+fn path_bindings_learned_by_identify_mode_persist_and_resolve() {
+    // What identify mode writes: a bay bound to a *port*, not a position.
+    // The store must carry that through a restart, and the binding must keep
+    // pointing at the same port when a different drive is plugged into it.
+    use wipe_common::{BayBinding, BusType, Device, DeviceId, MediaType};
+
+    let dir = tmpdir("identify");
+    let cfg = StoreConfig {
+        explicit_path: Some(dir.join("bay-topology.json")),
+        control_plane_url: None,
+        station_id: "s1".into(),
+    };
+
+    let mut t = dock_2bay();
+    t.auto_fill_unbound = false;
+    t.enclosures[0].banks[0].bays[1].binding = BayBinding::Path {
+        path: "/dev/sdb".into(),
+    };
+    detect_store(&cfg).save(&t).unwrap();
+
+    let after: BayTopology = detect_store(&cfg).load().unwrap().expect("reloads");
+    let bay2 = &after.enclosures[0].banks[0].bays[1];
+    assert_eq!(
+        bay2.binding,
+        BayBinding::Path {
+            path: "/dev/sdb".into()
+        }
+    );
+
+    let drive = |id: &str, serial: &str, path: &str| Device {
+        id: DeviceId::from(id),
+        vendor: "TestCo".into(),
+        model: "TM-1".into(),
+        serial: serial.into(),
+        wwn: None,
+        capacity_bytes: 1_000,
+        media_type: MediaType::SsdSata,
+        bus: BusType::Sata,
+        firmware: None,
+        removable: false,
+        block_size: 512,
+        path: path.into(),
+    };
+
+    // Original drive in that port lands in bay 2.
+    let r = after.resolve(&[drive("dev-a", "SN-A", "/dev/sdb")]);
+    assert_eq!(r.occupancy.len(), 1);
+    assert_eq!(r.occupancy[0].device_id.0, "dev-a");
+
+    // Swap a different drive into the same port: the bay keeps its identity.
+    // This is the whole reason identify mode binds by path rather than serial.
+    let r = after.resolve(&[drive("dev-b", "SN-B", "/dev/sdb")]);
+    assert_eq!(r.occupancy.len(), 1);
+    assert_eq!(r.occupancy[0].bay_id, bay2.id);
+    assert_eq!(r.occupancy[0].device_id.0, "dev-b");
+
+    // Pull it out entirely and the bay reads empty rather than adopting
+    // whatever else happens to be attached.
+    let r = after.resolve(&[drive("dev-c", "SN-C", "/dev/sdz")]);
+    assert!(r.occupancy.is_empty());
+    assert_eq!(r.unplaced_devices.len(), 1);
+}

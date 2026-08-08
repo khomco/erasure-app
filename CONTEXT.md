@@ -197,6 +197,15 @@ the hardware in front of them. See ADR-0002.
   glance is the whole point: an operator standing at the bench should
   be able to look at a red bay on screen and reach for the right
   physical tray without counting.
+- **Identify mode** — the bench-setup flow that learns which Bay is
+  which by watching the operator's hands. The station watches its own
+  device list; when a drive appears the UI asks *"which bay did you put
+  it in?"*, the operator clicks that Bay, and a **BayBinding** by path
+  is written. Removal works the same way. This is how an unknown
+  chassis gets mapped with no vendor data and no SES, and it is the
+  reason bindings are declared rather than positional. *Avoid:
+  "discovery" — that's mDNS; "auto-detect" — that's the future SES
+  path, which needs no operator at all.*
 
 ### Sanitization
 
@@ -904,6 +913,9 @@ and resolve. None of these have a decided answer.
   the API so remote tablets render the station's hardware.
 - **Bay map** — the on-screen vector rendering of a BayTopology with
   live per-Bay status.
+- **Identify mode** — bench-setup flow that learns bay↔drive bindings by
+  watching hot-plug: insert a drive, click the bay it went into, a path
+  binding is written.
 - **Asset** — a specific device-as-customer-property; persists across
   Jobs; distinct from `Device` (hardware metadata).
 - **WorkOrder** — the shared ERP-issued id under which a Customer's

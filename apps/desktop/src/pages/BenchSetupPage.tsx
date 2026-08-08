@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -16,6 +16,14 @@ import {
 
 import { api, classNames } from "@/api/client";
 import { BayMap, type BayCellData } from "@/bench/BayMap";
+import { IdentifyPanel } from "@/bench/IdentifyPanel";
+import {
+  bindBayToDevice,
+  diffDevices,
+  nextPrompt,
+  unbindBay,
+  type IdentifyPrompt,
+} from "@/bench/identify";
 import { deriveSlotStatus } from "@/bench/slotStatus";
 import * as ed from "@/bench/topologyEdit";
 import type {
@@ -50,10 +58,14 @@ export function BenchSetupPage() {
     queryKey: ["bay-topology-store"],
     queryFn: api.bayTopologyStore,
   });
+  // Declared before the queries below because they read it.
+  const [identifying, setIdentifying] = useState(false);
   const devices = useQuery({
     queryKey: ["devices"],
     queryFn: api.devices,
-    refetchInterval: 5000,
+    // Identify mode is a hands-on loop: the operator pushes a tray home and
+    // expects to be asked immediately, so poll hard while it is running.
+    refetchInterval: identifying ? 1000 : 5000,
   });
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs });
 
@@ -62,6 +74,8 @@ export function BenchSetupPage() {
   const [openEnc, setOpenEnc] = useState<string | null>(null);
   const [focusedBayId, setFocusedBayId] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [queue, setQueue] = useState<IdentifyPrompt[]>([]);
+  const seenRef = useRef<Device[] | null>(null);
 
   // Adopt the stored document once, then leave the draft alone — refetching
   // over someone's half-finished edit is how you lose their afternoon.
@@ -88,10 +102,72 @@ export function BenchSetupPage() {
     onError: (e: Error) => setSaveError(e.message),
   });
 
+  const simAttach = useMutation({
+    mutationFn: (id?: string) => api.simAttach(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["devices"] });
+      qc.invalidateQueries({ queryKey: ["sim-detached"] });
+    },
+  });
+  const simDetach = useMutation({
+    mutationFn: (id: string) => api.simDetach(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["devices"] });
+      qc.invalidateQueries({ queryKey: ["sim-detached"] });
+    },
+  });
+
   const acknowledge = useMutation({
     mutationFn: api.acknowledgeEphemeralStore,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["bay-topology-store"] }),
   });
+
+  // Only the mock backend simulates hot-plug; a real station 404s here and
+  // identify mode just waits for the operator's actual hands.
+  const detached = useQuery({
+    queryKey: ["sim-detached"],
+    queryFn: api.simDetached,
+    retry: false,
+    refetchInterval: identifying ? 2000 : false,
+  });
+  const simAvailable = !detached.isError;
+
+  // Watch the device list for hot-plug while identifying. The first snapshot
+  // after entering seeds the baseline rather than queueing every drive that
+  // was already in the bench.
+  useEffect(() => {
+    if (!identifying) {
+      seenRef.current = null;
+      return;
+    }
+    const list = devices.data;
+    if (!list) return;
+    const before = seenRef.current;
+    if (before === null) {
+      seenRef.current = list;
+      return;
+    }
+    const { appeared, removed } = diffDevices(before, list);
+    if (appeared.length === 0 && removed.length === 0) return;
+    seenRef.current = list;
+    setQueue((q) => [
+      ...q,
+      ...appeared.map((device) => ({ kind: "appeared" as const, device })),
+      ...removed.map((device) => ({ kind: "removed" as const, device })),
+    ]);
+  }, [devices.data, identifying]);
+
+  const prompt = identifying ? nextPrompt(queue) : null;
+
+  const answerPrompt = (bayId: string) => {
+    if (!prompt) return;
+    update((t) =>
+      prompt.kind === "appeared"
+        ? bindBayToDevice(t, bayId, prompt.device)
+        : unbindBay(t, bayId),
+    );
+    setQueue((q) => q.filter((p) => p !== prompt));
+  };
 
   const update = (fn: (t: BayTopology) => BayTopology) => {
     setDraft((cur) => (cur ? fn(cur) : cur));
@@ -188,6 +264,26 @@ export function BenchSetupPage() {
             </span>
           </div>
 
+          <IdentifyPanel
+            active={identifying}
+            draft={draft}
+            prompt={prompt}
+            onEnter={() => {
+              setIdentifying(true);
+              setQueue([]);
+              setFocusedBayId(null);
+            }}
+            onExit={() => {
+              setIdentifying(false);
+              setQueue([]);
+            }}
+            onSkip={() => setQueue((q) => q.filter((p) => p !== prompt))}
+            simDetached={detached.data ?? []}
+            onSimAttach={(id) => simAttach.mutate(id)}
+            onSimDetach={(id) => simDetach.mutate(id)}
+            simAvailable={simAvailable}
+          />
+
           {draft.enclosures.length === 0 ? (
             <EmptyBench />
           ) : (
@@ -197,7 +293,10 @@ export function BenchSetupPage() {
                 devicesById={devicesById}
                 jobsByDeviceId={jobsByDevice}
                 deriveStatus={deriveSlotStatus}
-                onSelect={(cell: BayCellData) => setFocusedBayId(cell.bay.id)}
+                onSelect={(cell: BayCellData) => {
+                  if (prompt) answerPrompt(cell.bay.id);
+                  else setFocusedBayId(cell.bay.id);
+                }}
                 selectedBayId={focusedBayId}
               />
             )

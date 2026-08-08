@@ -69,6 +69,20 @@ export const api = {
   bayTopology: () => jsonFetch<ResolvedBayTopology>("/api/bay-topology"),
   bayTopologyConfig: () => jsonFetch<BayTopology>("/api/bay-topology/config"),
   bayTopologyStore: () => jsonFetch<StoreStatus>("/api/bay-topology/store"),
+  // Simulated hot-plug. Only present when the station runs the mock backend;
+  // a real-hardware station returns 404 and identify mode falls back to the
+  // operator physically inserting drives.
+  simAttach: (device_id?: string) =>
+    jsonFetch<Device>("/api/sim/devices/attach", {
+      method: "POST",
+      body: JSON.stringify({ device_id: device_id ?? null }),
+    }),
+  simDetach: (device_id: string) =>
+    jsonFetch<Device>("/api/sim/devices/detach", {
+      method: "POST",
+      body: JSON.stringify({ device_id }),
+    }),
+  simDetached: () => jsonFetch<Device[]>("/api/sim/devices"),
   acknowledgeEphemeralStore: () =>
     jsonFetch<StoreStatus>("/api/bay-topology/store/acknowledge", { method: "POST" }),
   saveBayTopology: (topology: BayTopology) =>
