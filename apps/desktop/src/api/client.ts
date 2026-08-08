@@ -69,6 +69,14 @@ export const api = {
   bayTopology: () => jsonFetch<ResolvedBayTopology>("/api/bay-topology"),
   bayTopologyConfig: () => jsonFetch<BayTopology>("/api/bay-topology/config"),
   bayTopologyStore: () => jsonFetch<StoreStatus>("/api/bay-topology/store"),
+  // Dry-run: resolve an unsaved draft against the devices attached right now,
+  // so the builder preview can show live occupancy without re-implementing
+  // the matching rules in TypeScript.
+  resolveBayTopology: (topology: BayTopology) =>
+    jsonFetch<ResolvedBayTopology>("/api/bay-topology/resolve", {
+      method: "POST",
+      body: JSON.stringify(topology),
+    }),
   // Simulated hot-plug. Only present when the station runs the mock backend;
   // a real-hardware station returns 404 and identify mode falls back to the
   // operator physically inserting drives.

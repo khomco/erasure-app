@@ -110,6 +110,21 @@ pub async fn bay_topology_config(
     Ok(Json(topology))
 }
 
+/// Resolve an *unsaved* topology against the devices attached right now.
+///
+/// The bench-setup preview needs live occupancy for a draft that has not been
+/// saved, and resolution must not be re-implemented in TypeScript — the
+/// matching rules have one home (ADR-0002). This is that same `resolve`,
+/// exposed as a dry run: nothing is persisted and nothing is hot-reloaded.
+pub async fn resolve_bay_topology(
+    State(state): State<AppState>,
+    Json(topology): Json<wipe_common::BayTopology>,
+) -> Result<Json<ResolvedBayTopology>, ApiError> {
+    let backend = state.runner.backend();
+    let devices = backend.enumerate().await.map_err(api_err)?;
+    Ok(Json(topology.resolve(&devices)))
+}
+
 /// Where configuration goes and whether it survives a reboot (ADR-0003).
 pub async fn bay_topology_store(State(state): State<AppState>) -> Json<crate::store::StoreStatus> {
     Json(crate::store::status_of(&state.topology_store))

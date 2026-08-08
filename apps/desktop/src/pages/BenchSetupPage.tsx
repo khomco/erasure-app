@@ -75,6 +75,10 @@ export function BenchSetupPage() {
   const [focusedBayId, setFocusedBayId] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [queue, setQueue] = useState<IdentifyPrompt[]>([]);
+  // Off by default: while shaping a grid, live drives are noise. Identify mode
+  // flips it on, because there the whole point is seeing the drive you just
+  // assigned land in the bay you clicked.
+  const [showLive, setShowLive] = useState(false);
   const seenRef = useRef<Device[] | null>(null);
 
   // Adopt the stored document once, then leave the draft alone — refetching
@@ -181,11 +185,21 @@ export function BenchSetupPage() {
   );
   const blocked = ed.hasErrors(problems);
 
-  // Preview against live devices so bindings can be checked as they're made.
+  const liveOn = showLive || identifying;
+
+  // Server-side dry run, so the editor and the Devices page agree about which
+  // drive is in which bay.
+  const resolved = useQuery({
+    queryKey: ["resolve-draft", liveOn, draft ? JSON.stringify(draft) : null],
+    queryFn: () => api.resolveBayTopology(draft as BayTopology),
+    enabled: liveOn && !!draft,
+  });
+
   const preview: ResolvedBayTopology | null = useMemo(() => {
     if (!draft) return null;
+    if (liveOn && resolved.data) return { ...resolved.data, topology: draft };
     return { topology: draft, occupancy: [], unplaced_devices: [] };
-  }, [draft]);
+  }, [draft, liveOn, resolved.data]);
 
   const devicesById = useMemo(() => {
     const m = new Map<string, Device>();
@@ -259,9 +273,27 @@ export function BenchSetupPage() {
             <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
               Live preview
             </h3>
-            <span className="text-[11px] text-slate-500">
-              {ed.bayCount(draft)} bays · click a bay to edit it
-            </span>
+            <div className="flex items-center gap-3">
+              <label
+                className="flex items-center gap-1.5 text-[11px] text-slate-400"
+                title={
+                  identifying
+                    ? "On while identifying, so you can see each drive land"
+                    : undefined
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={liveOn}
+                  disabled={identifying}
+                  onChange={(e) => setShowLive(e.target.checked)}
+                />
+                Show live drives
+              </label>
+              <span className="text-[11px] text-slate-500">
+                {ed.bayCount(draft)} bays · click a bay to edit it
+              </span>
+            </div>
           </div>
 
           <IdentifyPanel

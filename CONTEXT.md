@@ -829,8 +829,15 @@ and resolve. None of these have a decided answer.
 - Do we **vendor the frontend dist** into the binary via `rust-embed`
   for true single-file distribution, or keep runtime resolution
   (current — `--static-dir` flag with auto-detect)?
-- TS/UI tests — do we add Vitest + React Testing Library now, or
-  rely on the Rust integration tests until the UI surface grows?
+- ~~TS/UI tests — do we add Vitest + React Testing Library now, or rely on
+  the Rust integration tests until the UI surface grows?~~ **RESOLVED
+  (2026-08-06): Vitest added.** The trigger was the bench-setup builder and
+  identify mode — the frontend now carries real domain logic (numbering
+  runs, grid rebuilds, hot-plug diffing, binding rules) that the Rust
+  tests cannot reach. `pnpm test` runs a node-environment suite over the
+  pure modules in `src/bench/`. React Testing Library is deliberately
+  *not* added yet: the logic worth pinning was extractable, and a DOM
+  harness can arrive with the first test that genuinely needs to render.
 - ADRs — do we backfill the architectural decisions already made
   (Rust-vs-Bun, Tauri-vs-localhost-only, mDNS-vs-Raft, etc.) so
   `/improve-codebase-architecture` has decision history to work

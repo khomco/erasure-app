@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 
@@ -25,5 +25,11 @@ export default defineConfig({
   build: {
     outDir: "dist",
     sourcemap: true,
+  },
+  test: {
+    // Node environment: the units under test are pure domain logic, not
+    // components. A DOM harness can be added when component tests arrive.
+    environment: "node",
+    include: ["src/**/*.test.ts"],
   },
 });

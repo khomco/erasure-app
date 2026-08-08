@@ -56,8 +56,8 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
 # Run all Rust tests (50 across 6 crates):
 cargo test --workspace -- --test-threads=1
 
-# Build + typecheck the frontend:
-cd apps/desktop && pnpm install && pnpm build && pnpm typecheck && cd ../..
+# Build + typecheck + test the frontend:
+cd apps/desktop && pnpm install && pnpm build && pnpm typecheck && pnpm test && cd ../..
 
 # Run the two-station demo end-to-end (mDNS discovery + erase + cert verify):
 ./scripts/demo.sh
