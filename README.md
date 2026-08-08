@@ -53,7 +53,7 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
 # Prereqs: rustup-installed stable toolchain, pnpm, jq
 # (the CI/demo scripts source ~/.cargo/env automatically).
 
-# Run all Rust tests (50 across 6 crates):
+# Run all Rust tests (83 across 6 crates):
 cargo test --workspace -- --test-threads=1
 
 # Build + typecheck + test the frontend:
@@ -150,17 +150,20 @@ to `Destroyed`.
 - **PXE-ephemeral by design** — **no persistent local state for evidence**: certs are signed in-RAM and shipped to lead/hub/cloud or downloaded, never written to local storage. *Configuration* (the bay topology) is a different matter and does persist where the station has somewhere to put it — see [ADR-0003](docs/adr/0003-station-config-persistence.md) for the tiered store and why the distinction is drawn.
 - **Single binary, three frontends** — the Tauri window, the Axum HTTP API (for tablets and automation), and a future Ratatui TUI all wrap the same engine.
 
-## Test inventory (50 tests, all passing)
+## Test inventory (83 Rust + 29 TypeScript, all passing)
 
 | Crate / file | Tests | Covers |
 | --- | --- | --- |
 | `wipe-common/tests/method_selection.rs` | 7 | R2 decision flow across NVMe/SATA/HDD; destroy intent; frozen device handling; evidence serde round-trip |
-| `wipe-common/tests/bay_topology.rs` | 22 | Bay grid construction and vendor numbering runs (row/column-major, four origins, label offsets); bay→device resolution across every binding kind; declared bindings beating enumeration fill; no device placed twice; disabled bays skipped; overflow reported; generated-fallback flagging; serde round-trip and a hand-written config |
+| `wipe-common/tests/bay_topology.rs` | 36 | Bay grid construction and vendor numbering runs (row/column-major, four origins, label offsets); bay→device resolution across every binding kind; declared bindings beating enumeration fill; no device placed twice; disabled bays skipped; overflow reported; generated-fallback flagging; serde round-trip and a hand-written config |
 | `wipe-cert/src/canonical.rs` (inline) | 4 | Canonical JSON: sorted keys, nested sort, finite-only numbers, integer preservation |
 | `wipe-cert/tests/sign_verify.rs` | 8 | sign+verify happy path, unknown-key rejection, tamper detection, JSON round-trip, activity chain carries erasure + verification, supervisor co-signature verifies independently, deterministic public-key-id, verifying-key round-trip |
-| `wipe-engine-mock/tests/end_to_end.rs` | 4 | NVMe crypto-erase happy path reaches `Erased`; SATA failure keeps the outer Job `InProgress` for an operator decision; enumerate; broadcast stream observes outer *and* inner transitions |
+| `wipe-engine-mock/tests/end_to_end.rs` | 8 | NVMe crypto-erase happy path reaches `Erased`; SATA failure keeps the outer Job `InProgress` for an operator decision; enumerate; broadcast stream observes outer *and* inner transitions |
 | `wipe-fleet/tests/two_instance.rs` | 2 | Solo lead election, two-instance mutual discovery + cross-station election agreement |
 | `wipe-server/tests/http_e2e.rs` | 3 | Full HTTP flow → signed cert → offline verify; aborted job emits no cert; destroy-via-manifest-cosign produces two signatures |
+
+| `wipe-server/tests/topology_store.rs` | 15 | All four persistence tiers (ADR-0003); the write probe against a read-only directory; corrupt-config recovery; save-survives-restart; and that a path binding learned by identify mode keeps its bay when a *different* drive is swapped into that port |
+| `apps/desktop` (`pnpm test`) | 29 | Numbering runs across every order/origin/offset; grid rebuilds preserving operator edits by position; hot-plug diffing (a reused port is a *different* drive); binding rules; validation |
 
 Plus the `scripts/demo.sh` end-to-end shell drives two real station processes, mDNS discovery, a real cert issuance, and three negative tests (correct key passes, wrong key rejected, tampered cert rejected).
 
