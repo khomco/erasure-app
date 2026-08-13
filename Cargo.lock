@@ -5675,6 +5675,7 @@ dependencies = [
  "wipe-engine",
  "wipe-engine-mock",
  "wipe-fleet",
+ "wipe-license",
  "wipe-server",
 ]
 
@@ -5744,6 +5745,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "wipe-license"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "hex",
+ "rand_core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "time",
+ "uuid",
+ "wipe-cert",
+ "wipe-common",
+]
+
+[[package]]
 name = "wipe-server"
 version = "0.1.0"
 dependencies = [
@@ -5770,6 +5789,7 @@ dependencies = [
  "wipe-engine",
  "wipe-engine-mock",
  "wipe-fleet",
+ "wipe-license",
 ]
 
 [[package]]

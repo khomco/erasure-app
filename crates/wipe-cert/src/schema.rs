@@ -64,6 +64,20 @@ pub struct Certificate {
     pub validation: ValidationBlock,
     pub media_status: MediaStatus,
 
+    /// True when this certificate was produced by a station with no valid
+    /// vendor licence (ADR-0005 §5).
+    ///
+    /// Such a certificate is still fully valid and offline-verifiable — the
+    /// erasure really happened and the signature really holds. The marker
+    /// exists so unlicensed output can never masquerade as licensed, and it
+    /// lives *inside* the signed payload so it cannot be stripped.
+    ///
+    /// Defaults to false so pre-ADR-0005 certificates deserialize unchanged;
+    /// this marker is a compatibility commitment and must stay stable, or old
+    /// evaluation certs become indistinguishable from licensed ones.
+    #[serde(default)]
+    pub evaluation: bool,
+
     /// Loose pointer for the future R2v3 audit-sample verification entity.
     /// Out of ADR-0001's scope to populate (the audit-sample verification
     /// happens *after* the cert ships); the schema slot exists so the
@@ -151,11 +165,18 @@ impl Certificate {
     /// Returns `None` if the Job is not in a state where a cert is
     /// meaningful (no disposition, no started/ended timestamps, no
     /// resolved method, or no Erasure activities to summarise from).
+    /// Build a certificate for a Job.
+    ///
+    /// `evaluation` marks the cert as produced without a valid vendor licence.
+    /// There is deliberately no default: a caller must state which it is, so a
+    /// host that has not been taught about licensing cannot silently emit
+    /// unmarked certificates (ADR-0005 §5).
     pub fn from_job(
         job: &Job,
         issuer: CertIssuer,
         validation: ValidationBlock,
         media_status: MediaStatus,
+        evaluation: bool,
     ) -> Option<Self> {
         let disposition = job.state.disposition()?;
         let started = job.started_at?;
@@ -215,6 +236,7 @@ impl Certificate {
             duration_seconds: duration,
             validation,
             media_status,
+            evaluation,
             audit_verification_ref: None,
         })
     }

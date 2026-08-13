@@ -92,6 +92,17 @@ enum Cmd {
         /// Can be repeated for multiple keys.
         #[arg(long, required = true)]
         public_key_b64: Vec<String>,
+        /// Published vendor ROOT public key, base64. Supply this to verify
+        /// the attestation chain (ADR-0005): that the signing key was
+        /// licensed to a named customer under stated entitlements. Can be
+        /// repeated so a verifier can accept more than one root.
+        #[arg(long)]
+        vendor_root_b64: Vec<String>,
+        /// Treat an unlicensed (evaluation) certificate as a failure.
+        /// Off by default: an evaluation cert is still a valid record of a
+        /// real erasure, and auditors usually want to see it.
+        #[arg(long)]
+        require_licensed: bool,
     },
     /// Print the catalog of devices the mock backend would expose.
     Inspect,
@@ -136,7 +147,9 @@ async fn main() -> Result<()> {
         Cmd::VerifyCert {
             cert,
             public_key_b64,
-        } => cmd_verify_cert(cert, public_key_b64),
+            vendor_root_b64,
+            require_licensed,
+        } => cmd_verify_cert(cert, public_key_b64, vendor_root_b64, require_licensed),
         Cmd::Inspect => cmd_inspect().await,
         Cmd::BayPresets { dump } => cmd_bay_presets(dump),
     }
@@ -378,25 +391,36 @@ fn has_index_html(p: &Path) -> bool {
     p.join("index.html").is_file()
 }
 
-fn cmd_verify_cert(path: PathBuf, public_keys_b64: Vec<String>) -> Result<()> {
+fn decode_keys(label: &str, keys_b64: Vec<String>) -> Result<Vec<VerifyingKey>> {
     use base64::{engine::general_purpose::STANDARD_NO_PAD as B64, Engine as _};
-    let raw = fs::read(&path).with_context(|| format!("reading {path:?}"))?;
-    let signed: SignedCertificate = serde_json::from_slice(&raw)
-        .with_context(|| format!("parsing {path:?} as SignedCertificate JSON"))?;
-
-    let mut trusted = Vec::new();
-    for b64 in public_keys_b64 {
+    let mut out = Vec::new();
+    for b64 in keys_b64 {
         let bytes = B64
             .decode(b64.as_bytes())
-            .with_context(|| format!("invalid base64 in --public-key-b64: {b64}"))?;
+            .with_context(|| format!("invalid base64 in --{label}: {b64}"))?;
         if bytes.len() != 32 {
             return Err(anyhow!("public key must be 32 bytes (got {})", bytes.len()));
         }
         let arr: [u8; 32] = bytes.try_into().unwrap();
-        let vk =
-            VerifyingKey::from_bytes(&arr).map_err(|e| anyhow!("invalid public key bytes: {e}"))?;
-        trusted.push(vk);
+        out.push(
+            VerifyingKey::from_bytes(&arr).map_err(|e| anyhow!("invalid public key bytes: {e}"))?,
+        );
     }
+    Ok(out)
+}
+
+fn cmd_verify_cert(
+    path: PathBuf,
+    public_keys_b64: Vec<String>,
+    vendor_roots_b64: Vec<String>,
+    require_licensed: bool,
+) -> Result<()> {
+    let raw = fs::read(&path).with_context(|| format!("reading {path:?}"))?;
+    let signed: SignedCertificate = serde_json::from_slice(&raw)
+        .with_context(|| format!("parsing {path:?} as SignedCertificate JSON"))?;
+
+    let trusted = decode_keys("public-key-b64", public_keys_b64)?;
+    let roots = decode_keys("vendor-root-b64", vendor_roots_b64)?;
 
     let key_id = wipe_cert::verify(&signed, &trusted)?;
     println!("OK — certificate verified against trusted key {key_id}");
@@ -410,6 +434,98 @@ fn cmd_verify_cert(path: PathBuf, public_keys_b64: Vec<String>) -> Result<()> {
         signed.certificate.operator.display_name,
         signed.certificate.operator.email,
     );
+
+    report_attestation(&signed, &roots, require_licensed)
+}
+
+/// Report the ADR-0005 attestation chain.
+///
+/// The erasure signature above proves the payload is intact. This proves who
+/// was *entitled* to hold the key that made it — a separate question, and the
+/// output keeps them separate so neither can be mistaken for the other.
+fn report_attestation(
+    signed: &SignedCertificate,
+    roots: &[VerifyingKey],
+    require_licensed: bool,
+) -> Result<()> {
+    use wipe_license::{verify_chain, AttestationChain, ChainVerdict};
+
+    let chain: Option<AttestationChain> = match &signed.attestation {
+        Some(v) => Some(
+            serde_json::from_value(v.clone())
+                .context("certificate carries an attestation block we cannot parse")?,
+        ),
+        None => None,
+    };
+
+    if roots.is_empty() {
+        match (&chain, signed.certificate.evaluation) {
+            (Some(_), _) => println!(
+                "\n  attestation: present but NOT CHECKED — pass --vendor-root-b64 to verify it"
+            ),
+            (None, true) => {
+                println!("\n  attestation: none — EVALUATION certificate (unlicensed station)")
+            }
+            (None, false) => println!(
+                "\n  attestation: none, but the certificate does not claim evaluation status"
+            ),
+        }
+        return Ok(());
+    }
+
+    let verdict = verify_chain(
+        chain.as_ref(),
+        &signed.signature.public_key_id,
+        signed.certificate.issued_at,
+        roots,
+    );
+
+    match &verdict {
+        ChainVerdict::Licensed {
+            customer_id,
+            customer_name,
+            license_id,
+            root_key_id,
+            expired_at_signing,
+        } => {
+            println!("\nLICENSED — attestation chain verified to vendor root {root_key_id}");
+            println!("  customer: {customer_name} ({customer_id})");
+            println!("  license:  {license_id}");
+            if *expired_at_signing {
+                println!(
+                    "  NOTE: the licence had expired when this certificate was signed. \n\
+                             The chain is authentic; the licence had lapsed."
+                );
+            }
+            // Belt and braces: a licensed chain on a cert that marks itself
+            // evaluation means the two halves disagree, which is a finding.
+            if signed.certificate.evaluation {
+                println!(
+                    "  WARNING: certificate is marked `evaluation` yet carries a valid chain."
+                );
+            }
+        }
+        ChainVerdict::Unlicensed => {
+            println!("\nEVALUATION — no attestation chain (unlicensed station)");
+            println!(
+                "  The erasure and its signature are valid. This certificate was not produced\n\
+                 under a vendor licence and is not evidence of a licensed deployment."
+            );
+            if !signed.certificate.evaluation {
+                println!(
+                    "  WARNING: no chain, yet the certificate does not mark itself `evaluation`."
+                );
+            }
+            if require_licensed {
+                return Err(anyhow!(
+                    "--require-licensed was set but this certificate is unlicensed"
+                ));
+            }
+        }
+        ChainVerdict::Invalid { reason } => {
+            return Err(anyhow!("attestation chain INVALID: {reason}"));
+        }
+    }
     Ok(())
 }
 

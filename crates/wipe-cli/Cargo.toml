@@ -13,6 +13,7 @@ wipe-common = { path = "../wipe-common" }
 wipe-engine = { path = "../wipe-engine" }
 wipe-engine-mock = { path = "../wipe-engine-mock" }
 wipe-cert = { path = "../wipe-cert" }
+wipe-license = { path = "../wipe-license" }
 wipe-fleet = { path = "../wipe-fleet" }
 wipe-server = { path = "../wipe-server" }
 tokio = { workspace = true }

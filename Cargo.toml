@@ -5,6 +5,7 @@ members = [
     "crates/wipe-engine",
     "crates/wipe-engine-mock",
     "crates/wipe-cert",
+    "crates/wipe-license",
     "crates/wipe-fleet",
     "crates/wipe-server",
     "crates/wipe-cli",
