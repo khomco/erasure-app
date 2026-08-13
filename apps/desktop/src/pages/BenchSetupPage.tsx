@@ -34,6 +34,7 @@ import type {
   Device,
   Enclosure,
   EnclosureKind,
+  EnclosureModel,
   Job,
   NumberingRun,
   ResolvedBayTopology,
@@ -68,6 +69,13 @@ export function BenchSetupPage() {
     refetchInterval: identifying ? 1000 : 5000,
   });
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs });
+  // Known enclosure models (ADR-0004): drives both the preset picker and the
+  // artwork the preview renders.
+  const catalog = useQuery({
+    queryKey: ["enclosure-catalog"],
+    queryFn: api.enclosureCatalog,
+    staleTime: Infinity,
+  });
 
   const [draft, setDraft] = useState<BayTopology | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -264,6 +272,7 @@ export function BenchSetupPage() {
           openEnc={openEnc}
           setOpenEnc={setOpenEnc}
           update={update}
+          models={catalog.data?.models ?? []}
         />
 
         {/* min-w-0: a grid `1fr` track defaults to min-content, so without it
@@ -330,6 +339,7 @@ export function BenchSetupPage() {
                   else setFocusedBayId(cell.bay.id);
                 }}
                 selectedBayId={focusedBayId}
+                catalog={catalog.data ?? null}
               />
             )
           )}
@@ -600,6 +610,92 @@ function StoreBanner({
   );
 }
 
+// --- model picker ----------------------------------------------------------
+
+/**
+ * Add an enclosure from the model catalog (ADR-0004).
+ *
+ * Separate from "Add enclosure" on purpose. Picking a model is a claim that
+ * the bench holds *that* chassis, and it pre-fills a specific bay count and
+ * numbering; building one by hand claims nothing. Collapsing the two would
+ * make the stronger claim the accidental default.
+ */
+function ModelPicker({
+  models,
+  onPick,
+}: {
+  models: EnclosureModel[];
+  onPick: (model: EnclosureModel) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return models;
+    return models.filter((m) =>
+      [m.vendor, m.product, m.id, ...(m.aliases ?? [])]
+        .join(" ")
+        .toLowerCase()
+        .includes(q),
+    );
+  }, [models, query]);
+
+  if (models.length === 0) return null;
+
+  return (
+    <div className="relative">
+      <button className="btn btn-ghost text-xs" onClick={() => setOpen((o) => !o)}>
+        <Database className="h-3.5 w-3.5" />
+        From catalog
+      </button>
+      {open && (
+        <div className="absolute right-0 z-20 mt-1 w-80 rounded-md border border-slate-800 bg-slate-900 p-1 shadow-xl">
+          <input
+            className="input mb-1 w-full text-xs"
+            placeholder="Search vendor, model, alias…"
+            value={query}
+            autoFocus
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <p className="px-2 py-1 text-[10px] leading-relaxed text-slate-500">
+            Known models only. Anything not listed is still fully supported —
+            build it by hand and it renders as a generic outline.
+          </p>
+          <div className="max-h-72 overflow-y-auto">
+            {shown.map((m) => (
+              <button
+                key={m.id}
+                className="block w-full rounded px-2 py-1.5 text-left hover:bg-slate-800"
+                onClick={() => {
+                  onPick(m);
+                  setOpen(false);
+                  setQuery("");
+                }}
+              >
+                <span className="block text-xs text-slate-200">
+                  {m.vendor} {m.product}
+                </span>
+                <span className="block font-mono text-[10px] text-slate-500">
+                  {m.spec.banks.reduce((a, b) => a + b.rows * b.cols, 0)} bays ·{" "}
+                  {m.spec.banks[0]?.form_factor}
+                  {m.art ? "" : " · generic artwork"}
+                  {m.verified_by ? " · verified" : ""}
+                </span>
+              </button>
+            ))}
+            {shown.length === 0 && (
+              <p className="px-2 py-2 text-[11px] text-slate-500">
+                No model matches “{query}”.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- structure pane --------------------------------------------------------
 
 function StructurePane({
@@ -607,11 +703,13 @@ function StructurePane({
   openEnc,
   setOpenEnc,
   update,
+  models,
 }: {
   draft: BayTopology;
   openEnc: string | null;
   setOpenEnc: (id: string | null) => void;
   update: (fn: (t: BayTopology) => BayTopology) => void;
+  models: EnclosureModel[];
 }) {
   return (
     <div className="card space-y-3">
@@ -619,19 +717,31 @@ function StructurePane({
         <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
           Enclosures
         </h3>
-        <button
-          className="btn btn-ghost text-xs"
-          onClick={() =>
-            update((t) => {
-              const enc = ed.newEnclosure();
-              setOpenEnc(enc.id);
-              return { ...t, enclosures: [...t.enclosures, enc] };
-            })
-          }
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Add enclosure
-        </button>
+        <div className="flex items-center gap-1">
+          <ModelPicker
+            models={models}
+            onPick={(model) =>
+              update((t) => {
+                const enc = ed.enclosureFromModel(model);
+                setOpenEnc(enc.id);
+                return { ...t, enclosures: [...t.enclosures, enc] };
+              })
+            }
+          />
+          <button
+            className="btn btn-ghost text-xs"
+            onClick={() =>
+              update((t) => {
+                const enc = ed.newEnclosure();
+                setOpenEnc(enc.id);
+                return { ...t, enclosures: [...t.enclosures, enc] };
+              })
+            }
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Add enclosure
+          </button>
+        </div>
       </div>
 
       {draft.enclosures.length === 0 && (

@@ -130,6 +130,15 @@ pub async fn bay_topology_store(State(state): State<AppState>) -> Json<crate::st
     Json(crate::store::status_of(&state.topology_store))
 }
 
+/// Enclosure models this station knows about (ADR-0004).
+///
+/// Served rather than bundled into the frontend so a site-local overlay takes
+/// effect without rebuilding the UI, and so the builder and the bay map can
+/// never disagree about what a `model_ref` means.
+pub async fn enclosure_catalog(State(state): State<AppState>) -> Json<wipe_common::Catalog> {
+    Json((*state.catalog).clone())
+}
+
 /// Operator has accepted that this station cannot persist configuration.
 /// Tier 3 -> tier 4: the difference between a decision and a surprise.
 pub async fn acknowledge_ephemeral(

@@ -441,6 +441,9 @@ export interface Enclosure {
   id: string;
   label: string;
   kind: EnclosureKind;
+  /** Catalog model this enclosure was expanded from (ADR-0004), if any.
+   *  Advisory: the banks below remain the truth about the layout. */
+  model_ref?: string | null;
   banks: Bank[];
   note?: string | null;
 }
@@ -490,4 +493,55 @@ export interface ResolvedBayTopology {
   occupancy: BayOccupancy[];
   /** Devices the station can see that no bay claimed. */
   unplaced_devices: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Enclosure model catalog (ADR-0004)
+//
+// Served from GET /api/enclosure-catalog rather than bundled into the UI, so a
+// site-local overlay takes effect without a frontend rebuild.
+// ---------------------------------------------------------------------------
+
+export interface BankSpec {
+  label?: string | null;
+  rows: number;
+  cols: number;
+  form_factor: BayFormFactor;
+  orientation: TrayOrientation;
+  order: BayOrder;
+  origin: BayOrigin;
+  label_start: number;
+}
+
+export interface ModelSpec {
+  banks: BankSpec[];
+  connectors?: string[];
+  notes?: string | null;
+}
+
+/** Absent means "we have not verified this", which must not render as "no". */
+export interface ModelCapabilities {
+  locate_led: boolean;
+  per_bay_power: boolean;
+  hotswap_notify: boolean;
+  ses_slot_addressing: boolean;
+}
+
+export interface EnclosureModel {
+  id: string;
+  vendor: string;
+  product: string;
+  aliases?: string[];
+  kind: EnclosureKind;
+  spec: ModelSpec;
+  /** Key into the shell registry. Absent means the generic shell, labelled
+   *  as generic — a supported outcome, not a gap. */
+  art?: string | null;
+  capabilities?: ModelCapabilities | null;
+  verified_by?: string | null;
+}
+
+export interface EnclosureCatalog {
+  schema_version: number;
+  models: EnclosureModel[];
 }

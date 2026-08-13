@@ -3,6 +3,7 @@ import type {
   DestructMethod,
   DestructionManifest,
   Device,
+  EnclosureCatalog,
   Job,
   JobSpec,
   OperatorRef,
@@ -69,6 +70,7 @@ export const api = {
   bayTopology: () => jsonFetch<ResolvedBayTopology>("/api/bay-topology"),
   bayTopologyConfig: () => jsonFetch<BayTopology>("/api/bay-topology/config"),
   bayTopologyStore: () => jsonFetch<StoreStatus>("/api/bay-topology/store"),
+  enclosureCatalog: () => jsonFetch<EnclosureCatalog>("/api/enclosure-catalog"),
   // Dry-run: resolve an unsaved draft against the devices attached right now,
   // so the builder preview can show live occupancy without re-implementing
   // the matching rules in TypeScript.

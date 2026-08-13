@@ -1,6 +1,11 @@
 # Model-aware enclosure catalog, with a generic fallback that never pretends
 
-**Status:** proposed (2026-08-06) — pending review. Do not implement until accepted.
+**Status:** accepted (2026-08-13). Built: the catalog, the shell registry with
+a starter set of four artworks, the labelled generic fallback, and the
+authoring pipeline in
+[docs/design/enclosure-art-pipeline.md](../design/enclosure-art-pipeline.md).
+The two seams (§5 auto-discovery, §6 control) remain unimplemented by design —
+nothing probes hardware yet.
 
 Extends [ADR-0002](0002-configurable-bay-topology.md) (the topology model) and
 builds on the bench-setup builder and identify mode.
@@ -140,12 +145,25 @@ Three rules make that concrete, and they are testable:
 - **Contrast floor.** Shell tones sit in a restricted luminance band so every
   status colour keeps its contrast ratio against them. A model whose art
   violates the band fails catalog validation rather than shipping.
-- **The bay slot is exclusive.** No shell artwork draws inside it — no drop
-  shadows, no gloss, no logos crossing it.
+- **The bay slot is exclusive.** No *detail* inside it. A shape must either
+  span the whole slot — a flat backing panel, which the bank cage covers
+  anyway — or stay clear of it. Half-intruding logos, gloss and vent holes show
+  through the gaps between trays and compete with status for attention.
 
 If a model's art cannot satisfy those, the correct outcome is to ship the model
 with generic art and its spec/capabilities intact. Recognition is worth
 something; legibility is worth more.
+
+**As built.** The three rules are machine checks in
+`apps/desktop/src/bench/shells/contract.test.ts`, run against every registered
+shell and against the fallback at several sizes — plus a set of deliberately
+broken shells, so a rule that stops being enforced fails visibly instead of
+passing quietly. Two consequences of making rule 3 mechanical: artwork may not
+use `<path>` or `transform`, because the checker measures bounding boxes and
+either would let art sit inside the slot unseen. The shell is rendered *before*
+the status layer in `BayMap`, so no artwork can obscure a bay even if a rule
+were somehow evaded; an early draft of the toaster dock drew its housing last
+and clipped the bay labels, which is how that ordering became explicit.
 
 ### 4. Unknown models get the generic renderer, labelled
 
@@ -157,6 +175,14 @@ contribute one.
 This is the ADR-0002 "honest default" rule applied again. The failure mode to
 avoid is silently substituting a plausible-looking chassis of the same shape;
 an operator who sees a picture that is nearly their gear will stop checking.
+
+**As built.** The marking is `generic <kind> outline`, drawn into the artwork
+itself and repeated in the enclosure header — in the artwork because a
+screenshot of a bay map travels further than the UI around it. A model whose
+`art` key names a shell we do not have, or names one declared for a different
+enclosure kind, degrades to generic rather than rendering the wrong chassis
+confidently. The "contribute one" link is not built; the pipeline it would
+point at is `docs/design/enclosure-art-pipeline.md`.
 
 ### 5. Auto-discovery seam
 
@@ -270,3 +296,8 @@ no longer needs identify mode for that chassis at all.
 - Three seams (`EnclosureDiscovery`, `EnclosureControl`, and the matcher) are
   defined here and unimplemented until `wipe-engine-linux` exists. Each must
   fail visibly rather than silently, per the `ControlPlaneStore` precedent.
+- Artwork is a code contribution, not a data one: a `ShellDef` is a TypeScript
+  component in the frontend, so a new model's art needs a release even though
+  its *spec* can arrive by overlay. Accepted deliberately — the alternative,
+  shipping arbitrary SVG as catalog data, means rendering untrusted markup and
+  gives up every check in the contract test.

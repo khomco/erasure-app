@@ -72,6 +72,14 @@ export function DevicesPage() {
     refetchInterval: 5000,
   });
 
+  // Model artwork (ADR-0004). Static per station; a failure here degrades to
+  // generic outlines rather than to a missing bay map.
+  const catalog = useQuery({
+    queryKey: ["enclosure-catalog"],
+    queryFn: api.enclosureCatalog,
+    staleTime: Infinity,
+  });
+
   const [selected, setSelected] = useState<Device | null>(null);
   const [view, setView] = useState<"bays" | "cards">("bays");
   const [focusedBayId, setFocusedBayId] = useState<string | null>(null);
@@ -175,6 +183,7 @@ export function DevicesPage() {
               deriveStatus={deriveSlotStatus}
               onSelect={onBaySelect}
               selectedBayId={focusedBayId}
+              catalog={catalog.data ?? null}
             />
             <BayLegend />
             {resolved.unplaced_devices.length > 0 && (

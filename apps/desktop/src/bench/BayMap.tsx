@@ -6,18 +6,26 @@ import type {
   BayFormFactor,
   Device,
   Enclosure,
+  EnclosureCatalog,
+  EnclosureModel,
   Job,
   ResolvedBayTopology,
 } from "@/api/types";
 import { SLOT_TONE, slotProgress, type SlotStatus } from "./slotStatus";
+import { fitToSlot, renderWidth, shellFor } from "./shells/registry";
 
 /**
- * Vector rendering of a station's declared bay topology (ADR-0002).
+ * Vector rendering of a station's declared bay topology (ADR-0002), inside
+ * model-aware enclosure artwork where we recognise the hardware (ADR-0004).
  *
  * The point is physical resemblance: an operator should be able to look at an
  * amber bay on screen and reach for the right tray without counting. So the
  * geometry comes from the config — bank grouping, grid shape, tray
  * orientation, form factor — rather than from a responsive card grid.
+ *
+ * The status layer below is drawn by one code path regardless of which shell
+ * sits behind it. That is what stops recognisable artwork from quietly
+ * degrading the thing the bay map exists for.
  *
  * Everything is generated SVG so it stays crisp at any zoom, themes with the
  * rest of the UI, and can be diffed in review.
@@ -30,8 +38,7 @@ const TRAY_SHORT = 34; // tray width across its short axis
 const TRAY_GAP = 4;
 const BANK_PAD = 10; // cage wall inside an enclosure
 const BANK_GAP = 34; // between banks — the chassis' ventilation column
-const ENCLOSURE_PAD = 14;
-const HEADER_H = 26;
+const BANK_LABEL_H = 13; // strip above the banks for "A" / "B" markings
 
 /** Tray footprint for a form factor, before orientation is applied. */
 function trayFace(ff: BayFormFactor): { long: number; short: number } {
@@ -85,17 +92,37 @@ function bankSize(bank: Bank): { w: number; h: number } {
   };
 }
 
-function enclosureSize(enc: Enclosure): { w: number; h: number } {
+interface PlacedBank {
+  bank: Bank;
+  ox: number;
+  oy: number;
+  size: { w: number; h: number };
+}
+
+/**
+ * The status layer: banks laid out side by side, measured on its own.
+ *
+ * Deliberately independent of any shell. The shell declares a rectangle and
+ * this gets fitted into it, so adding artwork can move and scale the bays but
+ * can never change how they are drawn.
+ */
+function contentLayout(enc: Enclosure): {
+  placed: PlacedBank[];
+  size: { w: number; h: number };
+} {
   const sizes = enc.banks.map(bankSize);
-  const banksW =
-    sizes.reduce((a, s) => a + s.w, 0) +
-    Math.max(0, enc.banks.length - 1) * BANK_GAP +
-    ENCLOSURE_PAD * 2;
-  // A small enclosure (a 2-bay dock) can be narrower than its own title, and
-  // the viewBox would clip the label. Reserve room for the header text.
-  const titleW = enc.label.length * 6.1 + ENCLOSURE_PAD * 2;
-  const h = Math.max(0, ...sizes.map((s) => s.h)) + ENCLOSURE_PAD * 2 + HEADER_H;
-  return { w: Math.max(banksW, titleW), h };
+  const tallest = Math.max(0, ...sizes.map((s) => s.h));
+  let cursor = 0;
+  const placed = enc.banks.map((bank, i) => {
+    const size = sizes[i];
+    const ox = cursor;
+    cursor += size.w + BANK_GAP;
+    // Banks of unequal height sit centred on each other, the way unequal
+    // cages do in a chassis.
+    return { bank, ox, oy: BANK_LABEL_H + (tallest - size.h) / 2, size };
+  });
+  const w = Math.max(0, cursor - BANK_GAP);
+  return { placed, size: { w, h: tallest + BANK_LABEL_H } };
 }
 
 export interface BayCellData {
@@ -339,101 +366,78 @@ function VentColumn({ x, y, w, h }: { x: number; y: number; w: number; h: number
   return <g opacity={0.9}>{dots}</g>;
 }
 
+/** Everything needed to draw one enclosure, shell included. */
+function enclosureLayout(enc: Enclosure, model: EnclosureModel | null) {
+  const content = contentLayout(enc);
+  const { shell, recognised } = shellFor(enc.kind, model?.art, content.size);
+  const fit = fitToSlot(shell.baySlot, content.size);
+  return { content, shell, recognised, fit, width: renderWidth(shell, fit.scale) };
+}
+
 function EnclosureGroup({
   enc,
+  layout,
   lookup,
   onSelect,
   selectedBayId,
 }: {
   enc: Enclosure;
+  layout: ReturnType<typeof enclosureLayout>;
   lookup: BayLookup;
   onSelect?: (cell: BayCellData) => void;
   selectedBayId?: string | null;
 }) {
-  const size = enclosureSize(enc);
-  const bankSizes = enc.banks.map(bankSize);
-  const tallest = Math.max(0, ...bankSizes.map((s) => s.h));
-
-  let cursor = ENCLOSURE_PAD;
-  const placed = enc.banks.map((bank, i) => {
-    const s = bankSizes[i];
-    const ox = cursor;
-    cursor += s.w + BANK_GAP;
-    return { bank, ox, oy: ENCLOSURE_PAD + HEADER_H + (tallest - s.h) / 2, size: s };
-  });
+  const { content, shell, fit } = layout;
 
   return (
     <svg
-      viewBox={`0 0 ${size.w} ${size.h}`}
+      viewBox={`0 0 ${shell.viewBox.w} ${shell.viewBox.h}`}
       width="100%"
-      style={{ maxWidth: size.w, height: "auto" }}
+      style={{ maxWidth: layout.width, height: "auto" }}
       role="img"
       aria-label={`${enc.label} bay map`}
     >
-      {/* chassis shell */}
-      <rect
-        x={0.5}
-        y={0.5}
-        width={size.w - 1}
-        height={size.h - 1}
-        rx={8}
-        fill="#0a1120"
-        stroke="#243247"
-        strokeWidth={1}
-      />
-      {/* rack ears, so a rackmount reads differently from a bench dock */}
-      {enc.kind === "rackmount" && (
-        <>
-          <rect x={4} y={ENCLOSURE_PAD + HEADER_H} width={5} height={tallest} rx={2} fill="#111c2e" />
-          <rect
-            x={size.w - 9}
-            y={ENCLOSURE_PAD + HEADER_H}
-            width={5}
-            height={tallest}
-            rx={2}
-            fill="#111c2e"
-          />
-        </>
-      )}
+      {/* Housing first, status second — never the other way round. Drawing
+          the shell last lets it clip bay labels, which is exactly how the
+          first version of the dock artwork went wrong. */}
+      {shell.render()}
 
-      <text x={ENCLOSURE_PAD} y={18} fill="#94a3b8" fontSize={11} fontWeight={600}>
-        {enc.label}
-      </text>
-      {enc.banks.map((b, i) =>
-        b.label ? (
-          <text
-            key={b.id}
-            x={placed[i].ox + BANK_PAD}
-            y={ENCLOSURE_PAD + HEADER_H - 5}
-            fill="#475569"
-            fontSize={9}
-            fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-          >
-            {b.label}
-          </text>
-        ) : null,
-      )}
-
-      {placed.map(({ bank, ox, oy, size: s }, i) => (
-        <g key={bank.id}>
-          {i > 0 && (
-            <VentColumn
-              x={placed[i - 1].ox + placed[i - 1].size.w}
-              y={oy}
-              w={BANK_GAP}
-              h={s.h}
+      <g transform={`translate(${fit.x}, ${fit.y}) scale(${fit.scale})`}>
+        {content.placed.map(({ bank, ox, oy }, i) =>
+          bank.label ? (
+            <text
+              key={`${bank.id}-label`}
+              x={ox + BANK_PAD}
+              y={oy - 4}
+              fill="#64748b"
+              fontSize={9}
+              fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+            >
+              {bank.label}
+            </text>
+          ) : null,
+        )}
+        {content.placed.map(({ bank, ox, oy, size: s }, i) => (
+          <g key={bank.id}>
+            {i > 0 && (
+              <VentColumn
+                x={content.placed[i - 1].ox + content.placed[i - 1].size.w}
+                y={oy}
+                w={BANK_GAP}
+                h={s.h}
+              />
+            )}
+            <BankGroup
+              bank={bank}
+              ox={ox}
+              oy={oy}
+              lookup={lookup}
+              onSelect={onSelect}
+              selectedBayId={selectedBayId}
             />
-          )}
-          <BankGroup
-            bank={bank}
-            ox={ox}
-            oy={oy}
-            lookup={lookup}
-            onSelect={onSelect}
-            selectedBayId={selectedBayId}
-          />
-        </g>
-      ))}
+          </g>
+        ))}
+      </g>
     </svg>
   );
 }
@@ -447,6 +451,7 @@ export function BayMap({
   deriveStatus,
   onSelect,
   selectedBayId,
+  catalog,
 }: {
   resolved: ResolvedBayTopology;
   devicesById: Map<string, Device>;
@@ -454,7 +459,17 @@ export function BayMap({
   deriveStatus: (job: Job | undefined) => SlotStatus;
   onSelect?: (cell: BayCellData) => void;
   selectedBayId?: string | null;
+  /** Optional. Without it every enclosure renders generic — which is the
+   *  normal outcome for unrecognised hardware anyway, so a missing or failed
+   *  catalog fetch costs recognition, not the bay map. */
+  catalog?: EnclosureCatalog | null;
 }) {
+  const modelsById = useMemo(() => {
+    const m = new Map<string, EnclosureModel>();
+    for (const model of catalog?.models ?? []) m.set(model.id, model);
+    return m;
+  }, [catalog]);
+
   const occupancy = useMemo(() => {
     const m = new Map<string, string>();
     for (const o of resolved.occupancy) m.set(o.bay_id, o.device_id);
@@ -477,31 +492,44 @@ export function BayMap({
   // with a rack, a dock and a carrier is three separate boxes on a workbench,
   // not a vertical list, and stacking wasted the whole right-hand side.
   return (
-    <div className="flex flex-wrap items-start gap-4">
-      {resolved.topology.enclosures.map((enc) => (
-        // Width comes from the enclosure's own geometry: as a flex item the
-        // SVG's width:100% would otherwise resolve against a content-derived
-        // base and collapse the whole chassis to a thumbnail.
-        <div
-          key={enc.id}
-          className="max-w-full shrink-0"
-          style={{ width: enclosureSize(enc).w }}
-        >
-          <EnclosureGroup
-            enc={enc}
-            lookup={lookup}
-            onSelect={onSelect}
-            selectedBayId={selectedBayId}
-          />
-          {enc.note && (
-            <p className="mt-1 max-w-sm text-[11px] leading-relaxed text-slate-500">
-              {enc.note}
-            </p>
-          )}
-        </div>
-      ))}
+    <div className="flex flex-wrap items-start gap-5">
+      {resolved.topology.enclosures.map((enc) => {
+        const model = enc.model_ref ? (modelsById.get(enc.model_ref) ?? null) : null;
+        const layout = enclosureLayout(enc, model);
+        return (
+          // Width comes from the enclosure's own geometry: as a flex item the
+          // SVG's width:100% would otherwise resolve against a content-derived
+          // base and collapse the whole chassis to a thumbnail.
+          <div key={enc.id} className="max-w-full shrink-0" style={{ width: layout.width }}>
+            {/* The header is HTML, not SVG: it must stay readable at every
+                scale, and it is where we say what we are claiming to draw. */}
+            <div className="mb-1 flex items-baseline gap-2">
+              <span className="text-[11px] font-semibold text-slate-300">{enc.label}</span>
+              <span className="font-mono text-[10px] text-slate-500">
+                {layout.recognised
+                  ? `${model?.vendor} ${model?.product}`
+                  : model
+                    ? `${model.vendor} ${model.product} · generic outline`
+                    : "generic outline"}
+              </span>
+            </div>
+            <EnclosureGroup
+              enc={enc}
+              layout={layout}
+              lookup={lookup}
+              onSelect={onSelect}
+              selectedBayId={selectedBayId}
+            />
+            {enc.note && (
+              <p className="mt-1 max-w-sm text-[11px] leading-relaxed text-slate-500">
+                {enc.note}
+              </p>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-export { enclosureSize };
+export { contentLayout, enclosureLayout };

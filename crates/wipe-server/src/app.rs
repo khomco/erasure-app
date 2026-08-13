@@ -44,6 +44,10 @@ pub struct AppState {
     /// Present only when the backend can fake hot-plug. Gates the
     /// `/api/sim/*` routes so a real hardware station never exposes them.
     pub simulator: Option<Arc<dyn wipe_engine::DeviceSimulator>>,
+    /// Known enclosure models (ADR-0004). Bundled data, optionally corrected
+    /// by a site-local overlay, served to the UI so the builder and the bay
+    /// map agree on what a given `model_ref` means.
+    pub catalog: Arc<wipe_common::Catalog>,
 }
 
 impl AppState {
@@ -79,6 +83,7 @@ impl AppState {
                 false,
             )),
             simulator: None,
+            catalog: Arc::new(wipe_common::Catalog::bundled()),
         };
         state.spawn_cert_generator();
         state
@@ -110,6 +115,16 @@ impl AppState {
             }
         }
         self.topology_store = store;
+        self
+    }
+
+    /// Merge a site-local catalog overlay over the bundled models (ADR-0004).
+    ///
+    /// A wrong bay count on a customer's chassis is fixable the same day
+    /// rather than at the next release, which is the whole reason the overlay
+    /// exists.
+    pub fn with_catalog_overlay(mut self, overlay: &wipe_common::Catalog) -> Self {
+        self.catalog = Arc::new(self.catalog.overlay(overlay));
         self
     }
 
@@ -234,6 +249,7 @@ pub fn router(state: AppState) -> Router {
             get(handlers::bay_topology_config),
         )
         .route("/api/bay-topology/store", get(handlers::bay_topology_store))
+        .route("/api/enclosure-catalog", get(handlers::enclosure_catalog))
         .route(
             "/api/bay-topology/store/acknowledge",
             post(handlers::acknowledge_ephemeral),

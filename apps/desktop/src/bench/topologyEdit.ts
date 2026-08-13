@@ -7,6 +7,7 @@ import type {
   BayTopology,
   Enclosure,
   EnclosureKind,
+  EnclosureModel,
   NumberingRun,
   TopologyProblem,
   TrayOrientation,
@@ -149,6 +150,43 @@ export function newEnclosure(kind: EnclosureKind = "rackmount"): Enclosure {
     label: "New enclosure",
     kind,
     banks: [newBank(id, 0)],
+  };
+}
+
+/**
+ * Expand a catalog model into an ordinary enclosure (ADR-0004).
+ *
+ * Mirrors `EnclosureModel::expand` in wipe-common. The catalog is a source of
+ * *defaults*: from here on this is the operator's layout, editable like any
+ * other, and `model_ref` only tells the renderer which artwork to use.
+ */
+export function enclosureFromModel(model: EnclosureModel): Enclosure {
+  const id = nextId("enc");
+  const banks: Bank[] = model.spec.banks.map((spec, i) => {
+    const bankId = `b${i + 1}`;
+    const run: NumberingRun = {
+      order: spec.order,
+      origin: spec.origin,
+      label_start: spec.label_start,
+    };
+    return {
+      id: bankId,
+      label: spec.label ?? null,
+      rows: spec.rows,
+      cols: spec.cols,
+      form_factor: spec.form_factor,
+      orientation: spec.orientation,
+      numbering: run,
+      bays: generateBays(id, bankId, spec.rows, spec.cols, run),
+    };
+  });
+  return {
+    id,
+    label: `${model.vendor} ${model.product}`,
+    kind: model.kind,
+    model_ref: model.id,
+    banks,
+    note: model.spec.notes ?? null,
   };
 }
 
