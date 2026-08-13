@@ -61,9 +61,10 @@ enum Cmd {
         /// explicitly-unconfigured bench rather than inventing a chassis.
         #[arg(long, env = "WIPESTATION_BAY_TOPOLOGY")]
         bay_topology: Option<PathBuf>,
-        /// Built-in bay-topology preset to start from. Presets expand into
-        /// the same model a config file uses; run `wipestation bay-presets`
-        /// to list them and to dump one as a starting point.
+        /// Bay-topology preset, or a catalog model id (ADR-0004), to start
+        /// from. Both expand into the same model a config file uses, with all
+        /// bays unbound; run `wipestation bay-presets` to list them and to
+        /// dump one as a starting point.
         #[arg(long)]
         bay_profile: Option<String>,
         /// Base URL of a control plane to hold this station's configuration
@@ -77,10 +78,10 @@ enum Cmd {
         #[arg(long)]
         ephemeral_config: bool,
     },
-    /// List built-in bay-topology presets, or dump one as JSON to use as a
-    /// starting point for a station config file.
+    /// List built-in bay-topology presets and known enclosure models, or dump
+    /// one as JSON to use as a starting point for a station config file.
     BayPresets {
-        /// Print this preset as JSON instead of listing names.
+        /// Print this preset or catalog model as JSON instead of listing names.
         #[arg(long)]
         dump: Option<String>,
     },
@@ -201,14 +202,9 @@ fn load_bay_topology(
     }
 
     if let Some(name) = profile {
-        let topology = wipe_common::preset(&name).ok_or_else(|| {
-            anyhow!(
-                "unknown bay profile `{name}` — known presets: {}",
-                wipe_common::preset_names().join(", ")
-            )
-        })?;
+        let (topology, source) = resolve_profile(&name)?;
         println!(
-            "bay topology: {} ({} bays) from preset `{name}`",
+            "bay topology: {} ({} bays) from {source} `{name}`",
             topology.label,
             topology.bay_count()
         );
@@ -219,24 +215,74 @@ fn load_bay_topology(
     Ok(None)
 }
 
+/// Resolve a `--bay-profile` name: a built-in preset, or a catalog model id.
+///
+/// The catalog is a source of defaults (ADR-0004), so a station should be able
+/// to start from one without an operator hand-writing the same JSON the
+/// builder would have produced. Either way the bays start unbound — the
+/// catalog knows the shape of a chassis, never which drive is in which bay.
+fn resolve_profile(name: &str) -> Result<(wipe_common::BayTopology, &'static str)> {
+    if let Some(topology) = wipe_common::preset(name) {
+        return Ok((topology, "preset"));
+    }
+
+    let catalog = wipe_common::Catalog::bundled();
+    if let Some(model) = catalog.get(&wipe_common::ModelId(name.to_string())) {
+        return Ok((
+            wipe_common::BayTopology {
+                schema_version: wipe_common::BAY_TOPOLOGY_SCHEMA_VERSION,
+                label: model.display_name(),
+                generated: false,
+                revision: 0,
+                auto_fill_unbound: true,
+                enclosures: vec![model.expand("enc1")],
+            },
+            "catalog model",
+        ));
+    }
+
+    Err(anyhow!(
+        "unknown bay profile `{name}` — presets: {}; catalog models: {}",
+        wipe_common::preset_names().join(", "),
+        catalog
+            .models
+            .iter()
+            .map(|m| m.id.0.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 fn cmd_bay_presets(dump: Option<String>) -> Result<()> {
     match dump {
         Some(name) => {
-            let topology = wipe_common::preset(&name).ok_or_else(|| {
-                anyhow!(
-                    "unknown bay profile `{name}` — known presets: {}",
-                    wipe_common::preset_names().join(", ")
-                )
-            })?;
+            let (topology, _) = resolve_profile(&name)?;
             println!("{}", serde_json::to_string_pretty(&topology)?);
         }
         None => {
+            println!("presets (starting points, not a hardware compatibility list):");
             for name in wipe_common::preset_names() {
                 let t = wipe_common::preset(name).expect("listed preset resolves");
                 println!(
-                    "{name:<16} {:>3} bays  {}",
+                    "  {name:<24} {:>3} bays  {}",
                     t.bay_count(),
                     t.enclosures[0].label
+                );
+            }
+            // Listed here because --bay-profile accepts either, and an
+            // operator should not have to know which list a name came from.
+            println!("\ncatalog models (ADR-0004):");
+            for m in &wipe_common::Catalog::bundled().models {
+                println!(
+                    "  {:<24} {:>3} bays  {}{}",
+                    m.id.0,
+                    m.bay_count(),
+                    m.display_name(),
+                    if m.verified_by.is_some() {
+                        " [verified]"
+                    } else {
+                        ""
+                    }
                 );
             }
         }

@@ -224,13 +224,29 @@ export function unmeasurableViolations(shell: ShellDef): string[] {
 
 // --- every registered shell, plus the fallback at several sizes -----------
 
+/**
+ * Content sizes to build every shell at.
+ *
+ * Shells are built around the layout they hold, so "does this artwork obey
+ * the rules" is only answerable per size. These span the range a real bench
+ * produces: a two-bay dock, a 32-bay chassis, a tall narrow column, and a
+ * degenerate single bay.
+ */
+const SIZES = [
+  { w: 300, h: 90 },
+  { w: 620, h: 340 },
+  { w: 120, h: 420 },
+  { w: 90, h: 60 },
+];
+
 const SHELLS: ShellDef[] = [
-  ...registeredShells(),
+  ...registeredShells().flatMap((f) =>
+    SIZES.map((size) => ({ ...f.build(size), title: `${f.title} @ ${size.w}x${size.h}` })),
+  ),
   // The fallback is held to the same contract, because it is the shell most
   // enclosures will actually get.
-  genericShell("rackmount", { w: 600, h: 300 }),
-  genericShell("dock", { w: 140, h: 90 }),
-  genericShell("nvme_carrier", { w: 320, h: 120 }),
+  ...SIZES.map((size) => genericShell("rackmount", size)),
+  ...SIZES.map((size) => genericShell("dock", size)),
 ];
 
 describe.each(SHELLS.map((s) => [s.title, s] as const))("%s", (_title, shell) => {
@@ -372,6 +388,19 @@ describe("shell registry", () => {
   it("declares at least one kind per shell", () => {
     for (const s of registeredShells()) expect(s.kinds.length).toBeGreaterThan(0);
   });
+
+  it("builds a slot exactly the size of the content it was given", () => {
+    // The whole point of the factory shape: the layout is the fact, the
+    // housing is drawn around it. A shell that shrinks the slot forces the
+    // bank grid to scale down, which is what the fixed-size version did.
+    for (const f of registeredShells()) {
+      for (const size of SIZES) {
+        const shell = f.build(size);
+        expect(shell.baySlot.w, `${f.key} @ ${size.w}x${size.h}`).toBe(size.w);
+        expect(shell.baySlot.h, `${f.key} @ ${size.w}x${size.h}`).toBe(size.h);
+      }
+    }
+  });
 });
 
 // --- fitting ---------------------------------------------------------------
@@ -399,7 +428,7 @@ describe("fitToSlot", () => {
   });
 
   it("grows the rendered canvas so bays stay their natural size", () => {
-    const shell = registeredShells()[0];
+    const shell = registeredShells()[0].build({ w: 300, h: 200 });
     expect(renderWidth(shell, 0.5)).toBeGreaterThan(renderWidth(shell, 1));
     // ...but not without limit, or one odd catalog entry could demand a
     // canvas nobody's screen can show.

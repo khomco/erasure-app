@@ -366,6 +366,24 @@ function VentColumn({ x, y, w, h }: { x: number; y: number; w: number; h: number
   return <g opacity={0.9}>{dots}</g>;
 }
 
+/**
+ * The provenance line under an enclosure's name.
+ *
+ * Operators rename enclosures — most keep the model name the catalog gave
+ * them — so repeating it verbatim is noise. What is never noise is whether
+ * this drawing is the real chassis or an outline.
+ */
+function modelNote(
+  label: string,
+  model: EnclosureModel | null,
+  recognised: boolean,
+): string {
+  const name = model ? `${model.vendor} ${model.product}` : null;
+  const named = name && name !== label ? name : null;
+  if (recognised) return named ?? "";
+  return named ? `${named} · generic outline` : "generic outline";
+}
+
 /** Everything needed to draw one enclosure, shell included. */
 function enclosureLayout(enc: Enclosure, model: EnclosureModel | null) {
   const content = contentLayout(enc);
@@ -506,11 +524,7 @@ export function BayMap({
             <div className="mb-1 flex items-baseline gap-2">
               <span className="text-[11px] font-semibold text-slate-300">{enc.label}</span>
               <span className="font-mono text-[10px] text-slate-500">
-                {layout.recognised
-                  ? `${model?.vendor} ${model?.product}`
-                  : model
-                    ? `${model.vendor} ${model.product} · generic outline`
-                    : "generic outline"}
+                {modelNote(enc.label, model, layout.recognised)}
               </span>
             </div>
             <EnclosureGroup

@@ -33,7 +33,7 @@ export interface ShellDef {
   readonly title: string;
   /** Which enclosure kinds this artwork is appropriate for. */
   readonly kinds: readonly EnclosureKind[];
-  /** Intrinsic drawing size. The whole shell lives in `0 0 w h`. */
+  /** Drawing size for this instance. The whole shell lives in `0 0 w h`. */
   readonly viewBox: { w: number; h: number };
   /**
    * Where the bank grid is drawn. Declared, not inferred, so the contract
@@ -42,6 +42,23 @@ export interface ShellDef {
   readonly baySlot: { x: number; y: number; w: number; h: number };
   /** The housing. Must not draw inside `baySlot`. */
   render(): ReactNode;
+}
+
+/**
+ * Shells are **built around the layout they have to hold**, not drawn at a
+ * fixed size the layout is then squeezed into.
+ *
+ * The first version got this wrong: artwork declared a viewBox, the bank grid
+ * was scaled to fit it, and a 32-bay chassis whose banks are taller than the
+ * artwork expected rendered as a small grid marooned in the middle of a wide
+ * empty box. The chassis a customer describes is the fact; the housing drawn
+ * around it is the decoration. So the content size is an input.
+ */
+export interface ShellFactory {
+  readonly key: string;
+  readonly title: string;
+  readonly kinds: readonly EnclosureKind[];
+  build(content: { w: number; h: number }): ShellDef;
 }
 
 /** Everything a shell may need. Deliberately tiny — shells are decoration. */

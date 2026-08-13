@@ -1,7 +1,7 @@
 import type { EnclosureKind } from "@/api/types";
 import { genericShell } from "./GenericShell";
 import { MODEL_SHELLS } from "./models";
-import type { ShellDef } from "./types";
+import type { ShellDef, ShellFactory } from "./types";
 
 /**
  * Shell lookup and slot fitting (ADR-0004 §3).
@@ -13,19 +13,19 @@ import type { ShellDef } from "./types";
  * unavailable because artwork is missing.
  */
 
-const BY_KEY = new Map<string, ShellDef>(MODEL_SHELLS.map((s) => [s.key, s]));
+const BY_KEY = new Map<string, ShellFactory>(MODEL_SHELLS.map((s) => [s.key, s]));
 
-export function shellByKey(key: string | null | undefined): ShellDef | null {
+export function shellByKey(key: string | null | undefined): ShellFactory | null {
   if (!key) return null;
   return BY_KEY.get(key) ?? null;
 }
 
-export function registeredShells(): readonly ShellDef[] {
+export function registeredShells(): readonly ShellFactory[] {
   return MODEL_SHELLS;
 }
 
 /**
- * The shell to draw for one enclosure.
+ * The shell to draw for one enclosure, built around its bank layout.
  *
  * `art` is honoured only when the shell also declares the enclosure's kind.
  * A dock rendered in a rackmount chassis because a catalog entry pointed at
@@ -38,15 +38,20 @@ export function shellFor(
   content: { w: number; h: number },
 ): { shell: ShellDef; recognised: boolean } {
   const found = shellByKey(art);
-  if (found && found.kinds.includes(kind)) return { shell: found, recognised: true };
+  if (found && found.kinds.includes(kind)) {
+    return { shell: found.build(content), recognised: true };
+  }
   return { shell: genericShell(kind, content), recognised: false };
 }
 
 /**
  * Fit the bank layer into a shell's declared bay slot.
  *
- * Uniform scale, centred: the grid pitch is a physical fact about the chassis
- * and must not be stretched to fill artwork.
+ * Shells are built around the content, so this is normally the identity — but
+ * a shell is free to clamp its slot (a minimum body size, a fixed-width
+ * control panel), and when it does the grid is scaled uniformly and centred.
+ * Uniform, because grid pitch is a physical fact about the chassis and must
+ * not be stretched to fill artwork.
  */
 export function fitToSlot(
   slot: { x: number; y: number; w: number; h: number },
@@ -75,4 +80,4 @@ export function renderWidth(shell: ShellDef, scale: number): number {
 }
 
 export { genericShell };
-export type { ShellDef };
+export type { ShellDef, ShellFactory };

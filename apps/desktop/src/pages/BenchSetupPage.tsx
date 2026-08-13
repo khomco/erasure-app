@@ -643,14 +643,17 @@ function ModelPicker({
 
   if (models.length === 0) return null;
 
+  // The panel anchors to the header row, not to the button: right-aligning a
+  // 20rem panel on a button this far left pushed it off the edge of the
+  // window. The parent supplies `relative`.
   return (
-    <div className="relative">
+    <>
       <button className="btn btn-ghost text-xs" onClick={() => setOpen((o) => !o)}>
         <Database className="h-3.5 w-3.5" />
         From catalog
       </button>
       {open && (
-        <div className="absolute right-0 z-20 mt-1 w-80 rounded-md border border-slate-800 bg-slate-900 p-1 shadow-xl">
+        <div className="absolute right-0 top-full z-20 mt-1 w-80 rounded-md border border-slate-800 bg-slate-900 p-1 shadow-xl">
           <input
             className="input mb-1 w-full text-xs"
             placeholder="Search vendor, model, alias…"
@@ -692,7 +695,7 @@ function ModelPicker({
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -717,7 +720,7 @@ function StructurePane({
         <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
           Enclosures
         </h3>
-        <div className="flex items-center gap-1">
+        <div className="relative flex items-center gap-1">
           <ModelPicker
             models={models}
             onPick={(model) =>

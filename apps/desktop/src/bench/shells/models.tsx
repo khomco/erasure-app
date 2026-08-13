@@ -1,12 +1,12 @@
-import type { ShellDef } from "./types";
+import type { ShellFactory } from "./types";
 import { MONO, SHELL_TOKENS as T } from "./tokens";
 
 /**
  * Per-model enclosure artwork (ADR-0004 §3).
  *
- * Each shell draws housing only, in tokens from `tokens.ts`, and declares the
- * bay slot `BayMap` fills. See `docs/design/enclosure-art-pipeline.md` for how
- * to add one.
+ * Each factory draws housing only, in tokens from `tokens.ts`, built around
+ * the bank layout it has to hold. See `docs/design/enclosure-art-pipeline.md`
+ * for how to add one.
  */
 
 /** Ventilation holes. Decoration; never inside a bay slot. */
@@ -40,187 +40,257 @@ function Vents({
 }
 
 // ---------------------------------------------------------------------------
-// Rackmount, two banks either side of a vent column (the ARMA reference)
+// Rackmount with mounting ears (the ARMA reference chassis)
 // ---------------------------------------------------------------------------
 
-const RACK_W = 880;
-const RACK_H = 250;
-
-export const rackmountTwoBank: ShellDef = {
+export const rackmountTwoBank: ShellFactory = {
   key: "rackmount-two-bank",
-  title: "Rackmount — two banks with centre I/O",
+  title: "Rackmount — mounting ears, centre I/O",
   kinds: ["rackmount"],
-  viewBox: { w: RACK_W, h: RACK_H },
-  // Full width inside the ears; BayMap splits it across the banks and the
-  // vent column falls in the gap between them.
-  baySlot: { x: 34, y: 18, w: RACK_W - 68, h: RACK_H - 36 },
-  render: () => (
-    <g>
-      <rect
-        x={0.5}
-        y={0.5}
-        width={RACK_W - 1}
-        height={RACK_H - 1}
-        rx={7}
-        fill={T.body}
-        stroke={T.edge}
-        strokeWidth={1.5}
-      />
-      {/* Rack ears with mounting holes — the give-away that this is rack gear */}
-      {[6, RACK_W - 26].map((ex) => (
-        <g key={ex}>
-          <rect x={ex} y={10} width={20} height={RACK_H - 20} rx={3} fill={T.dark} stroke={T.edgeSoft} />
-          {[0, 1, 2, 3].map((i) => (
-            <circle
-              key={i}
-              cx={ex + 10}
-              cy={30 + i * ((RACK_H - 60) / 3)}
-              r={3.4}
-              fill={T.void}
-              stroke={T.edgeSoft}
-            />
+  build: (content) => {
+    const EAR = 22;
+    const PAD = 18;
+    const w = content.w + PAD * 2 + EAR * 2;
+    const h = content.h + PAD * 2;
+    const holes = Math.max(2, Math.min(6, Math.round(h / 70)));
+    return {
+      key: rackmountTwoBank.key,
+      title: rackmountTwoBank.title,
+      kinds: rackmountTwoBank.kinds,
+      viewBox: { w, h },
+      baySlot: { x: EAR + PAD, y: PAD, w: content.w, h: content.h },
+      render: () => (
+        <g>
+          <rect
+            x={EAR + 0.5}
+            y={0.5}
+            width={w - EAR * 2 - 1}
+            height={h - 1}
+            rx={5}
+            fill={T.body}
+            stroke={T.edge}
+            strokeWidth={1.5}
+          />
+          {/* Mounting ears — the give-away that this is rack gear rather
+              than something sitting on a bench. */}
+          {[0, w - EAR].map((ex) => (
+            <g key={ex}>
+              <rect x={ex} y={6} width={EAR - 2} height={h - 12} rx={3} fill={T.dark} stroke={T.edgeSoft} />
+              {Array.from({ length: holes }).map((_, i) => (
+                <circle
+                  key={i}
+                  cx={ex + (EAR - 2) / 2}
+                  cy={20 + (i * (h - 40)) / Math.max(1, holes - 1)}
+                  r={3.4}
+                  fill={T.void}
+                  stroke={T.edgeSoft}
+                />
+              ))}
+            </g>
           ))}
+          <text x={EAR + 6} y={12} fill={T.inkDim} fontSize={8} fontFamily={MONO}>
+            4U
+          </text>
         </g>
-      ))}
-      <text x={40} y={13} fill={T.inkDim} fontSize={8} fontFamily={MONO}>
-        4U
-      </text>
-    </g>
-  ),
+      ),
+    };
+  },
 };
 
 // ---------------------------------------------------------------------------
 // Toaster dock — drives stand proud of the top
 // ---------------------------------------------------------------------------
 
-const DOCK_W = 300;
-const DOCK_H = 300;
-const DOCK_BODY_Y = 168;
-
-export const toasterDock: ShellDef = {
+export const toasterDock: ShellFactory = {
   key: "toaster-dock",
   title: "Toaster dock — top loading",
   kinds: ["dock", "usb_caddy"],
-  viewBox: { w: DOCK_W, h: DOCK_H },
-  // Above the body: the drives stick up out of the slots, which is the
-  // silhouette people recognise. Keeping the slot clear of the shell is the
-  // rule that a first draft of this art broke.
-  baySlot: { x: 40, y: 44, w: DOCK_W - 80, h: DOCK_BODY_Y - 50 },
-  render: () => (
-    <g>
-      <polygon
-        points={`30,${DOCK_BODY_Y} ${DOCK_W - 30},${DOCK_BODY_Y} ${DOCK_W - 40},${DOCK_H - 8} 40,${DOCK_H - 8}`}
-        fill={T.body}
-        stroke={T.edge}
-        strokeWidth={1.5}
-      />
-      {/* Slot mouths the drives descend into */}
-      <rect x={40} y={DOCK_BODY_Y + 4} width={DOCK_W - 80} height={18} rx={3} fill={T.dark} />
-      <rect x={52} y={DOCK_BODY_Y + 9} width={84} height={9} rx={2} fill={T.void} />
-      <rect x={DOCK_W - 136} y={DOCK_BODY_Y + 9} width={84} height={9} rx={2} fill={T.void} />
-      {/* Front face: power button, activity LEDs, port marking */}
-      <rect
-        x={46}
-        y={DOCK_BODY_Y + 44}
-        width={DOCK_W - 92}
-        height={52}
-        rx={4}
-        fill={T.lit}
-        stroke={T.edgeSoft}
-      />
-      <circle cx={72} cy={DOCK_BODY_Y + 70} r={9} fill={T.dark} stroke={T.edge} />
-      <circle cx={72} cy={DOCK_BODY_Y + 70} r={3.4} fill={T.edge} />
-      {[0, 1].map((i) => (
-        <circle key={i} cx={104 + i * 16} cy={DOCK_BODY_Y + 70} r={3.2} fill={T.dark} stroke={T.edgeSoft} />
-      ))}
-      <text x={DOCK_W - 60} y={DOCK_BODY_Y + 74} fill={T.inkDim} fontSize={8} fontFamily={MONO} textAnchor="end">
-        USB 3.0
-      </text>
-      <rect x={42} y={DOCK_H - 16} width={DOCK_W - 84} height={5} rx={2} fill={T.dark} />
-    </g>
-  ),
+  build: (content) => {
+    const SIDE = 26;
+    const w = content.w + SIDE * 2;
+    // The body is what makes this recognisable, so it keeps a sane presence
+    // even behind two small trays.
+    const body = Math.max(96, Math.min(200, content.h * 0.85));
+    const top = 8;
+    const bodyY = top + content.h + 6;
+    const h = bodyY + body;
+    const faceY = bodyY + 34;
+    const faceH = Math.max(30, body - 48);
+    return {
+      key: toasterDock.key,
+      title: toasterDock.title,
+      kinds: toasterDock.kinds,
+      viewBox: { w, h },
+      // Above the body: drives sticking up out of the slots is the silhouette
+      // people recognise, and it keeps the slot clear of the shell entirely.
+      baySlot: { x: SIDE, y: top, w: content.w, h: content.h },
+      render: () => (
+        <g>
+          <polygon
+            points={`${SIDE - 12},${bodyY} ${w - SIDE + 12},${bodyY} ${w - SIDE + 4},${h - 4} ${SIDE - 4},${h - 4}`}
+            fill={T.body}
+            stroke={T.edge}
+            strokeWidth={1.5}
+          />
+          {/* Slot mouths the drives descend into */}
+          <rect x={SIDE - 6} y={bodyY + 4} width={w - SIDE * 2 + 12} height={16} rx={3} fill={T.dark} />
+          {[0, 1].map((i) => (
+            <rect
+              key={i}
+              x={SIDE + 4 + i * ((w - SIDE * 2 - 8) / 2 + 4)}
+              y={bodyY + 9}
+              width={(w - SIDE * 2 - 16) / 2}
+              height={7}
+              rx={2}
+              fill={T.void}
+            />
+          ))}
+          {/* Front face: power button, activity LEDs, port marking */}
+          <rect x={SIDE} y={faceY} width={w - SIDE * 2} height={faceH} rx={4} fill={T.lit} stroke={T.edgeSoft} />
+          <circle cx={SIDE + 24} cy={faceY + faceH / 2} r={9} fill={T.dark} stroke={T.edge} />
+          <circle cx={SIDE + 24} cy={faceY + faceH / 2} r={3.4} fill={T.edge} />
+          {[0, 1].map((i) => (
+            <circle
+              key={i}
+              cx={SIDE + 52 + i * 14}
+              cy={faceY + faceH / 2}
+              r={3.2}
+              fill={T.dark}
+              stroke={T.edgeSoft}
+            />
+          ))}
+          <text
+            x={w - SIDE - 10}
+            y={faceY + faceH / 2 + 4}
+            fill={T.inkDim}
+            fontSize={8}
+            fontFamily={MONO}
+            textAnchor="end"
+          >
+            USB 3.0
+          </text>
+        </g>
+      ),
+    };
+  },
 };
 
 // ---------------------------------------------------------------------------
 // Open dual-bay cage — bare frame, drives exposed
 // ---------------------------------------------------------------------------
 
-const CAGE_W = 260;
-const CAGE_H = 240;
-
-export const dualBayCage: ShellDef = {
+export const dualBayCage: ShellFactory = {
   key: "dual-bay-cage",
-  title: "Open dual-bay hot-swap cage",
+  title: "Open hot-swap cage",
   kinds: ["dock"],
-  viewBox: { w: CAGE_W, h: CAGE_H },
-  baySlot: { x: 30, y: 34, w: CAGE_W - 60, h: CAGE_H - 74 },
-  render: () => (
-    <g>
-      <rect x={8} y={8} width={CAGE_W - 16} height={CAGE_H - 16} rx={5} fill={T.dark} stroke={T.edge} strokeWidth={1.5} />
-      <rect x={16} y={16} width={CAGE_W - 32} height={CAGE_H - 32} rx={4} fill={T.body} stroke={T.edgeSoft} />
-      {/* Screw rails top and bottom — an open frame has little else to draw */}
-      {[18, CAGE_H - 26].map((sy) => (
-        <g key={sy}>
-          <rect x={26} y={sy} width={CAGE_W - 52} height={5} rx={2} fill={T.lit} />
-          {[0, 1, 2, 3, 4].map((i) => (
-            <circle key={i} cx={38 + i * ((CAGE_W - 76) / 4)} cy={sy + 2.5} r={1.7} fill={T.void} />
-          ))}
+  build: (content) => {
+    const SIDE = 22;
+    const TOP = 26;
+    const w = content.w + SIDE * 2;
+    const h = content.h + TOP + 34;
+    const screws = Math.max(2, Math.min(6, Math.round(w / 60)));
+    const rail = (y: number) => (
+      <g key={y}>
+        <rect x={SIDE} y={y} width={content.w} height={5} rx={2} fill={T.lit} />
+        {Array.from({ length: screws }).map((_, i) => (
+          <circle
+            key={i}
+            cx={SIDE + 8 + (i * (content.w - 16)) / Math.max(1, screws - 1)}
+            cy={y + 2.5}
+            r={1.7}
+            fill={T.void}
+          />
+        ))}
+      </g>
+    );
+    return {
+      key: dualBayCage.key,
+      title: dualBayCage.title,
+      kinds: dualBayCage.kinds,
+      viewBox: { w, h },
+      baySlot: { x: SIDE, y: TOP, w: content.w, h: content.h },
+      render: () => (
+        <g>
+          <rect x={6} y={6} width={w - 12} height={h - 12} rx={5} fill={T.dark} stroke={T.edge} strokeWidth={1.5} />
+          <rect x={13} y={13} width={w - 26} height={h - 26} rx={4} fill={T.body} stroke={T.edgeSoft} />
+          {/* Screw rails top and bottom — an open frame has little else. */}
+          {rail(15)}
+          {rail(h - 26)}
+          <text x={w / 2} y={h - 7} fill={T.inkDim} fontSize={8} fontFamily={MONO} textAnchor="middle">
+            open frame
+          </text>
         </g>
-      ))}
-      <text x={CAGE_W / 2} y={CAGE_H - 8} fill={T.inkDim} fontSize={8} fontFamily={MONO} textAnchor="middle">
-        open frame
-      </text>
-    </g>
-  ),
+      ),
+    };
+  },
 };
 
 // ---------------------------------------------------------------------------
 // NVMe duplicator — sockets left, OSD + keypad right
 // ---------------------------------------------------------------------------
 
-const NVME_W = 400;
-const NVME_H = 240;
-
-export const nvmeDuplicator: ShellDef = {
+export const nvmeDuplicator: ShellFactory = {
   key: "nvme-duplicator",
   title: "NVMe duplicator — OSD and keypad",
   kinds: ["nvme_carrier", "duplicator"],
-  viewBox: { w: NVME_W, h: NVME_H },
-  baySlot: { x: 24, y: 22, w: 240, h: NVME_H - 44 },
-  render: () => (
-    <g>
-      <rect x={6} y={14} width={NVME_W - 12} height={NVME_H - 22} rx={6} fill={T.body} stroke={T.edge} strokeWidth={1.5} />
-      {/* Hinged lid, shown lifted */}
-      <rect x={14} y={6} width={NVME_W - 28} height={12} rx={3} fill={T.lit} stroke={T.edgeSoft} />
-      {[0, 1].map((i) => (
-        <rect key={i} x={50 + i * (NVME_W - 132)} y={8} width={26} height={8} rx={2} fill={T.dark} />
-      ))}
-      {/* OSD + keypad: the recognisable duplicator face */}
-      <rect x={286} y={30} width={96} height={46} rx={3} fill={T.dark} stroke={T.edge} />
-      <text x={296} y={50} fill={T.ink} fontSize={9} fontFamily={MONO}>
-        COPY
-      </text>
-      <text x={296} y={64} fill={T.inkDim} fontSize={8} fontFamily={MONO}>
-        NVMe 2280
-      </text>
-      {[0, 1, 2, 3].map((i) => (
-        <rect
-          key={i}
-          x={292 + (i % 2) * 48}
-          y={88 + Math.floor(i / 2) * 26}
-          width={40}
-          height={20}
-          rx={3}
-          fill={T.lit}
-          stroke={T.edgeSoft}
-        />
-      ))}
-      <Vents x={290} y={146} w={88} h={62} r={2.3} />
-    </g>
-  ),
+  build: (content) => {
+    const PANEL = 118;
+    const PAD = 20;
+    const w = content.w + PAD * 2 + PANEL;
+    const h = Math.max(content.h + PAD * 2 + 10, 170);
+    const px = w - PANEL - 8;
+    const bodyY = 12;
+    return {
+      key: nvmeDuplicator.key,
+      title: nvmeDuplicator.title,
+      kinds: nvmeDuplicator.kinds,
+      viewBox: { w, h },
+      baySlot: { x: PAD, y: bodyY + 12, w: content.w, h: content.h },
+      render: () => (
+        <g>
+          <rect
+            x={4}
+            y={bodyY}
+            width={w - 8}
+            height={h - bodyY - 4}
+            rx={6}
+            fill={T.body}
+            stroke={T.edge}
+            strokeWidth={1.5}
+          />
+          {/* Hinged lid, shown lifted */}
+          <rect x={14} y={2} width={w - 28} height={9} rx={3} fill={T.lit} stroke={T.edgeSoft} />
+          {[0, 1].map((i) => (
+            <rect key={i} x={40 + i * (w - 108)} y={4} width={24} height={6} rx={2} fill={T.dark} />
+          ))}
+          {/* OSD + keypad: the recognisable duplicator face */}
+          <rect x={px} y={bodyY + 14} width={PANEL - 12} height={42} rx={3} fill={T.dark} stroke={T.edge} />
+          <text x={px + 10} y={bodyY + 32} fill={T.ink} fontSize={9} fontFamily={MONO}>
+            COPY
+          </text>
+          <text x={px + 10} y={bodyY + 46} fill={T.inkDim} fontSize={8} fontFamily={MONO}>
+            NVMe 2280
+          </text>
+          {[0, 1, 2, 3].map((i) => (
+            <rect
+              key={i}
+              x={px + 4 + (i % 2) * 50}
+              y={bodyY + 68 + Math.floor(i / 2) * 26}
+              width={42}
+              height={20}
+              rx={3}
+              fill={T.lit}
+              stroke={T.edgeSoft}
+            />
+          ))}
+          {h > bodyY + 130 && <Vents x={px + 4} y={bodyY + 124} w={PANEL - 20} h={h - bodyY - 134} r={2.3} />}
+        </g>
+      ),
+    };
+  },
 };
 
-export const MODEL_SHELLS: readonly ShellDef[] = [
+export const MODEL_SHELLS: readonly ShellFactory[] = [
   rackmountTwoBank,
   toasterDock,
   dualBayCage,

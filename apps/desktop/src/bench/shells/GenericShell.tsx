@@ -10,10 +10,6 @@ import { MONO, SHELL_TOKENS as T } from "./tokens";
  * *guessed* chassis is worse than one drawn as an outline: the operator would
  * be reading fiction and have no way to tell. So the frame carries the word
  * "generic" and the kind, and nothing else pretends.
- *
- * Unlike the model shells it has no fixed size — it is built around whatever
- * bank layout it has to hold, so a 2-bay dock and a 60-bay JBOD both get a
- * frame that fits.
  */
 
 const PAD = 16;
