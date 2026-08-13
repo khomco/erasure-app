@@ -89,6 +89,12 @@ impl VendorRoot {
         self.key.verifying_key()
     }
 
+    /// Raw seed, for writing to an offline signer's key file. The only place
+    /// this should ever be called is the issuance tool.
+    pub fn seed_bytes(&self) -> [u8; 32] {
+        self.key.0.to_bytes()
+    }
+
     /// Issue a license binding `instance_public_key_id` to `entitlements`.
     pub fn issue(
         &self,

@@ -463,3 +463,71 @@ fn an_unlicensed_station_grants_no_features() {
         Feature::EnterpriseMode
     ));
 }
+
+// --- installation ----------------------------------------------------------
+
+#[test]
+fn a_licence_installs_only_on_the_station_it_names() {
+    // Regression for a real bug class: a perfectly valid licence issued to a
+    // *different* station is not forged, it is simply not ours, and the two
+    // must not report the same way.
+    use wipe_license::{check_installable, InstallProblem};
+
+    let root = VendorRoot::generate();
+    let (instance, chain) = issue(&root, unlimited());
+    let other = SigningKey::generate();
+
+    assert!(check_installable(
+        &chain.license,
+        &instance.public_key_id(),
+        &[root.verifying_key()]
+    )
+    .is_ok());
+
+    match check_installable(
+        &chain.license,
+        &other.public_key_id(),
+        &[root.verifying_key()],
+    ) {
+        Err(InstallProblem::WrongInstanceKey { expected, found }) => {
+            assert_eq!(expected, other.public_key_id());
+            assert_eq!(found, instance.public_key_id());
+        }
+        other => panic!("expected WrongInstanceKey, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_untrusted_licence_is_refused_before_the_key_check() {
+    // Order matters: verifying first means we never report "wrong key" about
+    // a licence we have no reason to believe at all.
+    use wipe_license::{check_installable, InstallProblem};
+
+    let real = VendorRoot::generate();
+    let rogue = VendorRoot::generate();
+    let (instance, chain) = issue(&rogue, unlimited());
+
+    match check_installable(
+        &chain.license,
+        &instance.public_key_id(),
+        &[real.verifying_key()],
+    ) {
+        Err(InstallProblem::NotTrusted(_)) => {}
+        other => panic!("expected NotTrusted, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_licence_round_trips_through_a_file() {
+    use wipe_license::{load_license, save_license};
+    let root = VendorRoot::generate();
+    let (_i, chain) = issue(&root, unlimited());
+
+    let dir = std::env::temp_dir().join(format!("wipestation-lic-{}", std::process::id()));
+    let path = dir.join("license.json");
+    save_license(&path, &chain.license).unwrap();
+    let back = load_license(&path).unwrap();
+    assert_eq!(back, chain.license);
+    assert!(back.verify(&[root.verifying_key()]).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}

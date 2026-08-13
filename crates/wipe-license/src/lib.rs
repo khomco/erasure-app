@@ -22,10 +22,12 @@ pub mod anchor;
 pub mod chain;
 pub mod client;
 pub mod entitlement;
+pub mod install;
 pub mod lease;
 
 pub use chain::*;
 pub use entitlement::*;
+pub use install::*;
 pub use lease::*;
 
 use thiserror::Error;
