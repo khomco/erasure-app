@@ -269,6 +269,11 @@ pub struct Enclosure {
     pub id: String,
     pub label: String,
     pub kind: EnclosureKind,
+    /// Which catalog model this is, when we recognise it (ADR-0004).
+    /// `None` renders with the generic per-form-factor shell, labelled as
+    /// generic — a supported outcome, not a gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ref: Option<crate::ModelId>,
     /// Banks in left-to-right visual order.
     pub banks: Vec<Bank>,
     /// Free-form note shown with the enclosure, e.g. "rack 3, position 12".
@@ -742,6 +747,7 @@ pub fn generated_bench(device_count: usize) -> BayTopology {
             id: "bench".to_string(),
             label: "Attached devices".to_string(),
             kind: EnclosureKind::Internal,
+            model_ref: None,
             banks: vec![bank],
             note: Some(
                 "No bay topology configured — devices are shown in enumeration \
@@ -813,6 +819,7 @@ pub fn arma_4u_32() -> BayTopology {
             id: "chassis".to_string(),
             label: "ARMA Industrial 4U — 32 bay".to_string(),
             kind: EnclosureKind::Rackmount,
+            model_ref: None,
             banks: vec![left, right],
             note: None,
         }],
@@ -844,6 +851,7 @@ pub fn dock_2bay() -> BayTopology {
             id: "dock".to_string(),
             label: "2-bay hot-swap dock".to_string(),
             kind: EnclosureKind::Dock,
+            model_ref: None,
             banks: vec![bank],
             note: None,
         }],
@@ -875,6 +883,7 @@ pub fn nvme_carrier_8() -> BayTopology {
             id: "carrier".to_string(),
             label: "NVMe carrier — 8 socket".to_string(),
             kind: EnclosureKind::NvmeCarrier,
+            model_ref: None,
             banks: vec![bank],
             note: None,
         }],

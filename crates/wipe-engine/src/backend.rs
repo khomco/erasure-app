@@ -96,3 +96,46 @@ pub trait DeviceSimulator: Send + Sync {
     /// Devices currently unplugged but available to plug back in.
     fn detached(&self) -> Vec<Device>;
 }
+
+/// Enclosures a backend can see, for model auto-discovery (ADR-0004 §5).
+///
+/// Nothing implements this today: the mock has no enclosures and
+/// `wipe-engine-linux` does not exist. Defined now so landing USB/PCI/SES
+/// probing later is a backend change rather than a catalog-model change.
+pub trait EnclosureDiscovery: Send + Sync {
+    fn enclosures(&self) -> Vec<wipe_common::EnclosureIdentity>;
+}
+
+/// What a *known* enclosure model can be asked to do (ADR-0004 §6).
+///
+/// The UI derives affordances from [`EnclosureControl::supported`], not from
+/// the catalog's `capabilities` block: the catalog says what the *model* can
+/// do, this says what *this station* can currently do about it. They differ
+/// whenever the Linux backend is missing, permissions are wrong, or the SES
+/// device is not exposed — and showing a locate button that fails is worse
+/// than not showing one.
+pub trait EnclosureControl: Send + Sync {
+    /// Blink the locate LED for a bay. Closes the identify-mode loop from the
+    /// other end: today the operator tells us where a drive is, with this we
+    /// can tell them.
+    fn locate(&self, bay: &wipe_common::BayId, on: bool) -> Result<(), ControlError>;
+    fn set_bay_power(&self, bay: &wipe_common::BayId, on: bool) -> Result<(), ControlError>;
+    fn supported(&self) -> ControlCapabilities;
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlCapabilities {
+    pub locate_led: bool,
+    pub per_bay_power: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ControlError {
+    /// This station cannot do it — distinct from "the model cannot".
+    #[error("not supported on this station: {0}")]
+    Unsupported(String),
+    #[error("no such bay: {0}")]
+    UnknownBay(String),
+    #[error("control failed: {0}")]
+    Failed(String),
+}

@@ -4,6 +4,7 @@
 //! they cross the boundary between the engine, server, cert, and frontend.
 
 pub mod bay;
+pub mod catalog;
 pub mod device;
 pub mod method;
 pub mod erasure_event;
@@ -15,6 +16,7 @@ pub mod error;
 pub(crate) mod serde_hex_opt;
 
 pub use bay::*;
+pub use catalog::*;
 pub use device::*;
 pub use method::*;
 pub use erasure_event::*;

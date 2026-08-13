@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "generic/rackmount-24",
+      "vendor": "Generic",
+      "product": "Rackmount 24-bay",
+      "aliases": ["24-bay chassis", "4U 24 bay"],
+      "kind": "rackmount",
+      "spec": {
+        "banks": [
+          { "label": null, "rows": 4, "cols": 6, "form_factor": "3.5in",
+            "orientation": "horizontal", "order": "row_major",
+            "origin": "top_left", "label_start": 1 }
+        ],
+        "connectors": ["sff-8643"],
+        "notes": null
+      },
+      "art": null
+    },
+    {
+      "id": "arma/industrial-4u-32",
+      "vendor": "ARMA Industrial",
+      "product": "4U 32-bay",
+      "aliases": ["ARMA 4U", "arma 32 bay"],
+      "kind": "rackmount",
+      "identity": {
+        "scsi_inquiry": [
+          { "vendor": "ARMA", "product": "BP4U32", "revision": "0100" }
+        ]
+      },
+      "spec": {
+        "banks": [
+          { "label": "Bank A", "rows": 8, "cols": 2, "form_factor": "3.5in",
+            "orientation": "horizontal", "order": "column_major",
+            "origin": "top_left", "label_start": 1 },
+          { "label": "Bank B", "rows": 8, "cols": 2, "form_factor": "3.5in",
+            "orientation": "horizontal", "order": "column_major",
+            "origin": "top_left", "label_start": 17 }
+        ],
+        "connectors": ["sff-8643"],
+        "notes": "Two banks either side of a ventilation column with front I/O."
+      },
+      "art": "rackmount-two-bank",
+      "capabilities": { "locate_led": true, "per_bay_power": false, "hotswap_notify": true, "ses_slot_addressing": true },
+      "verified_by": "reference bench photo, 2026-08-06"
+    },
+    {
+      "id": "startech/sdock2u33",
+      "vendor": "StarTech",
+      "product": "SDOCK2U33",
+      "aliases": ["2-bay USB 3.0 dock", "toaster dock"],
+      "kind": "dock",
+      "identity": {
+        "usb": [{ "vid": "0x174c", "pid": "0x55aa" }]
+      },
+      "spec": {
+        "banks": [
+          { "label": null, "rows": 1, "cols": 2, "form_factor": "3.5in",
+            "orientation": "vertical", "order": "row_major",
+            "origin": "top_left", "label_start": 1 }
+        ],
+        "connectors": ["usb-b-3.0"],
+        "notes": "Top-loading; drives stand proud of the shell."
+      },
+      "art": "toaster-dock",
+      "capabilities": { "locate_led": false, "per_bay_power": false, "hotswap_notify": true, "ses_slot_addressing": false }
+    },
+    {
+      "id": "icydock/mb522sp-b",
+      "vendor": "ICY DOCK",
+      "product": "MB522SP-B",
+      "aliases": ["dual bay hot swap cage", "2x2.5 cage"],
+      "kind": "dock",
+      "spec": {
+        "banks": [
+          { "label": null, "rows": 1, "cols": 2, "form_factor": "2.5in",
+            "orientation": "vertical", "order": "row_major",
+            "origin": "top_left", "label_start": 1 }
+        ],
+        "connectors": ["sata"],
+        "notes": "Open frame; drives exposed."
+      },
+      "art": "dual-bay-cage"
+    },
+    {
+      "id": "diskclon/nvme-8",
+      "vendor": "DiskClon",
+      "product": "NVMe-8",
+      "aliases": ["nvme duplicator", "8 socket m.2"],
+      "kind": "nvme_carrier",
+      "identity": {
+        "pci": [{ "vendor": "0x1b21", "device": "0x2824" }]
+      },
+      "spec": {
+        "banks": [
+          { "label": null, "rows": 8, "cols": 1, "form_factor": "m2",
+            "orientation": "horizontal", "order": "row_major",
+            "origin": "top_left", "label_start": 1 }
+        ],
+        "connectors": ["m.2-m-key"],
+        "notes": "Hinged lid; OSD and keypad on the right."
+      },
+      "art": "nvme-duplicator"
+    }
+  ]
+}
