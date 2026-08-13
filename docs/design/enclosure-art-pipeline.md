@@ -33,9 +33,9 @@ call a reviewer has to make correctly every time.
 crates/wipe-common/data/catalog.json     the models (bundled, include_str!)
 crates/wipe-common/src/catalog.rs        the schema, matching, expansion
 apps/desktop/src/bench/shells/
-  types.ts        the ShellDef contract + the three rules
+  types.ts        the ShellDef/ShellFactory contract + the three rules
   tokens.ts       the only colours artwork may use
-  models.tsx      the per-model artwork
+  models.tsx      the per-model artwork (ShellFactory per model)
   GenericShell.tsx  the labelled fallback
   registry.ts     lookup + fitting the bank layer into a shell
   contract.test.ts  the rules, as machine checks
@@ -99,26 +99,39 @@ recognise across a room: a toaster dock, a duplicator with a keypad, an open
 cage. If the answer is "a dark rectangle with bays in it", the generic shell
 already draws that, and better.
 
-Add a `ShellDef` to `models.tsx`:
+Add a `ShellFactory` to `models.tsx`. A shell is **built around the layout it
+has to hold** — the bank grid is the fact, the housing is drawn around it — so
+`build` receives the content size and derives everything from it:
 
 ```tsx
-const W = 320, H = 200;
-
-export const myChassis: ShellDef = {
+export const myChassis: ShellFactory = {
   key: "vendor-shortname",          // must equal the model's `art`
   title: "Human name — what it is",
   kinds: ["rackmount"],             // kinds this art is honest for
-  viewBox: { w: W, h: H },
-  baySlot: { x: 20, y: 16, w: W - 40, h: H - 60 },
-  render: () => (
-    <g>
-      <rect x={0.5} y={0.5} width={W - 1} height={H - 1} rx={6}
-            fill={T.body} stroke={T.edge} />
-      {/* front panel, buttons, vents — anywhere but the bay slot */}
-    </g>
-  ),
+  build: (content) => {
+    const PAD = 18;
+    const w = content.w + PAD * 2;
+    const h = content.h + PAD * 2;
+    return {
+      key: myChassis.key, title: myChassis.title, kinds: myChassis.kinds,
+      viewBox: { w, h },
+      baySlot: { x: PAD, y: PAD, w: content.w, h: content.h },
+      render: () => (
+        <g>
+          <rect x={0.5} y={0.5} width={w - 1} height={h - 1} rx={6}
+                fill={T.body} stroke={T.edge} />
+          {/* front panel, buttons, vents — anywhere but the bay slot */}
+        </g>
+      ),
+    };
+  },
 };
 ```
+
+The earlier fixed-viewBox version is what this replaced: artwork declared a
+size and the grid was scaled to fit it, so a 32-bay chassis whose banks were
+taller than the artwork assumed rendered as a small grid marooned in a wide
+empty box.
 
 Register it in `MODEL_SHELLS`, set `"art": "vendor-shortname"` on the catalog
 entry, and run:
@@ -150,17 +163,27 @@ Two consequences worth knowing before you start drawing:
 
 ### Sizing
 
-`baySlot` is where the bank grid goes. `fitToSlot` scales the bank layer
-uniformly to fit and centres it, then `renderWidth` grows the whole canvas so
-bays come out at their natural pixel size regardless of how much bezel
-surrounds them. So the slot's *aspect ratio* matters more than its absolute
-size — make it roughly the shape of the bank grid the model declares, or the
-chassis will render with large empty margins.
+`baySlot` should normally be exactly `content` — the contract test asserts it,
+because a shell that shrinks the slot forces the grid to scale down and undoes
+the whole point of the factory shape. Everything else is yours: pad, add a
+control panel beside it, put the bays above the body.
+
+Scale where art needs a minimum: the dock body clamps to a sensible height so
+two small trays still sit on something recognisable. When a shell does clamp,
+`fitToSlot` scales the bank layer uniformly and centres it — uniformly, since
+grid pitch is a physical fact about the chassis — and `renderWidth` grows the
+canvas so bays stay their natural pixel size.
+
+Your shell will be built at four content sizes by the contract test, from a
+90x60 single bay to a 620x340 chassis. Check the failure messages name a size:
+artwork that only works at one aspect is artwork that will break on the next
+model that points at it.
 
 ## Step 3 — look at it
 
 ```bash
-cargo run -p wipe-cli -- serve --port 7878 --bay-profile arma-4u-32
+cargo run -p wipe-cli -- serve --addr 127.0.0.1:7878 \
+  --static-dir apps/desktop/dist --bay-profile vendor/short-model
 ```
 
 Open `/bench-setup`, add the model from *From catalog*, and check the preview
