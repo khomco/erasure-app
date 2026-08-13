@@ -623,6 +623,21 @@ upsell that ITADs happily pay for because they pass cost through.
 
 Single binary, identical code; tier is a `--hub-url` configuration.
 
+### How the tiers are enforced
+
+The mechanism is ADR-0005's attestation chain, not a licence server: a
+station verifies its own entitlements offline and marks certificates
+`evaluation` when it cannot. The three purchasable scopes
+(free/evaluation, per-machine, site-wide), what each one actually
+enforces, and where offline enforcement is honestly impossible are
+specified in [ROADMAP](docs/ROADMAP.md) §4.
+
+One constraint overrides every commercial consideration here: **an
+unlicensed, expired, revoked or clock-rolled-back station still erases
+drives.** What changes is the certificate marking, never the ability to
+sanitize. A licence server having a bad day must not be able to stop a
+drive being wiped.
+
 ## 10. What has shipped
 
 ### 10.1 v0.1 baseline
@@ -658,8 +673,19 @@ to match current code.
 | REST: `POST /api/jobs/:id/escalate-to-destroy`, `GET|POST /api/manifests`, `GET /api/manifests/:id`, `POST /api/manifests/:id/cosign` | ADR-0001 | ✅ |
 | React UI: activity timeline on Job Detail + **Manifests page** (assembly + co-sign) | ADR-0001 | ✅ |
 | At-a-glance bench status overlay on the Devices page | §11 #3 | ✅ |
-| 28 tests across 6 crates passing | — | ✅ |
+| Configurable bay topology + generated SVG bay map | §11 #10 / ADR-0002 | ✅ br |
+| Tiered, self-detecting station config store (local file → control plane → prompt → ephemeral) | ADR-0003 | ✅ br |
+| Bench-setup builder — customers describe their own bays; learn-by-hot-swap identify mode | ADR-0002/0003 | ✅ br |
+| Model-aware enclosure catalog + shell artwork with machine-enforced legibility rules | ADR-0004 | ✅ br |
+| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ br |
+| Vitest suite over the frontend's pure domain modules | §12 | ✅ br |
 | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits |
+
+**br** = shipped on a feature branch, not yet on `main`. ADRs 0002–0005 exist
+only on `feat/enclosure-catalog` and `feat/licensing-attestation`, and neither
+branch contains the other's ADR. That fragmentation is a real problem for
+anything that reads the decision history as a whole — see
+[ROADMAP](docs/ROADMAP.md) §0.4 and T0.1.
 
 ## 11. Deferred — known and committed
 
@@ -706,17 +732,23 @@ keep resolving.
    path; OIDC/SAML for cloud tier.
 7. **RBAC** — roles: `loader`, `operator`, `supervisor`, `auditor`.
    Every action attributed; some actions require supervisor co-sign.
-8. **License token verification** — vendor-signed tokens, embedded
-   verifier public key, per-success accounting persisted.
+8. ~~**License token verification**~~ — **DECIDED AND PARTLY SHIPPED**
+   by ADR-0005 (`feat/licensing-attestation`), which chose an
+   attestation *chain* over a standalone token: vendor root → licence
+   certificate → station instance key → erasure certificate, with
+   entitlements and an offline lease. The remaining product work — the
+   three purchasable tiers, activation, expiry, renewal, revocation —
+   is #15.
 9. **PDF/A-3 cert wrapping** — JSON-LD inside, human-readable PDF
    outside, single attestation artifact.
-10. **Configurable bay topology + bay map** *(in progress)* — a station
-    declares its physical Enclosures/Banks/Bays in config; the server
-    resolves each Bay to a Device and the UI renders a vector bay map
-    with live per-Bay status, so the operator can map screen→hardware
-    at a glance instead of matching serials. Extends #3, which gave
-    per-device status but in device-enumeration order — no relation to
-    where the drive physically is. See ADR-0002.
+10. ~~**Configurable bay topology + bay map**~~ — **SHIPPED on
+    `feat/enclosure-catalog`** (see §10.2). A station declares its
+    Enclosures/Banks/Bays; the server resolves each Bay to a Device and
+    the UI renders a vector bay map with live per-Bay status. Grew
+    beyond the original scope into three ADRs: the topology model
+    (ADR-0002), the tiered config store that lets a customer *save* one
+    (ADR-0003), and model-aware enclosure artwork (ADR-0004), plus the
+    bench-setup builder and learn-by-hot-swap identify mode.
 11. **Diagnostic / HealthCheck runtime** — the remainder of ADR-0001.
     `DiagnosticEvent` and `HealthCheckEvent` shipped as schema-only
     types and `JobActivity` variants; the runner never emits them and
@@ -724,6 +756,30 @@ keep resolving.
     `serde_json::Value`. Blocked on the §12 question of whether they
     run always or only when a SanitizationProfile requests them, and
     on what a Critical finding should do to the Job.
+
+12. **Marketing + documentation website** — one in-repo static site
+    doing both jobs, with the code-derived reference material generated
+    and CI-gated so the docs cannot drift from the binary. Requirements,
+    architecture and phases: [ROADMAP](docs/ROADMAP.md) §1 (**W**).
+    *The marketing half is gated on #1 — we cannot publicly claim
+    hardware sanitization while the only backend is the mock.*
+13. **Admin / control plane** — vendor console (licence issuance,
+    entitlements, revocation, metering) and fleet console (station
+    inventory, cert search, seat allocation) over one multi-tenant
+    `wipe-hub`. Stands up the seams ADR-0003 (`ControlPlaneStore`) and
+    ADR-0005 (`HttpLicenseClient`) already declare and leave
+    unimplemented. [ROADMAP](docs/ROADMAP.md) §2 (**A**).
+14. **First-class operator portal** — the existing React/Tauri app is
+    the most mature surface; what it still needs is identity and RBAC
+    (#6/#7), batch work, an exception inbox, bench ergonomics for
+    gloves and warehouse lighting, offline-verifiable label QR, and
+    reboot recovery. [ROADMAP](docs/ROADMAP.md) §3 (**O**).
+15. **Licensing tiers end to end** — free/evaluation, per-machine and
+    site-wide, joined up from purchase through activation, expiry,
+    renewal and revocation. The attestation chain and entitlement model
+    exist (ADR-0005); the product around them does not. Supersedes #8,
+    which described the token verification ADR-0005 has since decided.
+    [ROADMAP](docs/ROADMAP.md) §4 (**L**).
 
 ### v0.3 / beyond
 
@@ -809,6 +865,30 @@ and resolve. None of these have a decided answer.
   gRPC/protobuf for the cross-LAN tier?
 - License token format — signed JWT, custom Ed25519-signed JSON, or
   something OAuth-shaped?
+
+### Product surfaces (raised by the roadmap, none decided)
+
+- **Site licences cannot be enforced offline.** A site licence that
+  installs on station A installs on station B, and neither can count the
+  other without a network. Detect-and-report (LAN quorum + hub
+  reconciliation), or accept unbounded offline use and make it a
+  commercial conversation? *ROADMAP §4.3 recommends detect-never-prevent;
+  ADR candidate 0010.*
+- **What does the free tier actually withhold?** Time limit, volume
+  limit, feature limit, or nothing but the `evaluation` marking on the
+  certificate? *ROADMAP L-R1 recommends the last, on the grounds that
+  the marking is the business model and a time bomb contradicts §0.2.*
+- **Does the control plane share a store with the Enterprise data
+  model?** v0.2 #4 proposes SQLite on the station; the hub needs
+  Postgres. Two stores for two jobs is defensible and must be stated,
+  not stumbled into. *ADR candidate 0007.*
+- **PXE first-boot authentication** — already listed under Domain & UX
+  above, and now blocking: operator RBAC (#7), certificate attribution
+  and the whole of ROADMAP O1 depend on an answer.
+- **Does the public verification API return the same verdict as offline
+  `verify-cert`?** It must, or we have rebuilt the vendor-dependent
+  verification we attack in §1. Anything that makes them diverge is a
+  product bug, but nothing enforces that today.
 
 ### Compliance & packaging
 
@@ -933,6 +1013,31 @@ and resolve. None of these have a decided answer.
   contract); carries default SanitizationProfile.
 - **Batch** — ad-hoc operator-UX selection of devices processed with
   shared settings; **not** a WorkOrder.
+- **Control plane** — the optional server-side service (`wipe-hub`)
+  behind both admin consoles. Optional by design: an air-gapped station
+  must reach full product value with the control plane unreachable
+  forever.
+- **Vendor console** — our side of the control plane: licence issuance,
+  entitlements, revocation, cross-tenant support and metering.
+- **Fleet console** — the customer's side: their stations, their
+  certificates, their seats, their usage.
+- **Site licence** — a licence scoped to a site rather than a machine.
+  Seat counts are *detectable*, not enforceable, offline (ROADMAP §4.3).
+- **Seat** — one station's share of a site licence.
+- **Activation** — installing a licence on a station, by file offline or
+  by activation code against the control plane.
+- **Revocation list** — signed, time-windowed list of invalidated
+  licences, pulled when a station is online. A station that never
+  connects can never learn that its licence was revoked.
+- **Verification portal / playground** — public, client-side certificate
+  verification. Runs the same code path as offline `verify-cert`, with
+  no network call and no lookup against us.
+- **Drift gate** — a CI check that fails when a hand-written artifact
+  disagrees with generated truth. Used for the enclosure catalog today
+  (ADR-0004) and for the whole documentation site (ROADMAP W-R11).
+- **Capability status** — `shipped` / `seam` / `planned`, declared on
+  every documentation page and checked against the code. The
+  honest-default rule (ADR-0002) applied to prose.
 - **Simple / Enterprise mode** — two product SKUs sharing one binary.
   Enterprise adds Customer/Contract/WorkOrder/Asset entities; Simple
   is Jobs + Certs + freeform `asset_tag`/`ticket_ref`. Enterprise
@@ -952,3 +1057,9 @@ and resolve. None of these have a decided answer.
   here, fix one of the two. Don't leave both standing.
 - **Glossary discipline.** New domain words land in §14 before they
   go into code, certs, or customer-facing copy.
+- **Surfaces.** Product surfaces that do not exist yet — the website,
+  the admin consoles, the operator portal's remaining gaps, the
+  licensing tiers — are specified in [docs/ROADMAP.md](docs/ROADMAP.md)
+  with stable item numbers (**W**/**A**/**O**/**L**). This file stays
+  the vision; that file is the backlog. When a roadmap item ships, it
+  gets struck through there and recorded in §10 here.
