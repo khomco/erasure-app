@@ -229,7 +229,7 @@ async fn attaching_puts_the_same_device_back() {
 
 #[tokio::test]
 async fn detaching_an_unknown_device_is_a_no_op() {
-    use wipe_engine::{DeviceBackend, DeviceSimulator};
+    use wipe_engine::DeviceSimulator;
     let backend = MockBackend::fast_catalog();
     assert!(backend.detach(&DeviceId::from("dev-not-here")).is_none());
     assert!(backend
