@@ -22,7 +22,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 
 ## Running and verifying
 
-- `cargo test --workspace` — 177 tests, ~30s. Needs `docker compose up -d` first (root
+- `cargo test --workspace` — 191 tests, ~30s. Needs `docker compose up -d` first (root
   `compose.yaml`: Postgres on `127.0.0.1:55432`, Mailpit SMTP `:1025`, UI/API `:8025`):
   `wipe-hub`'s compose-backed tests fail, never skip, when they are down.
 - Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and

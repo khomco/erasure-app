@@ -5,6 +5,7 @@
 //! `wipe-cert` and `wipe-license` only, and no station crate may depend on it.
 //! A station never needs the hub to erase, sign or verify.
 
+pub mod audit;
 pub mod config;
 pub mod db;
 pub mod health;

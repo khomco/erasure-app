@@ -45,7 +45,7 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
 | `wipe-fleet` | mDNS service advertise / browse + deterministic lead election |
 | `wipe-server` | Axum REST API + WebSocket event stream; auto-signs certs when a Job reaches `Erased` or `PendingCoSign`; destruction-manifest assembly and co-sign |
 | `wipe-cli` | `wipestation serve / inspect / verify-cert` binary |
-| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP. Accounts, payments and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
+| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers). Accounts, payments and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
 | `apps/desktop` | Vite + React + TanStack Router + Tailwind frontend, plus Tauri 2 shell |
 | `sites/www` | Static Astro + Tailwind marketing site (pre-launch): landing, product, standards, segment (ITAD, enterprise IT, government), pricing, contact, privacy and terms pages, `/capabilities`, and early-access/contact forms that post nowhere until `lead-capture`; a build-time check fails `astro build` on any capability overclaim, missing meta/OG tag, missing sitemap, or resource loaded from another origin (ADR-0006 §2). See [`sites/www/README.md`](sites/www/README.md) |
 
@@ -59,7 +59,7 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
 # SMTP on :1025 with its UI on http://127.0.0.1:8025). The hub's tests need them:
 docker compose up -d
 
-# Run all Rust tests (177 across 9 crates):
+# Run all Rust tests (191 across 9 crates):
 cargo test --workspace
 
 # Run the vendor hub (it applies its database migrations before listening, and
