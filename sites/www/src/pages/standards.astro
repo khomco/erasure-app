@@ -1,0 +1,118 @@
+---
+/**
+ * Standards posture (marketing-site story 3, CAP-2; ROADMAP W1.3): NIST SP
+ * 800-88 Rev. 2 and IEEE 2883-2022, R2v3 alignment, and the certification
+ * roadmap from CONTEXT §13, labelled as future. Each certification target is
+ * its own planned `<Capability>` with its target year.
+ */
+import Base from "../layouts/Base.astro";
+import Capability from "../components/Capability.astro";
+import { body, h1, h2, h3, item, link, notice, prose, section } from "../lib/ui";
+
+const roadmap = [
+  {
+    id: "adisa-al5",
+    title: "ADISA Assurance Level 5",
+    year: "Year 1",
+    text: "Independent product certification by ADISA at AL5, against NIST and IEEE 2883 product claims: the floor for serious procurement.",
+  },
+  {
+    id: "common-criteria-eal2",
+    title: "Common Criteria EAL 2 / EAL 2+",
+    year: "Years 1–2",
+    text: "Common Criteria evaluation, required by most government and defense buyers.",
+  },
+  {
+    id: "r2v3-recognition",
+    title: "R2v3 / e-Stewards vendor recognition",
+    year: "Year 2",
+    text: "Recognition by the programmes that certify ITAD operators, so their auditors know the product.",
+  },
+  {
+    id: "nato-niapc",
+    title: "NATO NIAPC listing",
+    year: "Year 2",
+    text: "A listing in the NATO Information Assurance Product Catalogue, for defense procurement.",
+  },
+];
+---
+
+<Base
+  title="Standards posture"
+  description="Where Wipestation stands against NIST SP 800-88 Rev. 2 and IEEE 2883-2022, what it is designed to give ITAD auditors, and which external assessments are future targets."
+>
+  <p class={notice}>Pre-launch: the targets on this page are future work, not held today.</p>
+  <h1 class:list={[h1, "mt-3"]}>Standards posture</h1>
+  <div class={prose}>
+    <p>
+      Auditors and procurement teams ask the same questions: which standard does the method
+      follow, what evidence backs the result, and who has checked the product. This page answers
+      each one with its status today.
+    </p>
+    <p>
+      <Capability id="independent-certification"
+        >No independent certification is held today, and nothing on this site is certified.</Capability
+      >
+    </p>
+  </div>
+
+  <section class={section} aria-labelledby="nist">
+    <h2 id="nist" class={h2}>NIST SP 800-88 Rev. 2 and IEEE 2883-2022</h2>
+    <div class={prose}>
+      <p>
+        NIST SP 800-88 Rev. 2, final since 26 September 2025, is the decision framework: Clear,
+        Purge or Destroy, the fields a sanitization record must carry (including the operator's
+        email), and a programmatic
+        <Capability id="validate-workflow">Validate step per media class</Capability>. For the
+        technical method behind each decision it defers to IEEE 2883-2022.
+      </p>
+      <Capability id="nist-ieee-conformance" as="p" badge="start" class="rounded border border-slate-200 p-3">
+        The pre-launch target is a published self-attestation of conformance to NIST SP 800-88
+        Rev. 2 and IEEE 2883-2022, alongside
+        <Capability id="open-cert-format">the published certificate format</Capability>. It is a
+        self-attestation, not an independent assessment, and it is not issued yet.
+      </Capability>
+      <p>
+        The product is designed so the record backs the claim: the method chosen, the commands
+        issued and the result read back all sit in the signed certificate. See
+        <a href="/product/" class={link}>how the product is designed to work</a>.
+      </p>
+    </div>
+  </section>
+
+  <section class={section} aria-labelledby="r2">
+    <h2 id="r2" class={h2}>
+      <Capability id="r2v3-alignment">R2v3 alignment</Capability>
+    </h2>
+    <div class={prose}>
+      <Capability id="r2v3-alignment" as="p" badge="start" class="rounded border border-slate-200 p-3">
+        R2v3 is a standard for ITAD operators, not for software, and it expects their data
+        sanitization to follow NIST SP 800-88. Wipestation is designed so an R2v3 operator's
+        records show the method chosen, the outcome and the evidence behind it. This is alignment
+        by design, not recognition by the R2v3 programme.
+      </Capability>
+    </div>
+  </section>
+
+  <section class={section} aria-labelledby="roadmap">
+    <h2 id="roadmap" class={h2}>
+      <Capability id="independent-certification">Certification roadmap: future targets</Capability>
+    </h2>
+    <p class="mt-3 max-w-prose text-slate-700">
+      Each target below is planned, with the year it is aimed at. None has been applied for or
+      awarded yet.
+    </p>
+    <ul class="mt-4 space-y-3">
+      {
+        roadmap.map((t) => (
+          <Capability id={t.id} as="li" badge="start" class={item}>
+            <h3 class={h3}>{t.title}</h3>
+            <p class={body}>
+              <strong class="text-slate-900">Target: {t.year}.</strong> {t.text}
+            </p>
+          </Capability>
+        ))
+      }
+    </ul>
+  </section>
+</Base>

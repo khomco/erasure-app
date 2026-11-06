@@ -1,0 +1,29 @@
+---
+/**
+ * Terms placeholder (marketing-site story 3). Published before launch.
+ */
+import Base from "../layouts/Base.astro";
+import { h1, link, notice, prose } from "../lib/ui";
+---
+
+<Base
+  title="Terms"
+  description="Placeholder terms of use for the Wipestation pre-launch site. Full terms will be published before launch."
+>
+  <p class={notice}>Placeholder: the full terms will be published before launch.</p>
+  <h1 class:list={[h1, "mt-3"]}>Terms</h1>
+  <div class={prose}>
+    <p>
+      This is a placeholder, not the final terms of use. Until they are published:
+    </p>
+    <ul class="list-disc space-y-1 pl-5">
+      <li>Nothing on this site is an offer to sell. Wipestation is pre-launch and not on sale.</li>
+      <li>
+        Every capability carries its status on the
+        <a href="/capabilities/" class={link}>capabilities page</a>; a capability in development
+        or planned is not a commitment to a date or a feature set.
+      </li>
+      <li>Pre-release builds run against simulated drives only.</li>
+    </ul>
+  </div>
+</Base>

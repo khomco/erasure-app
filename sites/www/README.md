@@ -21,8 +21,26 @@ pnpm --filter www lighthouse    # build + preview + Lighthouse in local headless
   block that uses a secondary link. Competitors are not named in copy, and the copy awaits
   vendor sign-off.
 - `/capabilities/`: every capability with its status.
-- `/early-access/`: a stub with no form and no address, so the CTA has a real target. Story 3
-  replaces it with the sign-up form.
+- `/product/`: how the product is designed to work, from bench to job to certificate to
+  verification, the destroy path, fleet and integration, and licensing.
+- `/standards/`: NIST SP 800-88 Rev. 2 / IEEE 2883-2022 posture (self-attestation target), R2v3
+  alignment, and a "Certification roadmap: future targets" section with one planned capability
+  per target and its target year (CONTEXT §13).
+- `/segments/` and `/segments/itad/`, `/segments/enterprise-it/`, `/segments/government/`: the
+  three buyers in CONTEXT §2; each segment page ends with a secondary link to `/early-access/`.
+- `/pricing/`: "Early-access pricing on request", no amounts or currency; licensing principles
+  only as wrapped capabilities. Prices arrive with `offerings-and-payments`.
+- `/early-access/` and `/contact/`: copy plus `src/components/LeadForm.astro`, one form for both
+  with the `lead-capture` CAP-1 field names. It posts nowhere: no `action` and a `disabled`
+  submit button (an enabled button would submit to the page URL), and it says sign-up is not
+  open yet. Development builds (`import.meta.env.DEV`) add a notice that it posts nowhere until
+  `lead-capture` adds `POST /api/leads`; that story adds `action`/`method` and enables the
+  button. No email, phone or postal address is published.
+- `/privacy/`, `/terms/`: placeholders, to be published before launch. Privacy states only what
+  is true today: no cookies, no analytics, no third-party resources, forms send nothing.
+
+The header nav links product, standards, segments, pricing and capabilities; the footer links
+early access, contact, privacy and terms. Shared class strings live in `src/lib/ui.ts`.
 
 `test/pages.test.ts` renders real pages with the Astro container (`vitest.config.ts` uses
 `getViteConfig`, so `.astro` files compile in tests) and runs `checkPage` over them. A bare

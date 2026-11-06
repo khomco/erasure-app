@@ -1,0 +1,139 @@
+---
+/**
+ * The early-access and contact form (marketing-site story 3). One component
+ * for both pages, with field names matching `lead-capture` CAP-1, so that
+ * story only has to add `action`/`method` and enable the button.
+ *
+ * Until then it posts nowhere: no `action`, and the submit button is
+ * `disabled`. A form with no `action` and an enabled button would submit to
+ * the page URL and leak the visitor's details into a query string or a POST to
+ * the static host; with the default button disabled, implicit submission
+ * (Enter in a field) does nothing either.
+ */
+interface Props {
+  kind: "early-access" | "contact";
+  /** Show the developer notice; defaults to development builds only. */
+  devNotice?: boolean;
+}
+
+const { kind, devNotice = import.meta.env.DEV } = Astro.props;
+const id = (field: string) => `${kind}-${field}`;
+const segments = [
+  { value: "itad", label: "ITAD operator" },
+  { value: "enterprise-it", label: "Enterprise IT" },
+  { value: "government", label: "Government or defense" },
+  { value: "other", label: "Other" },
+];
+const label = "block text-sm font-semibold text-slate-900";
+const control =
+  "mt-1 block w-full rounded border border-slate-400 px-3 py-2 text-slate-900 focus:outline-2 focus:outline-offset-2 focus:outline-slate-900";
+const optional = "font-normal text-slate-700";
+---
+
+<form
+  aria-labelledby={id("title")}
+  data-lead-form={kind}
+  class="mt-6 max-w-prose space-y-4 rounded border border-slate-200 p-4"
+>
+  <h2 id={id("title")} class="text-xl font-semibold">
+    {kind === "early-access" ? "Join the early-access list" : "Send a message"}
+  </h2>
+  <p class="font-semibold text-slate-900" data-not-open>
+    {kind === "early-access" ? "Sign-up is not open yet." : "This form is not open yet."}
+    It is shown so you can see what we will ask; nothing you type here is sent or stored.
+  </p>
+  {
+    devNotice && (
+      <p data-dev-notice class="rounded bg-sky-100 px-3 py-2 text-sm text-sky-950">
+        Development build: this form posts nowhere until <code>lead-capture</code> adds
+        <code>POST /api/leads</code>.
+      </p>
+    )
+  }
+  <div>
+    <label for={id("name")} class={label}>Name</label>
+    <input id={id("name")} name="name" type="text" autocomplete="name" required class={control} />
+  </div>
+  <div>
+    <label for={id("email")} class={label}>Work email</label>
+    <input id={id("email")} name="email" type="email" autocomplete="email" required class={control} />
+  </div>
+  <div>
+    <label for={id("company")} class={label}>Company</label>
+    <input
+      id={id("company")}
+      name="company"
+      type="text"
+      autocomplete="organization"
+      required
+      class={control}
+    />
+  </div>
+  {
+    kind === "early-access" && (
+      <>
+        <div>
+          <label for={id("role")} class={label}>
+            Role
+          </label>
+          <input
+            id={id("role")}
+            name="role"
+            type="text"
+            autocomplete="organization-title"
+            required
+            class={control}
+          />
+        </div>
+        <div>
+          <label for={id("segment")} class={label}>
+            Which best describes you?
+          </label>
+          <select id={id("segment")} name="segment" required class={control}>
+            <option value="" disabled selected>
+              Choose one
+            </option>
+            {segments.map((s) => (
+              <option value={s.value}>{s.label}</option>
+            ))}
+          </select>
+        </div>
+      </>
+    )
+  }
+  <div>
+    <label for={id("message")} class={label}>
+      Message{kind === "early-access" && <span class={optional}> (optional)</span>}
+    </label>
+    <textarea
+      id={id("message")}
+      name="message"
+      rows="4"
+      required={kind === "contact"}
+      class={control}></textarea>
+  </div>
+  <div class="flex items-start gap-3">
+    <input
+      id={id("consent")}
+      name="consent"
+      type="checkbox"
+      required
+      class="mt-1 size-5 shrink-0 accent-slate-900"
+    />
+    <label for={id("consent")} class="text-sm text-slate-700">
+      {
+        kind === "early-access"
+          ? "I agree that these details are used only to follow up on early access."
+          : "I agree that these details are used only to reply to this message."
+      }
+      See the <a href="/privacy/" class="underline underline-offset-2">privacy notice</a>.
+    </label>
+  </div>
+  <button
+    type="submit"
+    disabled
+    class="rounded bg-slate-300 px-5 py-2.5 font-semibold text-slate-700 disabled:cursor-not-allowed"
+  >
+    {kind === "early-access" ? "Join early access" : "Send message"} (not open yet)
+  </button>
+</form>

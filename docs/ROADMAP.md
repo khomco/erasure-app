@@ -182,8 +182,13 @@ and the drift-gate contract).
   marketing copy already).~~ *Shipped 2026-11-06 (CONTEXT §10.2): hero, problem, the
   offline-verifiable certificate, differentiators, "what we are not" (competitors unnamed)
   and one early-access CTA to a stub `/early-access/`. The copy awaits vendor sign-off.*
-- W1.3 Standards page: NIST R2 / IEEE 2883 posture, with certification
-  *roadmap* clearly labelled as future (CONTEXT §13).
+- ~~W1.3 Standards page: NIST R2 / IEEE 2883 posture, with certification
+  *roadmap* clearly labelled as future (CONTEXT §13).~~ *Shipped 2026-11-06 (CONTEXT §10.2)
+  as `/standards/`: the NIST SP 800-88 Rev. 2 / IEEE 2883-2022 self-attestation target, R2v3
+  alignment, and a "Certification roadmap: future targets" section with one planned capability
+  per target and its year. Shipped with product, segment, pricing, contact and legal pages.
+  W-R4 is met; W-R5 only in part: `/pricing/` says "early-access pricing on request", and the
+  generated tier→feature matrix waits for `offerings-and-payments`.*
 - ~~W1.4 Capability-status component + frontmatter schema (W-R12), with the
   status of the mock backend stated on the record.~~ *Shipped 2026-11-05 as a shared
   capability list (`sites/www/src/data/capabilities.ts`) with the ADR-0006 §2 vocabulary

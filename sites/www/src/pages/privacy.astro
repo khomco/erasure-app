@@ -1,0 +1,48 @@
+---
+/**
+ * Privacy placeholder (marketing-site story 3). States only what is true of
+ * the site today; the full notice is published before launch, once
+ * `lead-capture` defines what the forms collect.
+ */
+import Base from "../layouts/Base.astro";
+import { h1, h2, notice, prose, section } from "../lib/ui";
+---
+
+<Base
+  title="Privacy"
+  description="Placeholder privacy notice for the Wipestation pre-launch site: no cookies, no analytics, no third-party resources, and the forms send nothing."
+>
+  <p class={notice}>Placeholder: the full privacy notice will be published before launch.</p>
+  <h1 class:list={[h1, "mt-3"]}>Privacy</h1>
+  <div class={prose}>
+    <p>
+      This is a placeholder, not the final notice. It describes only what this site does today.
+    </p>
+  </div>
+
+  <section class={section} aria-labelledby="today">
+    <h2 id="today" class={h2}>What this site does today</h2>
+    <ul class="mt-3 max-w-prose list-disc space-y-1 pl-5 text-slate-700">
+      <li>It sets no cookies.</li>
+      <li>It runs no analytics and no tracking.</li>
+      <li>
+        It loads nothing from any other site: every page and style comes from this site.
+      </li>
+      <li>
+        The early-access and contact forms send nothing. They have no destination and their
+        buttons are disabled, so nothing you type leaves your browser.
+      </li>
+    </ul>
+  </section>
+
+  <section class={section} aria-labelledby="later">
+    <h2 id="later" class={h2}>Before launch</h2>
+    <div class={prose}>
+      <p>
+        When sign-up opens, this page will be replaced with a full privacy notice saying what the
+        forms collect, why, how long it is kept, and how to have it deleted. The forms will not
+        open before that notice is published.
+      </p>
+    </div>
+  </section>
+</Base>

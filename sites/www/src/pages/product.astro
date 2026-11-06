@@ -1,0 +1,180 @@
+---
+/**
+ * Product (marketing-site story 3, CAP-2): how Wipestation is designed to
+ * work, from the bench to the job, the certificate and its verification, the
+ * destroy path, fleet and integration, and licensing. Every claim is wrapped
+ * in its `<Capability>`; metadata carries no guarded phrase.
+ */
+import Base from "../layouts/Base.astro";
+import Capability from "../components/Capability.astro";
+import { body, grid, h1, h2, h3, item, link, notice, prose, secondaryLink, section } from "../lib/ui";
+---
+
+<Base
+  title="How the product is designed to work"
+  description="Wipestation from the bench to the job, the certificate and its verification, with the destroy path, fleet, integration and licensing. Every capability carries its status."
+>
+  <p class={notice}>
+    Pre-launch: every pre-release build runs against simulated drives.
+  </p>
+  <h1 class:list={[h1, "mt-3"]}>How the product is designed to work</h1>
+  <div class={prose}>
+    <p>
+      Wipestation is one program with a desktop interface for the operator at the bench and an
+      HTTP API for everything else. Each step below is what it is designed to do, labelled with
+      where it stands today; the <a href="/capabilities/" class={link}>capabilities page</a> lists
+      them all.
+    </p>
+  </div>
+
+  <section class={section} aria-labelledby="bench">
+    <h2 id="bench" class={h2}>From bench to certificate</h2>
+    <ol class={grid}>
+      <Capability id="drive-sanitization" as="li" badge="start" class={item}>
+        <h3 class={h3}>1. The bench and the method</h3>
+        <p class={body}>
+          Designed so the operator loads an asset into a bay on a map of the real bench, and sanitize SSDs and HDDs to NIST Clear or Purge, with the method selected
+          from the asset's intent and classification.
+        </p>
+      </Capability>
+      <Capability id="nvme-sanitize" as="li" badge="start" class={item}>
+        <h3 class={h3}>2. Honest NVMe Sanitize</h3>
+        <p class={body}>
+          Designed to issue NVMe Sanitize first (crypto erase on self-encrypting drives, block
+          erase otherwise) with an explicit fallback order, never a quiet overwrite.
+        </p>
+      </Capability>
+      <Capability id="hpa-dco-clear" as="li" badge="start" class={item}>
+        <h3 class={h3}>3. Hidden regions first</h3>
+        <p class={body}>
+          Designed to detect and clear HPA and DCO hidden regions before Purge, and to refuse to
+          report Purge if they were not reached.
+        </p>
+      </Capability>
+      <Capability id="outcome-bearing-job" as="li" badge="start" class={item}>
+        <h3 class={h3}>4. One job per asset</h3>
+        <p class={body}>
+          Designed so every attempt on an asset, retries and verification included, composes into
+          one signed certificate per asset rather than separate records to reconcile later.
+        </p>
+      </Capability>
+      <Capability id="command-level-evidence" as="li" badge="start" class={item}>
+        <h3 class={h3}>5. Command-level evidence</h3>
+        <p class={body}>
+          The certificate is designed to record each issued opcode, its return status and the log
+          pages read, so an auditor sees proof, not prose.
+        </p>
+      </Capability>
+      <Capability id="offline-verification" as="li" badge="start" class={item}>
+        <h3 class={h3}>6. Offline-verifiable</h3>
+        <p class={body}>
+          Designed so an Ed25519 signature over canonical JSON lets anyone with the public key
+          check a certificate without contacting the vendor.
+        </p>
+      </Capability>
+    </ol>
+    <ul class={grid}>
+      <Capability id="open-cert-format" as="li" badge="start" class={item}>
+        <h3 class={h3}>Open certificate format</h3>
+        <p class={body}>
+          The JSON-LD certificate schema is to be published, so third parties can build their own
+          verifiers.
+        </p>
+      </Capability>
+      <Capability id="verification-portal" as="li" badge="start" class={item}>
+        <h3 class={h3}>Customer-facing verification portal</h3>
+        <p class={body}>
+          A planned branded link an ITAD can hand its own customer. An index, never the authority:
+          the certificate stays checkable with the public key alone.
+        </p>
+      </Capability>
+    </ul>
+  </section>
+
+  <section class={section} aria-labelledby="destroy">
+    <h2 id="destroy" class={h2}>When an asset cannot be reused</h2>
+    <ul class={grid}>
+      <Capability id="destruction-attestation" as="li" badge="start" class={item}>
+        <h3 class={h3}>The destroy path</h3>
+        <p class={body}>
+          Designed so that if an asset is physically destroyed, for example shredded after erasure
+          failed, the operator attests the destruction, optionally with a second person's concurrence, and it
+          joins the same chain of custody.
+        </p>
+      </Capability>
+      <Capability id="validate-workflow" as="li" badge="start" class={item}>
+        <h3 class={h3}>Programmatic Validate workflow</h3>
+        <p class={body}>
+          A planned registry for the NIST Rev. 2 Validate step, per media class, kept separate
+          from the verification run after each erasure.
+        </p>
+      </Capability>
+    </ul>
+  </section>
+
+  <section class={section} aria-labelledby="fleet">
+    <h2 id="fleet" class={h2}>Fleet and integration</h2>
+    <ul class={grid}>
+      <Capability id="fleet-coordination" as="li" badge="start" class={item}>
+        <h3 class={h3}>LAN fleet coordination</h3>
+        <p class={body}>
+          Designed so stations on one network find each other by mDNS and agree on a lead by
+          deterministic lead election, with no server to install.
+        </p>
+      </Capability>
+      <Capability id="air-gap-operation" as="li" badge="start" class={item}>
+        <h3 class={h3}>Air-gapped by design</h3>
+        <p class={body}>
+          Designed so an air-gapped station keeps full product value with no connection to the
+          vendor, ever.
+        </p>
+      </Capability>
+      <Capability id="erp-integration" as="li" badge="start" class={item}>
+        <h3 class={h3}>ERP integration</h3>
+        <p class={body}>
+          Designed for REST in and out, webhooks on job changes and certificate signing, and
+          asset-id lookups, so the ERP stays the system of record.
+        </p>
+      </Capability>
+      <Capability id="itam-integration" as="li" badge="start" class={item}>
+        <h3 class={h3}>ITAM and service-desk integration</h3>
+        <p class={body}>
+          Planned links from each job to the asset record in an ITAM and the ticket in a service
+          desk such as ServiceNow or Jira.
+        </p>
+      </Capability>
+    </ul>
+  </section>
+
+  <section class={section} aria-labelledby="licensing">
+    <h2 id="licensing" class={h2}>Licensing</h2>
+    <ul class={grid}>
+      <Capability id="per-success-licensing" as="li" badge="start" class={item}>
+        <h3 class={h3}>Per-success licensing</h3>
+        <p class={body}>
+          A licence credit is designed to be spent only on a verified Clear or Purge success;
+          failures, aborts and re-runs are free.
+        </p>
+      </Capability>
+      <Capability id="licence-never-blocks-erasure" as="li" badge="start" class={item}>
+        <h3 class={h3}>Licensing never blocks erasure</h3>
+        <p class={body}>
+          Designed so an unlicensed, expired or revoked station still runs every erasure; only
+          the certificate's marking changes, to evaluation.
+        </p>
+      </Capability>
+    </ul>
+    <p class="mt-4 max-w-prose text-slate-700">
+      <a href="/pricing/" class={secondaryLink}>How pricing works before launch</a>
+    </p>
+  </section>
+
+  <section class="mt-10 rounded border border-slate-200 bg-slate-50 p-4" aria-labelledby="join">
+    <h2 id="join" class={h2}>Try it early</h2>
+    <p class="mt-2 max-w-prose text-slate-700">
+      Early access means pre-release builds against simulated drives, and a say in what ships
+      first.
+      <a href="/early-access/" class={secondaryLink}>How early access works</a>
+    </p>
+  </section>
+</Base>

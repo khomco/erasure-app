@@ -1,0 +1,76 @@
+---
+/**
+ * Enterprise IT segment page (marketing-site story 3; CONTEXT §2 buyer 3).
+ */
+import Base from "../../layouts/Base.astro";
+import Capability from "../../components/Capability.astro";
+import { body, grid, h1, h2, h3, item, prose, secondaryLink, section } from "../../lib/ui";
+---
+
+<Base
+  title="For enterprise IT"
+  description="How Wipestation is designed for enterprise IT refresh teams: a simple bench, records tied to assets and tickets, and proof an auditor can check."
+>
+  <h1 class={h1}>For enterprise IT</h1>
+  <div class={prose}>
+    <p>
+      Your team retires and redeploys laptops and servers on a refresh cycle. You want a bench a
+      technician can run without training on standards, a record for every asset tied to its
+      ticket, and proof that holds up when the auditor asks.
+    </p>
+  </div>
+
+  <section class={section} aria-labelledby="fit">
+    <h2 id="fit" class={h2}>What it is designed to give you</h2>
+    <ul class={grid}>
+      <Capability id="operator-bench-workflow" as="li" badge="start" class={item}>
+        <h3 class={h3}>A bench anyone on the team can run</h3>
+        <p class={body}>
+          Designed so the operator signs in once per session, enters the asset tag and ticket,
+          and picks the asset on a bay map of the bench: one short form per asset, with no
+          standards training needed.
+        </p>
+      </Capability>
+      <Capability id="drive-sanitization" as="li" badge="start" class={item}>
+        <h3 class={h3}>Clear for reuse, Purge before it leaves</h3>
+        <p class={body}>
+          Designed to sanitize SSDs and HDDs to NIST Clear for redeployment or NIST Purge before
+          an asset leaves your control.
+        </p>
+      </Capability>
+      <Capability id="itam-integration" as="li" badge="start" class={item}>
+        <h3 class={h3}>Linked to your ITAM and service desk</h3>
+        <p class={body}>
+          Planned links from each job to the asset in your ITAM and the ticket in a service desk
+          such as ServiceNow or Jira.
+        </p>
+      </Capability>
+      <Capability id="offline-verification" as="li" badge="start" class={item}>
+        <h3 class={h3}>Proof that outlives the vendor</h3>
+        <p class={body}>
+          Offline-verifiable certificates, designed so an auditor checks one with the public key,
+          without contacting the vendor.
+        </p>
+      </Capability>
+      <Capability id="licence-never-blocks-erasure" as="li" badge="start" class={item}>
+        <h3 class={h3}>A licence problem never stops a refresh</h3>
+        <p class={body}>
+          Licensing never blocks erasure: designed so an expired station still runs every erasure
+          and marks the certificate as evaluation.
+        </p>
+      </Capability>
+      <Capability id="fleet-coordination" as="li" badge="start" class={item}>
+        <h3 class={h3}>Benches that find each other</h3>
+        <p class={body}>
+          Designed so stations on one LAN find each other by mDNS and elect a lead, with no server
+          to install.
+        </p>
+      </Capability>
+    </ul>
+  </section>
+
+  <p class="mt-10 max-w-prose text-slate-700">
+    Want to try the bench workflow on simulated drives?
+    <a href="/early-access/" class={secondaryLink}>Join early access</a>
+  </p>
+</Base>

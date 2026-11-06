@@ -1,0 +1,54 @@
+---
+/**
+ * Pricing (marketing-site story 3, CAP-2). No amounts, no currency and no
+ * tiers offered as products until `offerings-and-payments` publishes prices
+ * from the hub (ADR-0006 §1). Pricing principles appear only as wrapped
+ * capabilities.
+ */
+import Base from "../layouts/Base.astro";
+import Capability from "../components/Capability.astro";
+import { body, grid, h1, h2, h3, item, link, prose, section } from "../lib/ui";
+---
+
+<Base
+  title="Pricing"
+  description="Wipestation is pre-launch and has no price list yet. Early-access pricing on request."
+>
+  <h1 class={h1}>Pricing</h1>
+  <div class={prose}>
+    <p class="text-lg font-semibold text-slate-900">Early-access pricing on request.</p>
+    <p>
+      Wipestation is not on sale yet, so there is no price list. Published prices will appear
+      here before launch. Until then, <a href="/early-access/" class={link}>join early access</a>
+      and we will talk about pricing with you directly.
+    </p>
+  </div>
+
+  <section class={section} aria-labelledby="principles">
+    <h2 id="principles" class={h2}>How licensing is designed to work</h2>
+    <ul class={grid}>
+      <Capability id="per-success-licensing" as="li" badge="start" class={item}>
+        <h3 class={h3}>Per-success licensing</h3>
+        <p class={body}>
+          Designed so a licence credit is spent only on a verified Clear or Purge success.
+          Failures, aborts and re-runs are free, so there is no headroom to budget for jobs that
+          fail.
+        </p>
+      </Capability>
+      <Capability id="licence-never-blocks-erasure" as="li" badge="start" class={item}>
+        <h3 class={h3}>Licensing never blocks erasure</h3>
+        <p class={body}>
+          Designed so an unlicensed, expired or revoked station still runs every erasure; only
+          the certificate's marking changes, to evaluation.
+        </p>
+      </Capability>
+      <Capability id="air-gap-operation" as="li" badge="start" class={item}>
+        <h3 class={h3}>No licence server on the bench</h3>
+        <p class={body}>
+          Licences are designed to be checked on the station itself, so an air-gapped bench keeps
+          full product value with no connection to the vendor.
+        </p>
+      </Capability>
+    </ul>
+  </section>
+</Base>

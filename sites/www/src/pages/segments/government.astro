@@ -1,0 +1,88 @@
+---
+/**
+ * Government and defense segment page (marketing-site story 3; CONTEXT §2
+ * buyer 2). Every standards and certification mention is its own capability.
+ */
+import Base from "../../layouts/Base.astro";
+import Capability from "../../components/Capability.astro";
+import { body, grid, h1, h2, h3, item, link, prose, secondaryLink, section } from "../../lib/ui";
+---
+
+<Base
+  title="For government and defense"
+  description="How Wipestation is designed for government, defense and classified environments, and which procurement targets are still future work."
+>
+  <h1 class={h1}>For government and defense</h1>
+  <div class={prose}>
+    <p>
+      Classified and regulated environments buy on standards, evidence and procurement listings,
+      and often run with no outside network at all. Wipestation is designed for that, and this
+      page says plainly which parts are still future work. The
+      <a href="/standards/" class={link}>standards page</a> has the full posture.
+    </p>
+  </div>
+
+  <section class={section} aria-labelledby="fit">
+    <h2 id="fit" class={h2}>What it is designed to give you</h2>
+    <ul class={grid}>
+      <Capability id="nist-ieee-conformance" as="li" badge="start" class={item}>
+        <h3 class={h3}>NIST SP 800-88 Rev. 2 and IEEE 2883-2022</h3>
+        <p class={body}>
+          A published self-attestation of conformance to both is the pre-launch target. It is not
+          issued yet.
+        </p>
+      </Capability>
+      <Capability id="air-gap-operation" as="li" badge="start" class={item}>
+        <h3 class={h3}>Full operation air-gapped</h3>
+        <p class={body}>
+          Designed so an air-gapped station keeps full product value, licence checks included,
+          with no connection to the vendor ever.
+        </p>
+      </Capability>
+      <Capability id="offline-verification" as="li" badge="start" class={item}>
+        <h3 class={h3}>Certificates checked inside your boundary</h3>
+        <p class={body}>
+          Offline-verifiable, designed so anyone holding the public key checks a certificate
+          without contacting the vendor.
+        </p>
+      </Capability>
+      <Capability id="destruction-attestation" as="li" badge="start" class={item}>
+        <h3 class={h3}>Destruction attested by the operator</h3>
+        <p class={body}>
+          Designed so that when media is physically destroyed, the operator attests it, with a
+          second person's concurrence optional, in the asset's chain of custody.
+        </p>
+      </Capability>
+      <Capability id="secure-boot" as="li" badge="start" class={item}>
+        <h3 class={h3}>Secure Boot stays on</h3>
+        <p class={body}>
+          A planned bootable image with a signed shim and GRUB, so no workflow asks you to disable
+          Secure Boot.
+        </p>
+      </Capability>
+    </ul>
+  </section>
+
+  <section class={section} aria-labelledby="procurement">
+    <h2 id="procurement" class={h2}>Procurement targets (future)</h2>
+    <ul class={grid}>
+      <Capability id="adisa-al5" as="li" badge="start" class={item}>
+        <h3 class={h3}>ADISA Assurance Level 5</h3>
+        <p class={body}>Target: year 1. Not ADISA certified today.</p>
+      </Capability>
+      <Capability id="common-criteria-eal2" as="li" badge="start" class={item}>
+        <h3 class={h3}>Common Criteria EAL 2 / EAL 2+</h3>
+        <p class={body}>Target: years 1–2. Not evaluated today.</p>
+      </Capability>
+      <Capability id="nato-niapc" as="li" badge="start" class={item}>
+        <h3 class={h3}>NATO NIAPC listing</h3>
+        <p class={body}>Target: year 2. Not listed today.</p>
+      </Capability>
+    </ul>
+  </section>
+
+  <p class="mt-10 max-w-prose text-slate-700">
+    Want to evaluate it on simulated drives first?
+    <a href="/early-access/" class={secondaryLink}>Join early access</a>
+  </p>
+</Base>

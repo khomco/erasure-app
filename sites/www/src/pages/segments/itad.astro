@@ -1,0 +1,89 @@
+---
+/**
+ * ITAD operators segment page (marketing-site story 3; CONTEXT §2 buyer 1).
+ */
+import Base from "../../layouts/Base.astro";
+import Capability from "../../components/Capability.astro";
+import { body, grid, h1, h2, h3, item, prose, secondaryLink, section } from "../../lib/ui";
+---
+
+<Base
+  title="For ITAD operators"
+  description="How Wipestation is designed for IT asset disposition operators: fair licensing, proof your customers can check, and your ERP as the system of record."
+>
+  <h1 class={h1}>For ITAD operators</h1>
+  <div class={prose}>
+    <p>
+      You process thousands of assets a week and sell proof of sanitization to your own
+      customers. You should not pay for a job that failed, budget extra licences for re-runs, or
+      ask your customers to trust a lookup on someone else's server.
+    </p>
+  </div>
+
+  <section class={section} aria-labelledby="fit">
+    <h2 id="fit" class={h2}>What it is designed to give you</h2>
+    <ul class={grid}>
+      <Capability id="per-success-licensing" as="li" badge="start" class={item}>
+        <h3 class={h3}>Pay for successes only</h3>
+        <p class={body}>
+          Per-success licensing, designed so a credit is spent only on a verified Clear or Purge
+          success, and failures, aborts and re-runs are free.
+        </p>
+      </Capability>
+      <Capability id="outcome-bearing-job" as="li" badge="start" class={item}>
+        <h3 class={h3}>One certificate per asset</h3>
+        <p class={body}>
+          Designed so every attempt on an asset, retries included, composes into one signed
+          certificate, so the audit story is never spread across records.
+        </p>
+      </Capability>
+      <Capability id="erp-integration" as="li" badge="start" class={item}>
+        <h3 class={h3}>Your ERP stays in charge</h3>
+        <p class={body}>
+          Designed for REST in and out and webhooks on job changes, with work order identifiers shared so
+          reconciliation is a join, not an export.
+        </p>
+      </Capability>
+      <Capability id="fleet-coordination" as="li" badge="start" class={item}>
+        <h3 class={h3}>Benches that find each other</h3>
+        <p class={body}>
+          Designed so stations on one LAN discover each other by mDNS and elect a lead by
+          deterministic lead election, with no server to run.
+        </p>
+      </Capability>
+      <Capability id="offline-verification" as="li" badge="start" class={item}>
+        <h3 class={h3}>Proof your customer can check</h3>
+        <p class={body}>
+          Offline-verifiable certificates, designed so your customer checks one with the public
+          key, without contacting the vendor or you.
+        </p>
+      </Capability>
+      <Capability id="verification-portal" as="li" badge="start" class={item}>
+        <h3 class={h3}>A verification portal for your customers</h3>
+        <p class={body}>
+          A planned branded link you hand your customer, an index over certificates that stay
+          checkable on their own.
+        </p>
+      </Capability>
+      <Capability id="r2v3-alignment" as="li" badge="start" class={item}>
+        <h3 class={h3}>Records for your R2v3 audit</h3>
+        <p class={body}>
+          Designed so the method chosen, the outcome and the evidence behind it are on every
+          record an R2v3 auditor samples.
+        </p>
+      </Capability>
+      <Capability id="destruction-attestation" as="li" badge="start" class={item}>
+        <h3 class={h3}>The destroy path in the same record</h3>
+        <p class={body}>
+          Designed so that when an asset is physically destroyed, the operator's attestation joins
+          its chain of custody.
+        </p>
+      </Capability>
+    </ul>
+  </section>
+
+  <p class="mt-10 max-w-prose text-slate-700">
+    Want to see it on simulated drives first?
+    <a href="/early-access/" class={secondaryLink}>Join early access</a>
+  </p>
+</Base>

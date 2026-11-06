@@ -1,0 +1,31 @@
+---
+/**
+ * Contact (marketing-site story 3). No email, phone or postal address: the
+ * brand and domain are undecided. The form posts nowhere until `lead-capture`.
+ */
+import Base from "../layouts/Base.astro";
+import LeadForm from "../components/LeadForm.astro";
+import { h1, link, prose } from "../lib/ui";
+---
+
+<Base
+  title="Contact"
+  description="How to reach the Wipestation team before launch. The contact form is not open yet and sends nothing."
+>
+  <h1 class={h1}>Contact</h1>
+  <div class={prose}>
+    <p>
+      Wipestation is pre-launch, and we do not publish an email address, phone number or postal
+      address yet. When the contact form opens, it will be the way to ask about the product, the
+      standards posture or early access.
+    </p>
+    <p>
+      In the meantime, the <a href="/product/" class={link}>product</a>,
+      <a href="/standards/" class={link}>standards</a> and
+      <a href="/capabilities/" class={link}>capabilities</a> pages answer most questions, and
+      <a href="/early-access/" class={link}>early access</a> explains how to try pre-release
+      builds.
+    </p>
+  </div>
+  <LeadForm kind="contact" />
+</Base>

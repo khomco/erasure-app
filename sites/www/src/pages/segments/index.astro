@@ -1,0 +1,56 @@
+---
+/**
+ * Segments index (marketing-site story 3, CAP-2): the three buyers in
+ * CONTEXT §2 that the site speaks to, each with its own page.
+ */
+import Base from "../../layouts/Base.astro";
+import { body, h1, item, link, prose } from "../../lib/ui";
+
+const segments = [
+  {
+    href: "/segments/itad/",
+    title: "ITAD operators",
+    text: "Mid-to-large operators handling thousands of assets a week, who hand proof of sanitization to their own customers.",
+  },
+  {
+    href: "/segments/enterprise-it/",
+    title: "Enterprise IT",
+    text: "Refresh teams retiring and redeploying their own fleet, who want a simple bench and records tied to assets and tickets.",
+  },
+  {
+    href: "/segments/government/",
+    title: "Government and defense",
+    text: "Classified and regulated environments that buy on standards, evidence and procurement listings.",
+  },
+];
+---
+
+<Base
+  title="Who it is for"
+  description="Wipestation is designed for three buyers: ITAD operators, enterprise IT refresh teams, and government and defense environments."
+>
+  <h1 class={h1}>Who it is for</h1>
+  <div class={prose}>
+    <p>
+      Wipestation is designed for organisations that need defensible proof that retired storage
+      holds no data. Three kinds of buyer, three different reasons to care.
+    </p>
+  </div>
+  <ul class="mt-6 grid gap-3 md:grid-cols-3">
+    {
+      segments.map((s) => (
+        <li class={item}>
+          <h2 class="font-semibold">
+            <a href={s.href} class={link}>
+              {s.title}
+            </a>
+          </h2>
+          <p class={body}>{s.text}</p>
+        </li>
+      ))
+    }
+  </ul>
+  <p class="mt-6 max-w-prose text-slate-700">
+    Not a fit yet: a consumer tool for wiping one personal computer.
+  </p>
+</Base>

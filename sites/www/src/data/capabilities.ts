@@ -232,6 +232,74 @@ export const capabilities: readonly CapabilityDef[] = [
       "Recognition of Wipestation by the R2v3 and e-Stewards certification programmes is a year-two target. Those programmes certify ITAD operators; the product holds no such recognition today.",
     guardedPhrases: [/\bR2v3\b/i, /\be-Stewards\b/i, CERTIFICATION],
   },
+  {
+    id: "r2v3-alignment",
+    label: "Evidence for R2v3 operators' sanitization audits",
+    status: "in-development",
+    summary:
+      "Designed so an R2v3 operator's sanitization records line up with what the standard asks for: the method chosen, the outcome, and the evidence behind it. This is alignment by design, not recognition by the R2v3 programme.",
+    guardedPhrases: [/\bR2v3\b/i],
+  },
+
+  // ---- Fleet, deployment, integration and licensing (CONTEXT §2, §9; ROADMAP §0.2) ----
+  {
+    id: "fleet-coordination",
+    label: "LAN fleet coordination",
+    status: "in-development",
+    summary:
+      "Designed so stations on one LAN find each other by mDNS discovery and agree on a lead station by deterministic lead election, with no server to install. Working in pre-release builds against the simulated backend.",
+    guardedPhrases: [/\bmDNS\b/i, /\blead(er)? election\b/i, /\bfleet coordination\b/i],
+  },
+  {
+    id: "air-gap-operation",
+    label: "Full operation air-gapped",
+    status: "in-development",
+    summary:
+      "Designed so an air-gapped station keeps full product value with no connection to the vendor ever.",
+    guardedPhrases: [/\bair[- ]?gap(s|ped)?\b/i],
+  },
+  {
+    id: "verification-portal",
+    label: "Customer-facing verification portal",
+    status: "planned",
+    summary:
+      "A planned hosted page where an ITAD's own customer opens a branded link to check a certificate. It is an index, never the authority: the certificate stays checkable with the public key alone.",
+    guardedPhrases: [/\bverification portals?\b/i, /\bbranded (verification )?links?\b/i],
+  },
+  {
+    id: "itam-integration",
+    label: "ITAM and service-desk integration",
+    status: "planned",
+    summary:
+      "Planned links from each job to the asset record in an ITAM and the ticket in a service desk such as ServiceNow or Jira.",
+    guardedPhrases: [/\bITAM\b/, /\bServiceNow\b/i, /\bJira\b/i, /\bservice[- ]desk integration\b/i],
+  },
+  {
+    id: "licence-never-blocks-erasure",
+    label: "Licensing never blocks erasure",
+    status: "in-development",
+    summary:
+      "Designed so an unlicensed, expired, revoked or clock-rolled-back station still runs every erasure; only the certificate's marking changes, to evaluation. A licence server having a bad day cannot stop a wipe.",
+    guardedPhrases: [
+      new RegExp(
+        `\\b(never|not|cannot|(ca|do|does|wo|did)n['’]t) (block|stop|gate)(s|ed|ing)?\\b${GAP(30)}\\b(erasures?|wipes?|wiping)\\b`,
+        "i",
+      ),
+      /\bstill runs every erasure\b/i,
+    ],
+  },
+  {
+    id: "operator-bench-workflow",
+    label: "Operator bench workflow",
+    status: "in-development",
+    summary:
+      "Designed so an operator signs in once per session, enters the asset tag and ticket, and picks the asset on a bay map of the bench, with no standards training needed to run a job. Working in pre-release builds against the simulated backend.",
+    guardedPhrases: [
+      /\bsigns? in once per session\b/i,
+      /\bbay map\b/i,
+      /\bmap of the bench\b/i,
+    ],
+  },
 ];
 
 /** Look up a capability; an unknown id is an authoring error and throws. */

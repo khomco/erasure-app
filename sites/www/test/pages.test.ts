@@ -3,12 +3,23 @@
 // as `astro build`.
 import { experimental_AstroContainer as AstroContainer } from "astro/container";
 import { parse, type HTMLElement } from "node-html-parser";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { capabilities } from "../src/data/capabilities";
 import { checkPage } from "../src/lib/site-check";
 import Index from "../src/pages/index.astro";
 import EarlyAccess from "../src/pages/early-access.astro";
 import Capabilities from "../src/pages/capabilities.astro";
+import Product from "../src/pages/product.astro";
+import Standards from "../src/pages/standards.astro";
+import Segments from "../src/pages/segments/index.astro";
+import SegmentItad from "../src/pages/segments/itad.astro";
+import SegmentEnterpriseIt from "../src/pages/segments/enterprise-it.astro";
+import SegmentGovernment from "../src/pages/segments/government.astro";
+import Pricing from "../src/pages/pricing.astro";
+import Contact from "../src/pages/contact.astro";
+import Privacy from "../src/pages/privacy.astro";
+import Terms from "../src/pages/terms.astro";
+import LeadForm from "../src/components/LeadForm.astro";
 
 const ORIGIN = "https://wipestation.example";
 
@@ -26,6 +37,16 @@ const pages: [string, Page][] = [
   ["/", Index],
   ["/early-access/", EarlyAccess],
   ["/capabilities/", Capabilities],
+  ["/product/", Product],
+  ["/standards/", Standards],
+  ["/segments/", Segments],
+  ["/segments/itad/", SegmentItad],
+  ["/segments/enterprise-it/", SegmentEnterpriseIt],
+  ["/segments/government/", SegmentGovernment],
+  ["/pricing/", Pricing],
+  ["/contact/", Contact],
+  ["/privacy/", Privacy],
+  ["/terms/", Terms],
 ];
 
 describe.each(pages)("page %s", (path, page) => {
@@ -35,6 +56,200 @@ describe.each(pages)("page %s", (path, page) => {
 
   it("ships no JavaScript", async () => {
     expect(await render(page, path)).not.toMatch(/<script/i);
+  });
+
+  it("has one h1, a title and a description", async () => {
+    const root = parse(await render(page, path));
+    expect(root.querySelectorAll("h1")).toHaveLength(1);
+    expect(root.querySelector("head title")?.text.trim()).toBeTruthy();
+    expect(root.querySelector('meta[name="description"]')?.getAttribute("content")?.trim()).toBeTruthy();
+  });
+});
+
+const LEAD_FIELDS = {
+  "early-access": ["name", "email", "company", "role", "segment", "message", "consent"],
+  contact: ["name", "email", "company", "message", "consent"],
+} as const;
+
+describe.each([
+  ["/early-access/", EarlyAccess, "early-access"],
+  ["/contact/", Contact, "contact"],
+] as const)("form on %s", (path, page, kind) => {
+  let root: HTMLElement;
+  beforeAll(async () => {
+    root = parse(await render(page, path));
+  });
+
+  it("posts nowhere: one form, no action, its only submit button disabled", () => {
+    const forms = root.querySelectorAll("form");
+    expect(forms).toHaveLength(1);
+    const form = forms[0];
+    expect(form.hasAttribute("action")).toBe(false);
+    expect(form.hasAttribute("method")).toBe(false);
+    const submits = form
+      .querySelectorAll("button, input")
+      .filter((el) =>
+        el.tagName === "BUTTON"
+          ? (el.getAttribute("type") ?? "submit") === "submit"
+          : ["submit", "image"].includes(el.getAttribute("type") ?? ""),
+      );
+    expect(submits).toHaveLength(1);
+    expect(submits[0].hasAttribute("disabled")).toBe(true);
+    expect(form.text).toMatch(/not open yet/i);
+    expect(form.text).toMatch(/nothing you type here is sent/i);
+  });
+
+  it("has exactly the lead-capture field names, each with a visible label", () => {
+    const form = root.querySelector("form")!;
+    const controls = form.querySelectorAll("input, select, textarea");
+    expect(controls.map((c) => c.getAttribute("name"))).toEqual([...LEAD_FIELDS[kind]]);
+    for (const c of controls) {
+      const id = c.getAttribute("id");
+      expect(id, c.getAttribute("name")).toBeTruthy();
+      const label = form.querySelector(`label[for="${id}"]`);
+      expect(label, c.getAttribute("name")).not.toBeNull();
+      expect(label!.text.trim().length).toBeGreaterThan(0);
+    }
+    const consent = form.querySelector('input[name="consent"]')!;
+    expect(consent.getAttribute("type")).toBe("checkbox");
+    const consentLabel = form.querySelector(`label[for="${consent.getAttribute("id")}"]`)!;
+    expect(consentLabel.querySelector('a[href="/privacy/"]')).not.toBeNull();
+  });
+
+  it("collects nothing by other means", () => {
+    const html = root.toString();
+    expect(html).not.toMatch(/mailto:|tel:/i);
+    expect(html).not.toMatch(/\bfetch\(/);
+  });
+});
+
+describe("early-access segments", () => {
+  it("offers exactly the four segment values behind an empty, disabled placeholder", async () => {
+    const root = parse(await render(EarlyAccess, "/early-access/"));
+    const [placeholder, ...options] = root.querySelectorAll('select[name="segment"] option');
+    expect(placeholder.getAttribute("value")).toBe("");
+    expect(placeholder.hasAttribute("disabled")).toBe(true);
+    expect(placeholder.hasAttribute("selected")).toBe(true);
+    expect(options.map((o) => o.getAttribute("value"))).toEqual(["itad", "enterprise-it", "government", "other"]);
+    expect(options.some((o) => o.hasAttribute("selected"))).toBe(false);
+  });
+});
+
+describe("LeadForm dev notice", () => {
+  const renderForm = (devNotice: boolean) =>
+    container.renderToString(LeadForm, { props: { kind: "early-access", devNotice } });
+
+  it("names lead-capture when dev is on", async () => {
+    const root = parse(await renderForm(true));
+    const notice = root.querySelector("[data-dev-notice]");
+    expect(notice?.text).toMatch(/lead-capture/);
+    expect(notice?.text).toMatch(/POST \/api\/leads/);
+  });
+
+  describe.each([
+    ["/early-access/", EarlyAccess],
+    ["/contact/", Contact],
+  ] as const)("default on %s (import.meta.env.DEV)", (path, page) => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("shows the notice in a dev build", async () => {
+      vi.stubEnv("DEV", true);
+      expect(parse(await render(page, path)).querySelector("[data-dev-notice]")).not.toBeNull();
+    });
+
+    it("hides the notice in a production build, still saying it is not open", async () => {
+      vi.stubEnv("DEV", false);
+      const root = parse(await render(page, path));
+      expect(root.querySelector("[data-dev-notice]")).toBeNull();
+      expect(root.querySelector("form")!.text).toMatch(/not open yet/i);
+    });
+  });
+
+  it("is absent when dev is off, and the form still says it is not open", async () => {
+    const html = await renderForm(false);
+    expect(html).not.toMatch(/data-dev-notice|lead-capture/);
+    expect(parse(html).text).toMatch(/Sign-up is not open yet/);
+  });
+});
+
+describe("pricing page", () => {
+  it("is honest: pricing on request, no amount or currency, links to early access", async () => {
+    const html = await render(Pricing, "/pricing/");
+    const root = parse(html);
+    expect(root.querySelector("main")!.text).toContain("Early-access pricing on request");
+    // The whole document: body text, <title>, meta description and OG tags.
+    const meta = root.querySelectorAll("meta").map((m) => m.getAttribute("content") ?? "");
+    const text = [root.text, ...meta].join(" ");
+    expect(text).not.toMatch(/[$€£¥]\s?\d/);
+    expect(text).not.toMatch(/\b(USD|EUR|GBP|CAD|AUD|CHF|JPY)\s?\d|\d[\d,.]*\s?(USD|EUR|GBP|CAD|AUD|CHF|JPY)\b/);
+    expect(text).not.toMatch(/\b(dollars?|euros?|pounds?( sterling)?|sterling)\b/i);
+    expect(text).not.toMatch(/\d[\d,.]*\s*(per|\/|a|an)\s+(station|seat|drive|asset|device|erasure|wipe|user|month|year|licen[cs]e|credit)s?\b/i);
+    expect(root.querySelector('main a[href="/early-access/"]')).not.toBeNull();
+  });
+});
+
+describe("standards page", () => {
+  it("labels the certification roadmap as future, one planned capability per target", async () => {
+    const root = parse(await render(Standards, "/standards/"));
+    const section = root.querySelector('section[aria-labelledby="roadmap"]')!;
+    expect(section.querySelector("#roadmap")!.text).toMatch(/future/i);
+    for (const id of ["adisa-al5", "common-criteria-eal2", "r2v3-recognition", "nato-niapc"]) {
+      const el = section.querySelector(`[data-capability="${id}"]`);
+      expect(el, id).not.toBeNull();
+      expect(el!.getAttribute("data-status"), id).toBe("planned");
+      expect(el!.text, id).toMatch(/Year/);
+    }
+  });
+
+  it("wraps the conformance posture in its capability", async () => {
+    const root = parse(await render(Standards, "/standards/"));
+    expect(root.querySelector('[data-capability="nist-ieee-conformance"]')).not.toBeNull();
+  });
+});
+
+describe("findable", () => {
+  let root: HTMLElement;
+  beforeAll(async () => {
+    root = parse(await render(Index, "/"));
+  });
+
+  it("links the main pages from the header nav", () => {
+    const hrefs = root.querySelectorAll('header nav a').map((a) => a.getAttribute("href"));
+    expect(hrefs).toEqual(expect.arrayContaining(["/product/", "/standards/", "/segments/", "/pricing/", "/capabilities/"]));
+  });
+
+  it("links contact, privacy and terms from the footer", () => {
+    const hrefs = root.querySelectorAll("footer a").map((a) => a.getAttribute("href"));
+    expect(hrefs).toEqual(expect.arrayContaining(["/contact/", "/privacy/", "/terms/"]));
+  });
+
+  it("links the three segment pages from /segments/, each ending with an early-access link", async () => {
+    const segRoot = parse(await render(Segments, "/segments/"));
+    const hrefs = segRoot.querySelectorAll("main a").map((a) => a.getAttribute("href"));
+    expect(hrefs).toEqual(
+      expect.arrayContaining(["/segments/itad/", "/segments/enterprise-it/", "/segments/government/"]),
+    );
+    for (const [path, page] of [
+      ["/segments/itad/", SegmentItad],
+      ["/segments/enterprise-it/", SegmentEnterpriseIt],
+      ["/segments/government/", SegmentGovernment],
+    ] as const) {
+      const links = parse(await render(page, path)).querySelectorAll("main a");
+      expect(links[links.length - 1].getAttribute("href"), path).toBe("/early-access/");
+    }
+  });
+
+  it("marks the current page in the nav", async () => {
+    const pr = parse(await render(Pricing, "/pricing/"));
+    expect(pr.querySelector('header nav a[aria-current="page"]')?.getAttribute("href")).toBe("/pricing/");
+  });
+
+  it("marks the section current on a segment subpage", async () => {
+    const sub = parse(await render(SegmentItad, "/segments/itad/"));
+    const current = sub.querySelectorAll('header nav a[aria-current="page"]').map((a) => a.getAttribute("href"));
+    expect(current).toEqual(["/segments/"]);
   });
 });
 

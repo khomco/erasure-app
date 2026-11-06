@@ -1,30 +1,34 @@
 ---
 /**
- * Early-access stub (marketing-site story 2): the landing page's primary CTA
- * needs a real target. Story 3 replaces this body with the sign-up form. No
- * form and no address here: nothing is collected.
+ * Early access (marketing-site story 3): what it means, and the sign-up form.
+ * The form posts nowhere until `lead-capture` wires `POST /api/leads`.
  */
 import Base from "../layouts/Base.astro";
+import LeadForm from "../components/LeadForm.astro";
+import { h1, link, prose } from "../lib/ui";
 ---
 
 <Base
   title="Early access"
-  description="What early access to Wipestation means. Sign-up is not open yet, and this page collects nothing."
+  description="What early access to Wipestation means, and the sign-up form. Sign-up is not open yet, and the form sends nothing."
 >
-  <h1 class="text-3xl font-bold tracking-tight">Early access</h1>
-  <div class="mt-4 max-w-prose space-y-3 text-slate-700">
+  <h1 class={h1}>Early access</h1>
+  <div class={prose}>
     <p>
       Early access means trying pre-release builds of Wipestation before launch and helping decide
-      what ships first. Every pre-release build runs against simulated drives: no real storage
-      hardware is involved yet.
-    </p>
-    <p class="font-semibold text-slate-900">
-      Sign-up is not open yet. Nothing is collected on this page.
+      what ships first. Every pre-release build runs against simulated drives: four virtual
+      devices with progress and evidence generated in software. No real storage hardware is
+      involved yet.
     </p>
     <p>
-      Until it opens, the
-      <a href="/capabilities/" class="underline underline-offset-2">capabilities page</a>
-      shows what is in development and what is planned.
+      It is for ITAD operators, enterprise IT refresh teams and government buyers who want to see
+      the certificate, the evidence and the bench workflow early, and tell us what is missing.
+      Early-access pricing is on request; see <a href="/pricing/" class={link}>pricing</a>.
+    </p>
+    <p>
+      Until sign-up opens, the <a href="/capabilities/" class={link}>capabilities page</a> shows
+      what is in development and what is planned.
     </p>
   </div>
+  <LeadForm kind="early-access" />
 </Base>
