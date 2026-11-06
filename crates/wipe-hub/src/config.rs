@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, ValueEnum};
+use lettre::message::Mailbox;
 use thiserror::Error;
 use url::Url;
 use wipe_cert::SigningKey;
@@ -19,6 +20,7 @@ pub const DEFAULT_DATABASE_URL: &str = "postgres://wipehub:wipehub@127.0.0.1:554
 pub const DEFAULT_SMTP_HOST: &str = "127.0.0.1";
 pub const DEFAULT_SMTP_PORT: u16 = 1025;
 pub const DEFAULT_PUBLIC_BASE_URL: &str = "http://127.0.0.1:7900";
+pub const DEFAULT_MAIL_FROM: &str = "Wipestation <no-reply@wipestation.localhost>";
 
 /// Where the portal is looked for when `--portal-dir` is absent, relative to
 /// the working directory.
@@ -59,6 +61,10 @@ pub struct Args {
     /// SMTP port for outgoing mail.
     #[arg(long, env = "WIPE_HUB_SMTP_PORT", default_value_t = DEFAULT_SMTP_PORT)]
     pub smtp_port: u16,
+    /// Sender of every email the hub sends, as a mailbox
+    /// (`Name <address>` or a bare address).
+    #[arg(long, env = "WIPE_HUB_MAIL_FROM", default_value = DEFAULT_MAIL_FROM)]
+    pub mail_from: String,
     /// Absolute URL the hub is reached at, used in links it sends.
     #[arg(long, env = "WIPE_HUB_PUBLIC_BASE_URL", default_value = DEFAULT_PUBLIC_BASE_URL)]
     pub public_base_url: String,
@@ -89,6 +95,7 @@ pub struct Config {
     pub database_url: String,
     pub smtp_host: String,
     pub smtp_port: u16,
+    pub mail_from: Mailbox,
     pub public_base_url: Url,
     pub payment_provider: PaymentProvider,
     pub stripe_webhook_secret: Option<String>,
@@ -107,6 +114,8 @@ pub enum ConfigError {
     MissingStripeWebhookSecret,
     #[error("--public-base-url {value:?} is not an absolute http(s) URL: {reason}")]
     BadPublicBaseUrl { value: String, reason: String },
+    #[error("--mail-from {value:?} is not a mailbox (`Name <address>` or `address`): {reason}")]
+    BadMailFrom { value: String, reason: String },
     #[error("cannot read vendor root seed {}: {error}", path.display())]
     SeedUnreadable {
         path: PathBuf,
@@ -125,6 +134,16 @@ pub enum ConfigError {
 impl Config {
     pub fn from_args(args: Args) -> Result<Self, ConfigError> {
         let public_base_url = parse_base_url(&args.public_base_url)?;
+        let mail_from: Mailbox =
+            args.mail_from
+                .trim()
+                .parse()
+                .map_err(
+                    |e: lettre::address::AddressError| ConfigError::BadMailFrom {
+                        value: args.mail_from.clone(),
+                        reason: e.to_string(),
+                    },
+                )?;
 
         let stripe_webhook_secret = args
             .stripe_webhook_secret
@@ -155,6 +174,7 @@ impl Config {
             database_url: args.database_url,
             smtp_host: args.smtp_host,
             smtp_port: args.smtp_port,
+            mail_from,
             public_base_url,
             payment_provider: args.payment_provider,
             stripe_webhook_secret,
@@ -195,6 +215,7 @@ impl fmt::Debug for Config {
             .field("database_url", &"<redacted>")
             .field("smtp_host", &self.smtp_host)
             .field("smtp_port", &self.smtp_port)
+            .field("mail_from", &self.mail_from.to_string())
             .field("public_base_url", &self.public_base_url.as_str())
             .field("payment_provider", &self.payment_provider)
             .field(
@@ -289,6 +310,7 @@ mod tests {
             database_url: DEFAULT_DATABASE_URL.into(),
             smtp_host: DEFAULT_SMTP_HOST.into(),
             smtp_port: DEFAULT_SMTP_PORT,
+            mail_from: DEFAULT_MAIL_FROM.into(),
             public_base_url: DEFAULT_PUBLIC_BASE_URL.into(),
             payment_provider: PaymentProvider::Fake,
             stripe_webhook_secret: None,
@@ -419,6 +441,34 @@ mod tests {
     }
 
     #[test]
+    fn mail_from_accepts_mailboxes() {
+        for (value, address) in [
+            (DEFAULT_MAIL_FROM, "no-reply@wipestation.localhost"),
+            ("ops@example.com", "ops@example.com"),
+            (" Sales Team <sales@example.com> ", "sales@example.com"),
+        ] {
+            let mut a = args();
+            a.mail_from = value.into();
+            let c = Config::from_args(a).unwrap();
+            assert_eq!(c.mail_from.email.to_string(), address, "{value}");
+        }
+    }
+
+    #[test]
+    fn bad_mail_from_is_rejected_naming_the_value() {
+        for bad in ["", "not a mailbox", "Name <no-at-sign>", "a@b@c"] {
+            let mut a = args();
+            a.mail_from = bad.into();
+            let err = Config::from_args(a).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::BadMailFrom { .. }),
+                "{bad}: {err}"
+            );
+            assert!(err.to_string().contains("--mail-from"), "{err}");
+        }
+    }
+
+    #[test]
     fn env_var_names_follow_the_prefix() {
         use clap::CommandFactory;
         let cmd = Args::command();
@@ -437,11 +487,12 @@ mod tests {
     fn clap_defaults_match_the_constants() {
         use clap::CommandFactory;
         let smtp_port = DEFAULT_SMTP_PORT.to_string();
-        let expected: [(&str, Option<&str>); 9] = [
+        let expected: [(&str, Option<&str>); 10] = [
             ("addr", Some(DEFAULT_ADDR)),
             ("database_url", Some(DEFAULT_DATABASE_URL)),
             ("smtp_host", Some(DEFAULT_SMTP_HOST)),
             ("smtp_port", Some(&smtp_port)),
+            ("mail_from", Some(DEFAULT_MAIL_FROM)),
             ("public_base_url", Some(DEFAULT_PUBLIC_BASE_URL)),
             ("payment_provider", Some("fake")),
             ("stripe_webhook_secret", None),

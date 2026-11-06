@@ -189,6 +189,17 @@ pub struct Message {
     pub subject: String,
     #[serde(rename = "Text")]
     pub text: String,
+    #[serde(rename = "From")]
+    pub from: MailAddress,
+}
+
+/// A sender or recipient in a Mailpit message.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MailAddress {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Address")]
+    pub address: String,
 }
 
 #[derive(Deserialize)]

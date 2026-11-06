@@ -46,6 +46,7 @@ fn config(database_url: &str, smtp_port: u16) -> Config {
         database_url: database_url.to_string(),
         smtp_host: "127.0.0.1".into(),
         smtp_port,
+        mail_from: wipe_hub::config::DEFAULT_MAIL_FROM.into(),
         public_base_url: wipe_hub::config::DEFAULT_PUBLIC_BASE_URL.into(),
         payment_provider: wipe_hub::PaymentProvider::Fake,
         stripe_webhook_secret: None,

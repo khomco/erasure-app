@@ -9,10 +9,13 @@
 //! `wipe-cert` and `wipe-license` only, and no station crate may depend on it.
 //! A station never needs the hub to erase, sign or verify.
 
+pub mod accounts;
 pub mod audit;
+pub mod auth;
 pub mod config;
 pub mod db;
 pub mod health;
+pub mod mail;
 
 use std::sync::Arc;
 
@@ -26,11 +29,13 @@ use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
 
 pub use config::{startup_warnings, Args, Config, ConfigError, PaymentProvider};
+use mail::Mailer;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub pool: PgPool,
+    pub mailer: Mailer,
 }
 
 impl AppState {
@@ -40,9 +45,17 @@ impl AppState {
         let pool = PgPoolOptions::new()
             .connect_lazy(&config.database_url)
             .map_err(|e| anyhow::anyhow!("invalid --database-url / WIPE_HUB_DATABASE_URL: {e}"))?;
+        // Build the sign-in timing equaliser before the first request.
+        accounts::prepare_dummy_hash();
+        let mailer = Mailer::new(
+            &config.smtp_host,
+            config.smtp_port,
+            config.mail_from.clone(),
+        );
         Ok(Self {
             config: Arc::new(config),
             pool,
+            mailer,
         })
     }
 }
@@ -50,6 +63,7 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/api/health", get(health::health))
+        .merge(auth::routes())
         // Unknown API paths are JSON 404s, portal or not: a typo in a client
         // must never get `index.html` back with a 200.
         .route("/api", any(api_not_found))

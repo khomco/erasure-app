@@ -35,6 +35,7 @@ async fn spawn_hub(portal_dir: Option<PathBuf>) -> SocketAddr {
         ),
         smtp_host: "127.0.0.1".into(),
         smtp_port: closed_port().await,
+        mail_from: wipe_hub::config::DEFAULT_MAIL_FROM.into(),
         public_base_url: wipe_hub::config::DEFAULT_PUBLIC_BASE_URL.into(),
         payment_provider: wipe_hub::PaymentProvider::Fake,
         stripe_webhook_secret: None,

@@ -310,7 +310,9 @@ and **0008** (station ↔ hub protocol and the reconciliation contract).
 ### 2.3 Phases
 
 **A1 — Vendor issuance, with a real audit trail**
-- A1.1 `wipe-hub` crate skeleton, Postgres schema, migrations, tenant model.
+- ~~A1.1 `wipe-hub` crate skeleton, Postgres schema, migrations, tenant model.~~
+  *Shipped 2026-11-06 (CONTEXT §10.2): hub foundation, then organizations and users
+  with `owner`/`member`/`vendor_admin` roles (portal-accounts story 1).*
 - A1.2 Licence issuance API over the ADR-0005 chain (the signing logic already
   exists and is tested — this is custody, workflow and attribution around it).
 - A1.3 Vendor console UI: customers, licences, entitlements, issue/inspect.

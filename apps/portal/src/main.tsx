@@ -12,6 +12,9 @@ import {
 
 import "./index.css";
 import { HomePage } from "./pages/HomePage";
+import { SignInPage } from "./pages/SignInPage";
+import { SignUpPage } from "./pages/SignUpPage";
+import { VerifyEmailPage } from "./pages/VerifyEmailPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -55,7 +58,31 @@ const indexRoute = createRoute({
   component: HomePage,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute]);
+const signUpRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/sign-up",
+  component: SignUpPage,
+});
+
+const signInRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/sign-in",
+  component: SignInPage,
+});
+
+// The hub emails `{public_base_url}/verify-email?token=…`.
+const verifyEmailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/verify-email",
+  validateSearch: (search: Record<string, unknown>): { token?: string } =>
+    typeof search.token === "string" ? { token: search.token } : {},
+  component: function VerifyEmailRoute() {
+    const { token } = verifyEmailRoute.useSearch();
+    return <VerifyEmailPage token={token} />;
+  },
+});
+
+const routeTree = rootRoute.addChildren([indexRoute, signUpRoute, signInRoute, verifyEmailRoute]);
 
 const router = createRouter({ routeTree });
 
