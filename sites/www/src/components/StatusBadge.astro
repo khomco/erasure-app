@@ -1,0 +1,30 @@
+---
+import { STATUS_LABEL, type CapabilityStatus } from "../data/capabilities";
+
+interface Props {
+  status: CapabilityStatus;
+  class?: string;
+}
+
+const { status, class: className = "ml-2" } = Astro.props;
+const tone: Record<CapabilityStatus, string> = {
+  available: "bg-emerald-100 text-emerald-900 ring-emerald-700/30",
+  "in-development": "bg-amber-100 text-amber-950 ring-amber-700/40",
+  planned: "bg-slate-200 text-slate-900 ring-slate-600/40",
+};
+---
+
+{
+  status !== "available" && (
+    <span
+      data-status-badge={status}
+      class:list={[
+        "inline-flex items-center whitespace-nowrap rounded px-1.5 py-0.5 align-middle text-xs font-semibold ring-1 ring-inset",
+        tone[status],
+        className,
+      ]}
+    >
+      {STATUS_LABEL[status]}
+    </span>
+  )
+}

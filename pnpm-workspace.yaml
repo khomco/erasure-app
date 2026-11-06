@@ -1,0 +1,7 @@
+# pnpm workspace (ADR-0006 Consequences). Each package keeps its own lockfile
+# and node_modules — see .npmrc `shared-workspace-lockfile=false` — so
+# apps/desktop/pnpm-lock.yaml stays authoritative and `cd apps/desktop && pnpm …`
+# keeps working exactly as before.
+packages:
+  - "apps/*"
+  - "sites/*"

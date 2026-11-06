@@ -1,0 +1,8 @@
+---
+/** Analytics hook: renders nothing unless explicitly enabled in src/config.ts. */
+import { site } from "../config";
+
+const { enabled, scriptSrc } = site.analytics;
+---
+
+{enabled && scriptSrc && <script is:inline defer src={scriptSrc} />}

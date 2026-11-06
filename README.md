@@ -46,6 +46,7 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
 | `wipe-server` | Axum REST API + WebSocket event stream; auto-signs certs when a Job reaches `Erased` or `PendingCoSign`; destruction-manifest assembly and co-sign |
 | `wipe-cli` | `wipestation serve / inspect / verify-cert` binary |
 | `apps/desktop` | Vite + React + TanStack Router + Tailwind frontend, plus Tauri 2 shell |
+| `sites/www` | Static Astro + Tailwind marketing site (pre-launch placeholder); a build-time check fails `astro build` on any capability overclaim, missing meta/OG tag, missing sitemap, or resource loaded from another origin (ADR-0006 §2). See [`sites/www/README.md`](sites/www/README.md) |
 
 ## Quick start
 
@@ -58,6 +59,9 @@ cargo test --workspace
 
 # Build + typecheck + test the frontend:
 cd apps/desktop && pnpm install && pnpm build && pnpm typecheck && pnpm test && cd ../..
+
+# Marketing site (root pnpm workspace; each package keeps its own lockfile):
+pnpm install && pnpm --filter www build && pnpm --filter www test
 
 # Run the two-station demo end-to-end (mDNS discovery + erase + cert verify):
 ./scripts/demo.sh
@@ -165,6 +169,7 @@ to `Destroyed`.
 
 | `wipe-server/tests/topology_store.rs` | 15 | All four persistence tiers (ADR-0003); the write probe against a read-only directory; corrupt-config recovery; save-survives-restart; and that a path binding learned by identify mode keeps its bay when a *different* drive is swapped into that port |
 | `apps/desktop` (`pnpm test`) | 200 | `topologyEdit` (17): numbering runs across every order/origin/offset, grid rebuilds preserving operator edits by position, binding rules, validation. `identify` (12): hot-plug diffing — a reused port is a *different* drive. `shells/catalog` (8): catalog↔artwork drift in both directions, and one bundled model stays on the generic shell so the fallback stays exercised. `shells/contract` (163): every registered shell built at four content sizes, asserting the bay slot equals the content and the legibility rules hold, self-tested with deliberately broken shells |
+| `sites/www` (`pnpm --filter www test`) | 109 | The build-time site check (`src/lib/site-check.ts`) against fixture HTML: labelled vs bare overclaims (body text, read-aloud attributes, `<title>`, description, `og:*`), invisible characters splitting words, fake or mismatched badges, `available` capabilities unable to own shared phrases, unknown ids, stale statuses, missing/hidden/wrong-text badges, missing meta, third-party scripts, images, frames, media, icons, `style` and CSS `url()`/`@import`; `available` items allowed bare; the real capability list against sample copy; and the `astro:build:done` hook run over temp dirs (recursion, CSS scan, missing sitemap) |
 
 Plus the `scripts/demo.sh` end-to-end shell drives two real station processes, mDNS discovery, a real cert issuance, and three negative tests (correct key passes, wrong key rejected, tampered cert rejected).
 

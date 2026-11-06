@@ -34,3 +34,6 @@ __pycache__/
 # bmad-driver runtime state/logs and checkpoint approval markers (scripts/bmad-driver.py)
 .scratch/.driver/
 .scratch/*/stories/*.approved
+
+# Astro generated types and cache (sites/www)
+sites/www/.astro/

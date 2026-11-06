@@ -175,14 +175,21 @@ and the drift-gate contract).
 ### 1.3 Phases
 
 **W1 — Skeleton and honest positioning** *(no hardware claims)*
-- W1.1 `sites/www` Astro scaffold, Tailwind theme, CI build.
+- ~~W1.1 `sites/www` Astro scaffold, Tailwind theme~~, CI build. *Scaffold and theme
+  shipped 2026-11-05 (CONTEXT §10.2); the CI build waits on §0.5.*
 - W1.2 Landing page: problem, the offline-verifiable cert, what we are not
   (CONTEXT §3 including "What we are not" — that section is unusually good
   marketing copy already).
 - W1.3 Standards page: NIST R2 / IEEE 2883 posture, with certification
   *roadmap* clearly labelled as future (CONTEXT §13).
-- W1.4 Capability-status component + frontmatter schema (W-R12), with the
-  status of the mock backend stated on the record.
+- ~~W1.4 Capability-status component + frontmatter schema (W-R12), with the
+  status of the mock backend stated on the record.~~ *Shipped 2026-11-05 as a shared
+  capability list (`sites/www/src/data/capabilities.ts`) with the ADR-0006 §2 vocabulary
+  `available`/`in-development`/`planned` rather than W-R12's docs-only `shipped`/`seam`/`planned`,
+  checked over the built HTML on every `astro build`; `/capabilities` states the mock backend.
+  No per-page frontmatter schema exists: for the marketing site the shared list plus the
+  `<Capability>` component replace it. W-R12's `shipped`/`seam`/`planned` docs statuses and
+  their symbol check remain open for W2 (W2.6).*
 - W1.5 Docs skeleton: install, operating modes, quick start, glossary
   (CONTEXT §14 as the source).
 - **Exit:** a stranger can tell what this is, what it verifiably does today,

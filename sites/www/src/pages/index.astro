@@ -1,0 +1,22 @@
+---
+import Base from "../layouts/Base.astro";
+import { site } from "../config";
+---
+
+<Base
+  title={site.name}
+  description="Wipestation is a pre-launch data sanitization product. See the status of every capability on the record."
+>
+  <h1 class="text-3xl font-bold tracking-tight">{site.name}</h1>
+  <p class="mt-4 max-w-prose text-lg text-slate-700">
+    A data sanitization product, in development. This site is a placeholder while the copy is
+    written and signed off.
+  </p>
+  <p class="mt-6">
+    <a
+      href="/capabilities/"
+      class="inline-block rounded bg-slate-900 px-4 py-2 font-semibold text-white hover:bg-slate-700"
+      >What it does today, and what it does not</a
+    >
+  </p>
+</Base>

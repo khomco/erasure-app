@@ -1,0 +1,79 @@
+---
+/**
+ * Shared page shell: every page gets a title, description, canonical URL and
+ * OG tags (all required by the build-time site check), a skip link, the
+ * header nav, and the pre-launch notice in the footer.
+ */
+import "../styles/global.css";
+import Analytics from "../components/Analytics.astro";
+import { site } from "../config";
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+const fullTitle = title === site.name ? title : `${title} | ${site.name}`;
+const canonical = new URL(Astro.url.pathname, Astro.site).href;
+const nav = [{ href: "/capabilities/", label: "Capabilities" }];
+// trailingSlash is "ignore": /capabilities and /capabilities/ are the same page.
+const withSlash = (p: string) => (p.endsWith("/") ? p : `${p}/`);
+const current = withSlash(Astro.url.pathname);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="sitemap" href="/sitemap-index.xml" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={site.name} />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta name="twitter:card" content="summary" />
+  </head>
+  <body class="min-h-screen bg-white font-sans text-slate-900 antialiased">
+    <a
+      href="#main"
+      class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:rounded focus:bg-slate-900 focus:px-3 focus:py-2 focus:text-white"
+      >Skip to content</a
+    >
+    <header class="border-b border-slate-200">
+      <nav aria-label="Main" class="mx-auto flex max-w-4xl items-center gap-6 px-4 py-4">
+        <a href="/" class="mr-auto text-lg font-bold tracking-tight">{site.name}</a>
+        {
+          nav.map((item) => (
+            <a
+              href={item.href}
+              aria-current={current === item.href ? "page" : undefined}
+              class="text-sm font-medium text-slate-700 underline-offset-4 hover:underline aria-[current=page]:text-slate-950 aria-[current=page]:underline"
+            >
+              {item.label}
+            </a>
+          ))
+        }
+      </nav>
+    </header>
+    <main id="main" class="mx-auto max-w-4xl px-4 py-10">
+      <slot />
+    </main>
+    <footer class="border-t border-slate-200">
+      <div class="mx-auto max-w-4xl space-y-2 px-4 py-6 text-sm text-slate-700">
+        <p class="font-semibold text-slate-900">
+          Pre-launch: nothing here is generally available yet.
+        </p>
+        <p>
+          Every capability on this site carries its status.
+          <a href="/capabilities/" class="underline underline-offset-2">See where each one stands.</a>
+        </p>
+      </div>
+    </footer>
+    <Analytics />
+  </body>
+</html>

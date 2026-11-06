@@ -1,0 +1,32 @@
+{
+  "name": "www",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.23.4"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "typecheck": "astro check",
+    "test": "vitest run",
+    "lighthouse": "node scripts/lighthouse.mjs"
+  },
+  "dependencies": {
+    "@astrojs/sitemap": "^3.7.4",
+    "@tailwindcss/vite": "^4.3.4",
+    "astro": "^7.4.7",
+    "tailwindcss": "^4.3.4"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.12",
+    "@types/node": "^25.7.0",
+    "chrome-launcher": "^1.2.3",
+    "lighthouse": "^13.6.0",
+    "node-html-parser": "^9.0.7",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
+  }
+}

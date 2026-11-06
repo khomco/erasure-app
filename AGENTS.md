@@ -26,6 +26,10 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 - Never pipe `cargo test` through `grep`/`awk` to summarize: compile errors are discarded and
   a broken build prints as a clean run (68844bf).
 - Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 200 tests, under a second.
+- Marketing site: `pnpm install` at the root, then `pnpm --filter www build` (fails on any
+  overclaim — wrap the copy in `<Capability id>`, never weaken a guarded phrase), `pnpm --filter
+  www typecheck`, `pnpm --filter www test`; `pnpm --filter www lighthouse` needs local Chrome.
+  Capability statuses live in `sites/www/src/data/capabilities.ts` and are a vendor sign-off.
 - `wipestation serve` with no built frontend silently serves an "API only" landing page, as
   does a `--static-dir` that does not exist; run `cd apps/desktop && pnpm build` first.
 - Format only the files you touched with `rustfmt --edition 2021 <files>`. Never `--all`, and

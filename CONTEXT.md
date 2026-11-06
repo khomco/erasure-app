@@ -685,6 +685,7 @@ folder or in `.scratch/DECISIONS.md`.
 | Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark not persisted (resets on restart); no `FileCounter`; `allowed_methods` unenforced; free-tier count not tracked; no API route or UI; desktop shell is always unlicensed |
 | Vitest suite over the frontend's pure domain modules | §12 | ✅ | |
 | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
+| Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check | ADR-0006 / ROADMAP W1.1, W1.4 | ✅ partial | Placeholder home and `/capabilities` only; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); statuses await vendor sign-off |
 
 ## 11. Deferred — known and committed
 

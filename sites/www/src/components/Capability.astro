@@ -1,0 +1,30 @@
+---
+/**
+ * Renders a capability with its status on the record. Every mention of a
+ * guarded capability goes through this component: it stamps
+ * `data-capability`/`data-status` from the shared list and adds a visible
+ * badge for anything not `available`, so labelling is automatic rather than
+ * remembered. An unknown id throws, failing the build.
+ */
+import type { HTMLTag } from "astro/types";
+import { getCapability } from "../data/capabilities";
+import StatusBadge from "./StatusBadge.astro";
+
+interface Props {
+  id: string;
+  /** Wrapping element; defaults to an inline `span`. */
+  as?: HTMLTag;
+  /** Where the badge goes relative to the content. */
+  badge?: "start" | "end";
+  class?: string;
+}
+
+const { id, as: Tag = "span", badge = "end", class: className } = Astro.props;
+const cap = getCapability(id);
+---
+
+<Tag data-capability={cap.id} data-status={cap.status} class={className}>
+  {badge === "start" && <StatusBadge status={cap.status} class="mr-2" />}
+  <slot>{cap.label}</slot>
+  {badge === "end" && <StatusBadge status={cap.status} />}
+</Tag>

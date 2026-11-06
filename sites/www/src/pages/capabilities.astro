@@ -1,0 +1,53 @@
+---
+import Base from "../layouts/Base.astro";
+import Capability from "../components/Capability.astro";
+import { capabilities, STATUS_LABEL, CAPABILITY_STATUSES } from "../data/capabilities";
+
+const groups = CAPABILITY_STATUSES.map((status) => ({
+  status,
+  items: capabilities.filter((c) => c.status === status),
+}));
+---
+
+<Base
+  title="Capabilities and their status"
+  description="Every Wipestation capability with its status on the record: available, in development, or planned."
+>
+  <h1 class="text-3xl font-bold tracking-tight">Capabilities and their status</h1>
+  <div class="mt-4 max-w-prose space-y-3 text-slate-700">
+    <p>
+      Wipestation is pre-launch. Every pre-release build runs against a simulated device backend:
+      four virtual drives, with progress and evidence generated in software. No real storage
+      hardware is involved yet, so nothing below is available to buy or rely on today.
+    </p>
+    <p>
+      Each capability is labelled <strong>In development</strong> (being built, or built and only
+      exercised against the simulator) or <strong>Planned</strong> (not started, or
+      <Capability id="independent-certification">an external certification not yet applied for</Capability>). Statuses change only when the vendor signs them off.
+    </p>
+  </div>
+  {
+    groups
+      .filter((g) => g.items.length > 0)
+      .map((g) => (
+        <section class="mt-10" aria-labelledby={`status-${g.status}`}>
+          <h2 id={`status-${g.status}`} class="text-xl font-semibold">
+            {STATUS_LABEL[g.status]}
+          </h2>
+          <ul class="mt-4 space-y-4">
+            {g.items.map((cap) => (
+              <Capability
+                id={cap.id}
+                as="li"
+                badge="start"
+                class="rounded border border-slate-200 p-4"
+              >
+                <h3 class="inline font-semibold">{cap.label}</h3>
+                <p class="mt-1 text-slate-700">{cap.summary}</p>
+              </Capability>
+            ))}
+          </ul>
+        </section>
+      ))
+  }
+</Base>
