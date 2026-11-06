@@ -1,0 +1,19 @@
+- id: "1"
+  title: README and ARCHITECTURE match the code
+  description: >-
+    CAP-1. Apply the README.md and docs/ARCHITECTURE.md corrections from the
+    audit companion §(e).
+- id: "2"
+  title: CONTEXT.md sections 5, 7, 11 and 14 match the code
+  description: >-
+    CAP-2. Remove the nonexistent Verifying state, correct the PXE items, add
+    the missing glossary terms.
+- id: "3"
+  title: As-built addenda on ADR-0002, 0004 and 0005
+  description: >-
+    CAP-3. Dated addenda only; never rewrite the decision text.
+- id: "4"
+  title: Bench-setup design doc and stale UI copy
+  description: >-
+    CAP-4. Correct the design doc and code comments, and remove the two
+    misleading UI strings.

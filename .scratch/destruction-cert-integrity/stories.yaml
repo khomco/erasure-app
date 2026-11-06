@@ -1,0 +1,21 @@
+- id: "1"
+  title: Stamp the manifest on its Jobs
+  description: >-
+    CAP-1. Add a JobRunner method that links a Job and its DestructionEvent
+    to a manifest, called from create_manifest.
+- id: "2"
+  title: Manifests page excludes Jobs already on a manifest
+  description: >-
+    CAP-2. Filter on the now-stamped manifest_id; cover with vitest.
+- id: "3"
+  title: Runner errors map to 404 and 409
+  description: >-
+    CAP-3. Map runner not-found and invalid-transition errors to proper
+    statuses on the job and manifest routes.
+- id: "4"
+  title: Certify destruction of a never-erased drive
+  description: >-
+    CAP-4. Implement whatever DECISIONS.md D9 resolves. If D9 is still open,
+    HALT as blocked with the D9 question.
+  spec_checkpoint: true
+  done_checkpoint: true

@@ -14,19 +14,23 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 - Read `CONTEXT.md` and the ADRs in `docs/adr/` touching your area before changing behavior
   there; name domain concepts with the term `CONTEXT.md` §14 defines, not a synonym. To
   contradict an ADR, say so explicitly rather than silently overriding it.
-- Issues and PRDs are markdown under `.scratch/<feature-slug>/` — `PRD.md`,
-  `issues/NN-slug.md`, triage state as a `Status:` line. Details: `docs/agents/issue-tracker.md`.
+- Work to be built is markdown under `.scratch/<feature-slug>/`: BMAD spec folders (`SPEC.md`,
+  `stories.yaml`, `stories/<id>-<slug>.md`) run in `.scratch/QUEUE` order by
+  `scripts/bmad-driver.py`, plus older `PRD.md`/`issues/NN-slug.md` folders. Current status and
+  open decisions: `.scratch/STATUS.md`, `.scratch/DECISIONS.md`. Details:
+  `docs/agents/issue-tracker.md`.
 
 ## Running and verifying
 
-- `cargo test --workspace` — 100 tests, ~30s.
+- `cargo test --workspace` — 138 tests, ~30s.
 - Never pipe `cargo test` through `grep`/`awk` to summarize: compile errors are discarded and
   a broken build prints as a clean run (68844bf).
 - Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 200 tests, under a second.
 - `wipestation serve` with no built frontend silently serves an "API only" landing page, as
   does a `--static-dir` that does not exist; run `cd apps/desktop && pnpm build` first.
-- Run `cargo fmt` on the files you touched, never `--all` — 13 tracked files are unformatted
-  and `--all` buries a small change in an unrelated 13-file diff.
+- Format only the files you touched with `rustfmt --edition 2021 <files>`. Never `--all`, and
+  never `cargo fmt -- <file>`: that still formats every crate in the graph. 13 tracked files
+  are unformatted, and either form buries a small change in an unrelated 13-file diff.
 - Rust MSRV 1.80, edition 2021, stable toolchain with rustfmt and clippy; pnpm 9+. Read
   versions from `Cargo.toml` and `rust-toolchain.toml`, never from the shell.
 
@@ -39,7 +43,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   mutating methods (`issue`, `unfreeze`, `cancel`, `verify`); handlers get read-only
   `enumerate`/`capabilities`. Bypassing the runner skips evidence capture.
 - Certificates are produced only as a side effect of a `JobBroadcast::JobStateChanged` into
-  `Erased`/`PendingCoSign` (`crates/wipe-server/src/app.rs:163`) — mutating `Job::state`
+  `Erased`/`PendingCoSign` (`crates/wipe-server/src/app.rs:197`) — mutating `Job::state`
   without emitting that broadcast yields a silently uncertified job.
 - A `Certificate` is immutable once signed: `verify` re-canonicalizes against the stored hash,
   so co-signing must sign the same bytes.
@@ -54,7 +58,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   with `src/api/ws.ts` and `crates/wipe-server/src/ws.rs`; new routes with
   `crates/wipe-server/src/app.rs` and `src/api/client.ts`. The frontend talks HTTP/WS, not
   Tauri commands.
-- Frontend-bundle resolution is implemented twice — `crates/wipe-cli/src/main.rs:403` and
+- Frontend-bundle resolution is implemented twice — `crates/wipe-cli/src/main.rs:516` and
   `apps/desktop/src-tauri/src/lib.rs:87`. Change both or the desktop and server paths diverge.
 - Update `CONTEXT.md`, `README.md`, and `docs/design/*` in the same commit as the code they
   describe; when a roadmap item ships, strike it in `docs/ROADMAP.md` and record it in

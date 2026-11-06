@@ -1,0 +1,10 @@
+# Order the driver (scripts/bmad-driver.py --all) runs spec folders in.
+# One folder per line; '#' lines are comments. Add a folder here when its
+# blocking decision in DECISIONS.md lands.
+docs-truth-up
+destruction-cert-integrity
+licensing-as-built
+desktop-parity
+licence-visibility
+bench-throughput-inbox
+drift-tests

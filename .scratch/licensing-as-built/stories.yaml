@@ -1,0 +1,15 @@
+- id: "1"
+  title: FileCounter and honest hardware-backed flags
+  description: >-
+    CAP-3. Add FileCounter; make TpmCounter report not hardware-backed until
+    it is implemented.
+- id: "2"
+  title: Persist lease state through the tiered store
+  description: >-
+    CAP-1 and CAP-2. Load lease state at boot and save it after each signing
+    decision, falling back to RAM with a visible status on ephemeral tiers.
+  spec_checkpoint: true
+- id: "3"
+  title: Count free-tier erasures
+  description: >-
+    CAP-4. Record evaluation erasures separately in the lease.

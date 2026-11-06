@@ -1,0 +1,14 @@
+- id: "1"
+  title: Shared station bootstrap used by CLI and Tauri
+  description: >-
+    CAP-1. Extract the CLI serve wiring into one function both hosts call;
+    move frontend-bundle resolution into it.
+- id: "2"
+  title: Desktop persistence in the app-data directory
+  description: >-
+    CAP-2 and CAP-3. Point the shared bootstrap at a per-user app-data
+    directory; enable the simulator with the mock backend.
+- id: "3"
+  title: Desktop window follows its own server
+  description: >-
+    CAP-4. No silent attach to another process on a busy port.

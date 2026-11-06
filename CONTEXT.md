@@ -665,27 +665,26 @@ to match current code.
 
 ### 10.2 v0.2 shipped so far
 
-| Surface | Ref | State |
-| --- | --- | --- |
-| Outer-Job composition — `Job` → `ErasureEvent`, new outer `Job` + `JobState`, `JobActivity` sum type, `JobEvent` → `JobUpdate` | §11 #2 / ADR-0001 | ✅ |
-| Destroy path — `DestructionEvent`, `PendingCoSign`, `DestructionManifest`, supervisor co-sign producing a second independent signature | ADR-0001 | ✅ |
-| Certificate schema v2 — carries the `activities` chain and an explicit `AssetDisposition`; v1 certs remain valid as single-ErasureEvent Jobs | ADR-0001 | ✅ |
-| REST: `POST /api/jobs/:id/escalate-to-destroy`, `GET|POST /api/manifests`, `GET /api/manifests/:id`, `POST /api/manifests/:id/cosign` | ADR-0001 | ✅ |
-| React UI: activity timeline on Job Detail + **Manifests page** (assembly + co-sign) | ADR-0001 | ✅ |
-| At-a-glance bench status overlay on the Devices page | §11 #3 | ✅ |
-| Configurable bay topology + generated SVG bay map | §11 #10 / ADR-0002 | ✅ br |
-| Tiered, self-detecting station config store (local file → control plane → prompt → ephemeral) | ADR-0003 | ✅ br |
-| Bench-setup builder — customers describe their own bays; learn-by-hot-swap identify mode | ADR-0002/0003 | ✅ br |
-| Model-aware enclosure catalog + shell artwork with machine-enforced legibility rules | ADR-0004 | ✅ br |
-| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ br |
-| Vitest suite over the frontend's pure domain modules | §12 | ✅ br |
-| `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits |
+All of this is on `main` (feature branches merged 2026-11-05, c9a9214). The
+**As-built gaps** column is from the 2026-11-05 audit
+(`.scratch/audit-2026-11-05/`); each gap is tracked in a `.scratch/` spec
+folder or in `.scratch/DECISIONS.md`.
 
-**br** = shipped on a feature branch, not yet on `main`. ADRs 0002–0005 exist
-only on `feat/enclosure-catalog` and `feat/licensing-attestation`, and neither
-branch contains the other's ADR. That fragmentation is a real problem for
-anything that reads the decision history as a whole — see
-[ROADMAP](docs/ROADMAP.md) §0.4 and T0.1.
+| Surface | Ref | State | As-built gaps |
+| --- | --- | --- | --- |
+| Outer-Job composition — `Job` → `ErasureEvent`, new outer `Job` + `JobState`, `JobActivity` sum type, `JobEvent` → `JobUpdate` | §11 #2 / ADR-0001 | ✅ partial | One ErasureEvent per Job (no retries/fallback); `Quarantined` never entered; `station_id` never recorded |
+| Destroy path — `DestructionEvent`, `PendingCoSign`, `DestructionManifest`, supervisor co-sign | ADR-0001 | ✅ partial | Co-sign uses the **station** key, and signer/role sit outside the signed bytes — it is a second signature, not an independent one; `verify-cert` ignores co-signatures; `manifest_id` never stamped. A never-erased Job can no longer be finalised uncertified (c779361), but how to certify it is open |
+| Certificate schema v2 — `activities` chain and explicit `AssetDisposition` | ADR-0001 | ✅ partial | v1 certs do **not** verify under v2 (see the ADR-0001 addendum) |
+| REST: escalate-to-destroy, manifests, co-sign | ADR-0001 | ✅ | |
+| React UI: activity timeline on Job Detail + Manifests page | ADR-0001 | ✅ | |
+| At-a-glance bench status overlay on the Devices page | §11 #3 | ✅ | |
+| Configurable bay topology + generated SVG bay map | §11 #10 / ADR-0002 | ✅ | UI templates differ from the Rust presets |
+| Tiered, self-detecting station config store | ADR-0003 | ✅ partial | Control-plane tier always fails (no hub); corrupt config only logged, not surfaced |
+| Bench-setup builder + learn-by-hot-swap identify mode | ADR-0002/0003 | ✅ CLI only | The desktop (Tauri) shell wires no store or simulator: layouts are lost on quit and identify mode is dead |
+| Model-aware enclosure catalog + shell artwork with machine-enforced legibility rules | ADR-0004 | ✅ partial | Site-local overlay exists in code but no host wires it |
+| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark not persisted (resets on restart); no `FileCounter`; `allowed_methods` unenforced; free-tier count not tracked; no API route or UI; desktop shell is always unlicensed |
+| Vitest suite over the frontend's pure domain modules | §12 | ✅ | |
+| `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
 
 ## 11. Deferred — known and committed
 
@@ -733,7 +732,7 @@ keep resolving.
 7. **RBAC** — roles: `loader`, `operator`, `supervisor`, `auditor`.
    Every action attributed; some actions require supervisor co-sign.
 8. ~~**License token verification**~~ — **DECIDED AND PARTLY SHIPPED**
-   by ADR-0005 (`feat/licensing-attestation`), which chose an
+   by ADR-0005, which chose an
    attestation *chain* over a standalone token: vendor root → licence
    certificate → station instance key → erasure certificate, with
    entitlements and an offline lease. The remaining product work — the
@@ -741,8 +740,7 @@ keep resolving.
    is #15.
 9. **PDF/A-3 cert wrapping** — JSON-LD inside, human-readable PDF
    outside, single attestation artifact.
-10. ~~**Configurable bay topology + bay map**~~ — **SHIPPED on
-    `feat/enclosure-catalog`** (see §10.2). A station declares its
+10. ~~**Configurable bay topology + bay map**~~ — **SHIPPED** (see §10.2). A station declares its
     Enclosures/Banks/Bays; the server resolves each Bay to a Device and
     the UI renders a vector bay map with live per-Bay status. Grew
     beyond the original scope into three ADRs: the topology model

@@ -1,0 +1,18 @@
+- id: "1"
+  title: GET /api/license and its TS mirror
+  description: >-
+    CAP-1. Read-only licence status route, client function and types.
+- id: "2"
+  title: Evaluation and attestation on the Certificate page
+  description: >-
+    CAP-2. Add the missing fields to the TS SignedCertificate and render them.
+- id: "3"
+  title: Licence banner and expiry warning
+  description: >-
+    CAP-3. Persistent Layout banner for any non-Valid status, plus an expiry
+    warning threshold.
+- id: "4"
+  title: Install a licence file at runtime
+  description: >-
+    CAP-4. POST /api/license with validation and hot-swap.
+  spec_checkpoint: true

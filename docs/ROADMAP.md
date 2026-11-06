@@ -1,7 +1,9 @@
 # Product surfaces roadmap
 
-**Status:** proposed (2026-08-13) — requirements and sequencing only. Nothing
-in this document has been built. Pause point: review before any phase starts.
+**Status:** proposed (2026-08-13); status refreshed 2026-11-05. T0.1 is done;
+no W/A/O/L phase has started. Per-item status, readiness and blockers are in
+`.scratch/STATUS.md` (from the 2026-11-05 audit); the decisions that block
+items are in `.scratch/DECISIONS.md`.
 
 Companion to [CONTEXT.md](../CONTEXT.md) §9 (pricing), §10 (shipped) and §11
 (deferred). CONTEXT stays the product and domain vision; this file is the
@@ -70,15 +72,16 @@ against our archive, we have rebuilt the competitor weakness named in CONTEXT
 that our archive has never seen and a cert we have deleted are both still
 valid, and the verification page must say so.
 
-### 0.4 The decision history is fragmented across unmerged branches
+### ~~0.4 The decision history is fragmented across unmerged branches~~
 
-ADRs 0002–0005 exist only on feature branches; `main` has ADR-0001 only.
-ADR-0004 is on `feat/enclosure-catalog`, ADR-0005 on
-`feat/licensing-attestation`, and neither branch contains the other's ADR.
+**Resolved 2026-11-05 (T0.1, c9a9214).** Every feature branch is merged to
+`main`; ADRs 0001–0005 are in one tree.
 
-A documentation site that cites ADRs, and a drift gate that checks docs against
-code, both assume one coherent tree. **Merging the outstanding feature branches
-to `main` is a prerequisite for W2, not a nicety.** Tracked as T0.1.
+### 0.5 There is no CI
+
+No CI configuration exists in the repo. Every item below that says "CI fails
+when…" (W-R11, W1.1, W2.1, W2.6, L-R8) assumes infrastructure that has to be
+built first. Until then such gates are tests that run with `cargo test`.
 
 ---
 
@@ -418,9 +421,10 @@ build.** Three frontends, one engine.
 
 ## 4. L — Licensing tiers, end to end
 
-The chain is built and tested (ADR-0005, `feat/licensing-attestation`): vendor
+The chain is built and tested (ADR-0005): vendor
 root → licence certificate → instance key → erasure certificate, Ed25519 over
-canonical JSON, entitlements, offline lease with a monotonic watermark and
+canonical JSON, entitlements, offline lease with a monotonic watermark (held in RAM only, so it resets on
+restart — see `.scratch/licensing-as-built`) and
 clock-skew tolerance, `evaluation` marked inside the signed payload, and
 `verify-cert --require-licensed`. What does *not* exist is the product around
 it: three tiers a customer can buy, activate, renew and outgrow.
@@ -533,11 +537,11 @@ in a coherent state; nothing later invalidates something earlier.
 
 | Item | Why it blocks |
 | --- | --- |
-| **T0.1** Merge outstanding feature branches to `main` | §0.4 — docs and drift gates assume one tree |
+| ~~**T0.1** Merge outstanding feature branches to `main`~~ | **Done 2026-11-05** (c9a9214) |
 | **T0.2** ADR 0006 (site architecture + drift gates) | W2 cannot start without the gate contract |
 | **T0.3** ADR 0007 (control-plane persistence + tenancy) | A1 is a schema decision first |
 | **T0.4** ADR 0009 (operator identity, auth, RBAC, PXE first boot) | O1 and every attribution claim |
-| **T0.5** Decide the evaluation stance (L1.1) | Appears on the pricing page and in the product |
+| **T0.5** Decide the evaluation stance (L1.1) | Appears on the pricing page and in the product. **Default already chosen and implemented** by ADR-0005 §5 (never block, mark `evaluation`, no time bomb); needs ratification only — `.scratch/DECISIONS.md` D3 |
 
 ### T1 — Sell it honestly
 
@@ -598,8 +602,7 @@ would bake in a decision nobody made deliberately.
 | **0009** | Operator identity, authentication and RBAC — including PXE first-boot authentication, an open CONTEXT §12 question with no answer | O1 |
 | **0010** | Licence scopes and seat model: site semantics, the honest limits of offline seat counting, revocation distribution, expiry behaviour | L2 |
 
-Numbering continues from ADR-0005 (`feat/licensing-attestation`). If those
-branches merge in a different order, renumber before writing, not after.
+Numbering continues from ADR-0005.
 
 ## 7. Non-goals for this roadmap
 

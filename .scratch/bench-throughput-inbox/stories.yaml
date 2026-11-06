@@ -1,0 +1,16 @@
+- id: "1"
+  title: Batch start from the bay map
+  description: >-
+    CAP-1. Multi-select bays, shared spec, N jobs via existing routes.
+- id: "2"
+  title: Exception inbox
+  description: >-
+    CAP-2. One page and a nav count for everything waiting on a human.
+- id: "3"
+  title: Scanner-friendly asset-tag fields
+  description: >-
+    CAP-3. Enter from a HID scanner fills the field and advances.
+- id: "4"
+  title: Grouped Jobs list
+  description: >-
+    CAP-4. Active, queued and finished groups with counts.

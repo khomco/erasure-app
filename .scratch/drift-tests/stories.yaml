@@ -1,0 +1,12 @@
+- id: "1"
+  title: Route golden and client parity
+  description: >-
+    CAP-1 and CAP-5. Pin the router's routes and check client.ts coverage.
+- id: "2"
+  title: CLI help goldens
+  description: >-
+    CAP-2. Pin --help for every wipestation subcommand.
+- id: "3"
+  title: Feature variant coverage and pinned v2 cert fixture
+  description: >-
+    CAP-3 and CAP-4.
