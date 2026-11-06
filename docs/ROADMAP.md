@@ -177,9 +177,11 @@ and the drift-gate contract).
 **W1 — Skeleton and honest positioning** *(no hardware claims)*
 - ~~W1.1 `sites/www` Astro scaffold, Tailwind theme~~, CI build. *Scaffold and theme
   shipped 2026-11-05 (CONTEXT §10.2); the CI build waits on §0.5.*
-- W1.2 Landing page: problem, the offline-verifiable cert, what we are not
+- ~~W1.2 Landing page: problem, the offline-verifiable cert, what we are not
   (CONTEXT §3 including "What we are not" — that section is unusually good
-  marketing copy already).
+  marketing copy already).~~ *Shipped 2026-11-06 (CONTEXT §10.2): hero, problem, the
+  offline-verifiable certificate, differentiators, "what we are not" (competitors unnamed)
+  and one early-access CTA to a stub `/early-access/`. The copy awaits vendor sign-off.*
 - W1.3 Standards page: NIST R2 / IEEE 2883 posture, with certification
   *roadmap* clearly labelled as future (CONTEXT §13).
 - ~~W1.4 Capability-status component + frontmatter schema (W-R12), with the

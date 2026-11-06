@@ -1,0 +1,30 @@
+---
+/**
+ * Early-access stub (marketing-site story 2): the landing page's primary CTA
+ * needs a real target. Story 3 replaces this body with the sign-up form. No
+ * form and no address here: nothing is collected.
+ */
+import Base from "../layouts/Base.astro";
+---
+
+<Base
+  title="Early access"
+  description="What early access to Wipestation means. Sign-up is not open yet, and this page collects nothing."
+>
+  <h1 class="text-3xl font-bold tracking-tight">Early access</h1>
+  <div class="mt-4 max-w-prose space-y-3 text-slate-700">
+    <p>
+      Early access means trying pre-release builds of Wipestation before launch and helping decide
+      what ships first. Every pre-release build runs against simulated drives: no real storage
+      hardware is involved yet.
+    </p>
+    <p class="font-semibold text-slate-900">
+      Sign-up is not open yet. Nothing is collected on this page.
+    </p>
+    <p>
+      Until it opens, the
+      <a href="/capabilities/" class="underline underline-offset-2">capabilities page</a>
+      shows what is in development and what is planned.
+    </p>
+  </div>
+</Base>

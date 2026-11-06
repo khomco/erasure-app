@@ -13,6 +13,21 @@ pnpm --filter www test          # vitest, no network, no browser
 pnpm --filter www lighthouse    # build + preview + Lighthouse in local headless Chrome; fails < 90
 ```
 
+## Pages
+
+- `/` (`src/pages/index.astro`): the landing page. Hero with the pre-launch notice and the one
+  primary call to action (`data-cta="primary"`, to `/early-access/`), then the problem, the
+  offline-verifiable certificate, differentiators, "what we are not", and a closing early-access
+  block that uses a secondary link. Competitors are not named in copy, and the copy awaits
+  vendor sign-off.
+- `/capabilities/`: every capability with its status.
+- `/early-access/`: a stub with no form and no address, so the CTA has a real target. Story 3
+  replaces it with the sign-up form.
+
+`test/pages.test.ts` renders real pages with the Astro container (`vitest.config.ts` uses
+`getViteConfig`, so `.astro` files compile in tests) and runs `checkPage` over them. A bare
+overclaim therefore fails `pnpm test` as well as `astro build`. To test a new page, add it there.
+
 ## Honest claims are enforced, not remembered
 
 - `src/data/capabilities.ts` is the only list of capabilities the site may mention, each with
