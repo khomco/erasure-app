@@ -1,0 +1,16 @@
+- id: "1"
+  title: Astro site scaffold and capability-status guard
+  description: >-
+    CAP-3 and CAP-4. sites/www scaffold, shared capability list, the
+    overclaim test, static build checks.
+- id: "2"
+  title: Landing page
+  description: >-
+    CAP-1. Problem, offline-verifiable certificate, differentiators, what we
+    are not, one early-access call to action.
+  done_checkpoint: true
+- id: "3"
+  title: Product, standards, segments, pricing, contact and legal pages
+  description: >-
+    CAP-2. Static pricing placeholder; early-access form posts nowhere yet.
+  done_checkpoint: true

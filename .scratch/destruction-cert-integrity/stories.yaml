@@ -12,10 +12,3 @@
   description: >-
     CAP-3. Map runner not-found and invalid-transition errors to proper
     statuses on the job and manifest routes.
-- id: "4"
-  title: Certify destruction of a never-erased drive
-  description: >-
-    CAP-4. Implement whatever DECISIONS.md D9 resolves. If D9 is still open,
-    HALT as blocked with the D9 question.
-  spec_checkpoint: true
-  done_checkpoint: true

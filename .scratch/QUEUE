@@ -1,10 +1,27 @@
 # Order the driver (scripts/bmad-driver.py --all) runs spec folders in.
 # One folder per line; '#' lines are comments. Add a folder here when its
 # blocking decision in DECISIONS.md lands.
+
+# 1. Pre-launch marketing: something to show and drive traffic to, first.
+marketing-site
+
+# 2. The commercial platform (ADR-0006, ADR-0007), all verifiable locally.
+hub-foundation
+portal-accounts
+lead-capture
+offerings-and-payments
+licence-delivery
+software-downloads
+commerce-end-to-end
+
+# 3. Station trust and correctness.
 docs-truth-up
 destruction-cert-integrity
+destruction-attestation
 licensing-as-built
-desktop-parity
 licence-visibility
+
+# 4. Station usability.
+desktop-parity
 bench-throughput-inbox
 drift-tests

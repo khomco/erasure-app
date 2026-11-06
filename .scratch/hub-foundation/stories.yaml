@@ -1,0 +1,21 @@
+- id: "1"
+  title: wipe-hub crate, compose file, config and health
+  description: >-
+    CAP-1 and CAP-6. New crate, compose.yaml with Postgres and Mailpit, config
+    loading, GET /api/health.
+  spec_checkpoint: true
+- id: "2"
+  title: Migrations and the per-test database harness
+  description: >-
+    CAP-2 and CAP-3. sqlx migrations at start-up, disposable DB per test,
+    Mailpit client, fail-not-skip when Postgres is down.
+- id: "3"
+  title: Append-only audit log
+  description: >-
+    CAP-4. audit_log table and audit::record, with immutability test.
+- id: "4"
+  title: Portal app shell served by the hub
+  description: >-
+    CAP-5. apps/portal package, pnpm workspace, hub serves it with SPA
+    fallback.
+  done_checkpoint: true

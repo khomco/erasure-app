@@ -1,6 +1,6 @@
 ---
 id: SPEC-destruction-cert-integrity
-companions: [../audit-2026-11-05/shipped-claims.md, ../DECISIONS.md]
+companions: [../audit-2026-11-05/shipped-claims.md]
 sources: []
 ---
 
@@ -23,9 +23,6 @@ A mandate to meet: the product's claim is that every disposition is attested. Th
 - **CAP-3**
   - **intent:** API clients get the right status for runner errors.
   - **success:** Unknown Job ids return 404 and invalid transitions 409 from start/abort/escalate/cosign, not 500; tests cover each.
-- **CAP-4**
-  - **intent:** A drive destroyed without any erasure attempt is handled the way decision D9 resolves.
-  - **success:** Defined by D9; until D9 is decided this story must halt at planning.
 
 ## Constraints
 
@@ -38,12 +35,9 @@ A mandate to meet: the product's claim is that every disposition is attested. Th
 ## Non-goals
 
 - Per-person supervisor keys (needs D2).
-- Changing what the PendingCoSign certificate says (D9b).
+- The attestation redesign (ADR-0011, `destruction-attestation`); keep these fixes compatible with it.
 
 ## Success signal
 
 - No sequence of HTTP calls can produce a `destroyed` Job without a certificate, or a certificate co-signed twice.
 
-## Open Questions
-
-- D9 (in DECISIONS.md) for CAP-4.

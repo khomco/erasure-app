@@ -1,0 +1,9 @@
+- id: "1"
+  title: Lead API with abuse protection and consent
+  description: >-
+    CAP-1, CAP-2 and CAP-4 (storage, unsubscribe). Wire the marketing site's
+    forms to it.
+- id: "2"
+  title: Admin lead list, notes, export and erasure
+  description: >-
+    CAP-3 and CAP-4 (deletion).

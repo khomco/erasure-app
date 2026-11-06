@@ -1,0 +1,13 @@
+- id: "1"
+  title: Register a station and download its licence
+  description: >-
+    CAP-1, CAP-2 and CAP-5. Seat-checked issuance via wipe-license.
+  spec_checkpoint: true
+- id: "2"
+  title: Renewal reissue
+  description: >-
+    CAP-3.
+- id: "3"
+  title: Admin issue, inspect and revoke
+  description: >-
+    CAP-4.

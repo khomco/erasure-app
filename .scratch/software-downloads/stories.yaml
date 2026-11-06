@@ -1,0 +1,8 @@
+- id: "1"
+  title: Releases, artifact store and CLI publish
+  description: >-
+    CAP-1, CAP-4 and CAP-5.
+- id: "2"
+  title: Entitled downloads with audit
+  description: >-
+    CAP-2 and CAP-3.

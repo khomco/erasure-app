@@ -43,7 +43,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   mutating methods (`issue`, `unfreeze`, `cancel`, `verify`); handlers get read-only
   `enumerate`/`capabilities`. Bypassing the runner skips evidence capture.
 - Certificates are produced only as a side effect of a `JobBroadcast::JobStateChanged` into
-  `Erased`/`PendingCoSign` (`crates/wipe-server/src/app.rs:197`) — mutating `Job::state`
+  `Erased`/`PendingCoSign` (moving to `Erased`/`Destroyed` under ADR-0011) (`crates/wipe-server/src/app.rs:197`) — mutating `Job::state`
   without emitting that broadcast yields a silently uncertified job.
 - A `Certificate` is immutable once signed: `verify` re-canonicalizes against the stored hash,
   so co-signing must sign the same bytes.

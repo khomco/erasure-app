@@ -141,6 +141,8 @@ They share a domain, a design system and a build, and nothing else.
 
 ### 1.2 Architecture — proposed
 
+> **Superseded 2026-11-05 by [ADR-0006](adr/0006-web-presence-and-local-first-verification.md)** (marketing site + portal, local-first) and **[ADR-0007](adr/0007-hub-accounts-payments-persistence.md)** (the hub: accounts, Stripe, licence and software delivery), which also pull A1 and parts of A2/L1 forward. Kept below for its requirements.
+
 **One site, in-repo, at `sites/www/`.**
 
 - **Generator: Astro**, with Starlight for the docs collection and hand-built
@@ -591,8 +593,11 @@ Enterprise data model► O4.1                     ← CONTEXT §11 v0.2 #4
 
 ## 6. ADR candidates
 
-None of these are written. Each is load-bearing enough that building without it
-would bake in a decision nobody made deliberately.
+0006 and 0007 were written on 2026-11-05 in a different shape from the rows
+below (see the ADRs). 0008–0010 are still unwritten. ADR-0011 (destruction by
+operator attestation) took the next free number. Each remaining one is
+load-bearing enough that building without it would bake in a decision nobody
+made deliberately.
 
 | # | Decision | Blocks |
 | --- | --- | --- |

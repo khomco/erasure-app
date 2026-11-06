@@ -1,0 +1,24 @@
+- id: "1"
+  title: Sign-up, email verification and password sign-in
+  description: >-
+    CAP-1 and CAP-2 (password). Organizations and users, Argon2id, Mailpit
+    verification email.
+  spec_checkpoint: true
+- id: "2"
+  title: Sessions, CSRF and rate limiting
+  description: >-
+    CAP-3. Server-side sessions, cookie policy, CSRF on every mutating route.
+  spec_checkpoint: true
+- id: "3"
+  title: Magic link and password reset
+  description: >-
+    CAP-2 (magic link, reset). Single-use expiring tokens by email.
+- id: "4"
+  title: Account and team management
+  description: >-
+    CAP-4. Profile, organization, invites and roles in the portal.
+- id: "5"
+  title: Vendor admin area and tenant isolation
+  description: >-
+    CAP-5 and CAP-6. Admin bootstrap command, admin-only routes, isolation
+    test, customer search with audit.

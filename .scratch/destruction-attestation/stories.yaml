@@ -1,0 +1,21 @@
+- id: "1"
+  title: Destruction schema, techniques and identity assurance
+  description: >-
+    CAP-5 and CAP-6 plus the data model for CAP-1 to CAP-3, in wipe-common,
+    wipe-license (OperatorSso) and the TS mirror.
+  spec_checkpoint: true
+- id: "2"
+  title: Record for destruction
+  description: >-
+    CAP-1. Runner transition, route, and the scan-and-attest screen.
+- id: "3"
+  title: Destruction runs, completion and concurrence policy
+  description: >-
+    CAP-2 and CAP-3. Rework manifests into destruction runs.
+- id: "4"
+  title: Certificate schema v3 signed once at Destroyed
+  description: >-
+    CAP-4. Move cert generation to Destroyed, everything inside the signed
+    bytes, verify-cert checks it, v2 still verifies.
+  spec_checkpoint: true
+  done_checkpoint: true

@@ -1,0 +1,24 @@
+- id: "1"
+  title: Offerings admin
+  description: >-
+    CAP-1. Offerings with grants, publish and retire.
+- id: "2"
+  title: PaymentProvider trait, Fake provider and checkout
+  description: >-
+    CAP-2 and CAP-5 (Fake). Orders and the checkout flow end to end on Fake.
+  spec_checkpoint: true
+- id: "3"
+  title: Stripe provider and verified idempotent webhooks
+  description: >-
+    CAP-3, CAP-5 (Stripe) and CAP-7. Signature check, event store,
+    replay-safety, recorded fixtures.
+  spec_checkpoint: true
+- id: "4"
+  title: Fulfilment into entitlements, renewal and cancellation
+  description: >-
+    CAP-4.
+- id: "5"
+  title: Public offerings API and live pricing page
+  description: >-
+    CAP-6.
+  done_checkpoint: true

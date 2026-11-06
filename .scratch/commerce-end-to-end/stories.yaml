@@ -1,0 +1,9 @@
+- id: "1"
+  title: Commerce demo script
+  description: >-
+    CAP-1.
+  done_checkpoint: true
+- id: "2"
+  title: Local platform docs and development banner
+  description: >-
+    CAP-2 and CAP-3.

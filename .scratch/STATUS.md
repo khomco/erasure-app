@@ -20,11 +20,11 @@ phases are blocked on decisions rather than on code.
 | Item | State |
 |---|---|
 | T0.1 merge branches | ✅ done 2026-11-05 (c9a9214) |
-| T0.2 ADR-0006 site + drift gates | not started — D1 |
-| T0.3 ADR-0007 hub persistence + tenancy | not started — D5 |
+| T0.2 ADR-0006 site | ✅ decided 2026-11-05 (ADR-0006, ADR-0007) |
+| T0.3 ADR-0007 hub persistence + tenancy | ✅ decided 2026-11-05 (Postgres, organizations); vendor-root custody still open — D5 |
 | T0.4 ADR-0009 identity / auth / RBAC / PXE | not started — D2 |
 | T0.5 evaluation stance | default decided **and implemented** by ADR-0005 §5; needs ratification — D3 |
-| (new) CI | none exists — D1 |
+| (new) CI | none exists; not blocking — ADR-0006 makes every check runnable locally |
 
 ## Surfaces
 
@@ -33,8 +33,8 @@ in `DECISIONS.md` · **HW** needs real hardware · **→x** waits for item x.
 
 | Surface | Started? | Buildable now | Blocked |
 |---|---|---|---|
-| **W** website + docs | no | route/CLI/feature drift tests without a site (`drift-tests`) | everything else on D1; W3.4 on HW |
-| **A** control plane | no (seams: `ControlPlaneStore`, `HttpLicenseClient` stubs) | — | D5, D6 |
+| **W** website + docs | no | marketing site + lead capture (`marketing-site`, `lead-capture`); drift tests | docs pages after the site exists; W3.4 on HW |
+| **A** control plane | no | the commercial hub: accounts, offerings, Stripe, licence delivery, downloads (ADR-0007) | fleet console and station sync on D6; production keys on D5 |
 | **O** operator portal | partly (single-select bay map, per-card attention states) | O1.4 batch start, O2.1 exception inbox, O3.3 scanner input (`bench-throughput-inbox`); O3.5 licence status (`licence-visibility`) | O1.1–O1.3 on D2; O2.2 on D10; O4 on D11 |
 | **L** licensing tiers | partly (chain, entitlements, offline lease) | lease persistence, FileCounter, free-tier count (`licensing-as-built`); bench status + expiry warning (`licence-visibility`) | L1.1/L1.2 on D3; L2 on D4; L3 on D5/D6 |
 
@@ -55,12 +55,11 @@ in `DECISIONS.md` · **HW** needs real hardware · **→x** waits for item x.
 
 ## The queue the driver runs (`QUEUE`)
 
-1. `docs-truth-up` — make README / ARCHITECTURE / ADRs / design docs say what the code does
-2. `destruction-cert-integrity` — finish the Destroy path's correctness gaps (one story waits on D9)
-3. `licensing-as-built` — make ADR-0005's lease and counting claims true
-4. `desktop-parity` — the Tauri shell gets what the CLI station has
-5. `licence-visibility` — licence state and `evaluation` visible at the bench
-6. `bench-throughput-inbox` — batch start, exception inbox, scanner input
-7. `drift-tests` — routes, CLI help, entitlements and a pinned cert fixture as golden tests
+Re-planned 2026-11-05 after ADR-0006, ADR-0007 and ADR-0011.
+
+1. **Pre-launch marketing:** `marketing-site`.
+2. **Commercial platform**, all verifiable on a laptop: `hub-foundation`, `portal-accounts`, `lead-capture`, `offerings-and-payments`, `licence-delivery`, `software-downloads`, `commerce-end-to-end`.
+3. **Station trust:** `docs-truth-up`, `destruction-cert-integrity`, `destruction-attestation`, `licensing-as-built`, `licence-visibility`.
+4. **Station usability:** `desktop-parity`, `bench-throughput-inbox`, `drift-tests`.
 
 Everything after these needs at least one decision from `DECISIONS.md`.
