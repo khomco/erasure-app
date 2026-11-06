@@ -1,0 +1,35 @@
+# Local dependencies for wipe-hub (ADR-0007). `docker compose up -d`, then
+# `cargo run -p wipe-hub -- serve`. Ports are published on 127.0.0.1 only;
+# Postgres uses host port 55432 because 5432/5433 are often taken.
+name: wipestation
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wipehub
+      POSTGRES_PASSWORD: wipehub
+      POSTGRES_DB: wipehub
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wipehub -d wipehub"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # Dev mail catcher: SMTP on 1025, web UI and API on http://127.0.0.1:8025.
+  mailpit:
+    image: axllent/mailpit:v1.33.0
+    environment:
+      # Without this Mailpit reverse-resolves each client before its 220
+      # greeting, which can stall past the hub's 2 s health probe.
+      MP_SMTP_DISABLE_RDNS: "true"
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+
+volumes:
+  postgres-data:

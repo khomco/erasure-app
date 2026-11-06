@@ -422,6 +422,9 @@ is additive.
 - **mDNS:** `mdns-sd` (pure-Rust).
 - **Signing:** Ed25519 via `ed25519-dalek`.
 - **Local DB (when persistence lands):** SQLite via `rusqlite`.
+- **Hub (`wipe-hub`, vendor side):** Axum + **Postgres via `sqlx`**
+  (runtime queries, no compile-time macros); Postgres and Mailpit for local
+  development from the root `compose.yaml` (ADR-0007).
 - **Mock backend:** `wipe-engine-mock` until Linux ioctl backend is ready.
 
 ### Single binary, one origin
@@ -686,6 +689,7 @@ folder or in `.scratch/DECISIONS.md`.
 | Vitest suite over the frontend's pure domain modules | §12 | ✅ | |
 | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
 | Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check; landing page (problem, offline-verifiable certificate, differentiators, "what we are not", one early-access CTA); product, standards posture (certification roadmap labelled future), segment (ITAD, enterprise IT, government), pricing ("early-access pricing on request"), contact, privacy and terms pages; early-access and contact forms | ADR-0006 / ROADMAP W1.1–W1.4 | ✅ partial | The forms post nowhere (no `action`, submit disabled) until `lead-capture` adds `POST /api/leads`; pricing has no amounts until `offerings-and-payments`; privacy and terms are placeholders to publish before launch; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); copy and statuses await vendor sign-off |
+| Vendor hub foundation — `crates/wipe-hub` (`wipe-hub serve`), flag/`WIPE_HUB_*` env config validated at start-up (`fake`\|`stripe` payment provider; `stripe` refuses to start without a webhook secret; optional 32-byte vendor root seed file, warned as file-held on every start), lazy Postgres pool, `GET /api/health` probing Postgres and SMTP (≤2 s each; 503 `degraded` when either is down), root `compose.yaml` with Postgres and Mailpit | ADR-0007 / ROADMAP A1.1 | ✅ partial | No migrations, test-DB harness, Mailpit client, audit log or portal serving yet (`hub-foundation` stories 2–4); no accounts, payments or licence issuance; vendor root custody is a file (production must not launch on it, ROADMAP A1.5); `cargo test --workspace` now needs `docker compose up -d` |
 
 ## 11. Deferred — known and committed
 

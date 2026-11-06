@@ -1,0 +1,37 @@
+[package]
+name = "wipe-hub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Vendor-side hub: accounts, payments and licence delivery (ADR-0007)"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "wipe-hub"
+path = "src/main.rs"
+
+# ADR-0007 §1: the only sibling crates allowed here are wipe-common, wipe-cert
+# and wipe-license, and no station crate may depend on wipe-hub
+# (enforced by tests/deps.rs).
+[dependencies]
+wipe-common = { path = "../wipe-common" }
+wipe-cert = { path = "../wipe-cert" }
+wipe-license = { path = "../wipe-license" }
+axum = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tempfile = { workspace = true }

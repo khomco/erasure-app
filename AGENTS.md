@@ -22,7 +22,13 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 
 ## Running and verifying
 
-- `cargo test --workspace` — 138 tests, ~30s.
+- `cargo test --workspace` — 161 tests, ~30s. Needs `docker compose up -d` first (root
+  `compose.yaml`: Postgres on `127.0.0.1:55432`, Mailpit SMTP `:1025`, UI/API `:8025`):
+  `wipe-hub`'s green health test fails, never skips, when they are down.
+- Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and
+  `curl 127.0.0.1:7900/api/health`. Flags have `WIPE_HUB_*` env twins whose defaults match the
+  compose file; `--payment-provider stripe` refuses to start without
+  `WIPE_HUB_STRIPE_WEBHOOK_SECRET`. No `sqlx::query!` macros: there is no build-time database.
 - Never pipe `cargo test` through `grep`/`awk` to summarize: compile errors are discarded and
   a broken build prints as a clean run (68844bf).
 - Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 200 tests, under a second.
