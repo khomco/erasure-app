@@ -54,7 +54,11 @@ for pair in "7878:demo-station-A" "7879:demo-station-B"; do
   want="${pair##*:}"
   got=""
   for _ in $(seq 1 30); do
-    got=$(curl -fsS "http://127.0.0.1:${port}/api/station" 2>/dev/null | jq -r '.id // empty')
+    # `|| true` is load-bearing: under `set -e` a failed assignment aborts the
+    # script, so without it the first connection-refused (a station needs
+    # ~500ms to bind) killed the run with curl's exit 7 before this loop could
+    # retry even once — and the diagnostics below were unreachable.
+    got=$(curl -fsS "http://127.0.0.1:${port}/api/station" 2>/dev/null | jq -r '.id // empty') || true
     if [[ "$got" == "$want" ]]; then break; fi
     sleep 0.2
   done
@@ -82,8 +86,10 @@ echo "    B public key: $PK_B"
 # Give mDNS a few seconds to converge.
 echo "==> Waiting for mDNS discovery (up to 10s)..."
 for _ in $(seq 1 50); do
-  PEERS_A=$(curl -s http://127.0.0.1:7878/api/fleet/peers | jq 'length')
-  PEERS_B=$(curl -s http://127.0.0.1:7879/api/fleet/peers | jq 'length')
+  # Same reason as the readiness probe: a retry loop that aborts on the first
+  # failure is not a retry loop.
+  PEERS_A=$(curl -s http://127.0.0.1:7878/api/fleet/peers | jq 'length') || true
+  PEERS_B=$(curl -s http://127.0.0.1:7879/api/fleet/peers | jq 'length') || true
   if [[ "$PEERS_A" -gt 0 && "$PEERS_B" -gt 0 ]]; then
     break
   fi
@@ -118,7 +124,7 @@ echo "    Job ${JOB_A} started"
 # `completed` is an ErasureEventState, not a JobState — do not test for it here.
 STATE=""
 for _ in $(seq 1 50); do
-  STATE=$(curl -s "http://127.0.0.1:7878/api/jobs/${JOB_A}" | jq -r '.state.state')
+  STATE=$(curl -s "http://127.0.0.1:7878/api/jobs/${JOB_A}" | jq -r '.state.state') || true
   case "$STATE" in
     erased|destroyed|quarantined|aborted) break ;;
   esac

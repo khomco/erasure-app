@@ -392,3 +392,83 @@ async fn destroy_path_via_manifest_cosign_produces_two_signatures() {
         .unwrap();
     assert_eq!(job["state"]["state"], "destroyed");
 }
+
+/// The bench-setup preview POSTs an unsaved draft here for live occupancy
+/// (ADR-0002: the matching rules have one home, so the frontend must not
+/// re-implement them). The handler was written and documented but never
+/// routed, so the request fell through to the static handler and came back
+/// 405 — covered here at the HTTP layer, which is where the gap was.
+#[tokio::test]
+async fn unsaved_topology_resolves_as_a_dry_run() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // The draft an editor would be holding: this station's config, relabelled.
+    let cfg_resp = client
+        .get(format!("{base}/api/bay-topology/config"))
+        .send()
+        .await
+        .unwrap();
+    let cfg_status = cfg_resp.status();
+    let cfg_body = cfg_resp.text().await.unwrap();
+    assert_eq!(
+        cfg_status, 200,
+        "GET /api/bay-topology/config returned {cfg_status}: {cfg_body}"
+    );
+    let mut draft: serde_json::Value = serde_json::from_str(&cfg_body).unwrap();
+    draft["label"] = json!("Draft bench");
+
+    let resp = client
+        .post(format!("{base}/api/bay-topology/resolve"))
+        .json(&draft)
+        .send()
+        .await
+        .unwrap();
+    // Status alone is not enough: with no dist directory configured, an
+    // unrouted POST falls through to the landing page and answers 200 with
+    // HTML. The content type is what distinguishes the handler from the
+    // fallback.
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body = resp.text().await.unwrap();
+    assert_eq!(
+        status, 200,
+        "POST /api/bay-topology/resolve must be routed, got {status}"
+    );
+    assert!(
+        content_type.starts_with("application/json"),
+        "expected the resolve handler, got {content_type} — the request fell \
+         through to the static/landing fallback: {}",
+        body.chars().take(120).collect::<String>()
+    );
+
+    let resolved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(resolved["topology"]["label"], "Draft bench");
+
+    // Resolution actually ran against the attached devices rather than
+    // echoing the draft back.
+    let occupied = resolved["occupancy"].as_array().unwrap().len();
+    assert!(
+        occupied >= 4,
+        "expected the mock backend's drives to be placed, got {occupied}"
+    );
+
+    // Dry run: the draft is not persisted and the stored config is untouched.
+    let after: serde_json::Value = client
+        .get(format!("{base}/api/bay-topology/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_ne!(
+        after["label"], "Draft bench",
+        "resolve must not persist the draft it was given"
+    );
+}

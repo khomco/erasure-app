@@ -248,6 +248,10 @@ pub fn router(state: AppState) -> Router {
             "/api/bay-topology/config",
             get(handlers::bay_topology_config),
         )
+        .route(
+            "/api/bay-topology/resolve",
+            post(handlers::resolve_bay_topology),
+        )
         .route("/api/bay-topology/store", get(handlers::bay_topology_store))
         .route("/api/enclosure-catalog", get(handlers::enclosure_catalog))
         .route(

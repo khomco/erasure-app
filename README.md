@@ -53,7 +53,7 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
 # Prereqs: rustup-installed stable toolchain, pnpm, jq
 # (the CI/demo scripts source ~/.cargo/env automatically).
 
-# Run all Rust tests (100 across 6 crates):
+# Run all Rust tests (101 across 6 crates):
 cargo test --workspace
 
 # Build + typecheck + test the frontend:
@@ -150,7 +150,7 @@ to `Destroyed`.
 - **PXE-ephemeral by design** — **no persistent local state for evidence**: certs are signed in-RAM and shipped to lead/hub/cloud or downloaded, never written to local storage. *Configuration* (the bay topology) is a different matter and does persist where the station has somewhere to put it — see [ADR-0003](docs/adr/0003-station-config-persistence.md) for the tiered store and why the distinction is drawn.
 - **Single binary, three frontends** — the Tauri window, the Axum HTTP API (for tablets and automation), and a future Ratatui TUI all wrap the same engine.
 
-## Test inventory (100 Rust + 200 TypeScript, all passing)
+## Test inventory (101 Rust + 200 TypeScript, all passing)
 
 | Crate / file | Tests | Covers |
 | --- | --- | --- |
@@ -161,7 +161,7 @@ to `Destroyed`.
 | `wipe-cert/tests/sign_verify.rs` | 8 | sign+verify happy path, unknown-key rejection, tamper detection, JSON round-trip, activity chain carries erasure + verification, supervisor co-signature verifies independently, deterministic public-key-id, verifying-key round-trip |
 | `wipe-engine-mock/tests/end_to_end.rs` | 8 | NVMe crypto-erase happy path reaches `Erased`; SATA failure keeps the outer Job `InProgress` for an operator decision; enumerate; broadcast stream observes outer *and* inner transitions |
 | `wipe-fleet/tests/two_instance.rs` | 2 | Solo lead election, two-instance mutual discovery + cross-station election agreement |
-| `wipe-server/tests/http_e2e.rs` | 3 | Full HTTP flow → signed cert → offline verify; aborted job emits no cert; destroy-via-manifest-cosign produces two signatures |
+| `wipe-server/tests/http_e2e.rs` | 4 | Full HTTP flow → signed cert → offline verify; aborted job emits no cert; destroy-via-manifest-cosign produces two signatures; an unsaved topology resolves as a dry run (asserting JSON came back, since an unrouted POST answers 200 with the landing page) |
 
 | `wipe-server/tests/topology_store.rs` | 15 | All four persistence tiers (ADR-0003); the write probe against a read-only directory; corrupt-config recovery; save-survives-restart; and that a path binding learned by identify mode keeps its bay when a *different* drive is swapped into that port |
 | `apps/desktop` (`pnpm test`) | 200 | `topologyEdit` (17): numbering runs across every order/origin/offset, grid rebuilds preserving operator edits by position, binding rules, validation. `identify` (12): hot-plug diffing — a reused port is a *different* drive. `shells/catalog` (8): catalog↔artwork drift in both directions, and one bundled model stays on the generic shell so the fallback stays exercised. `shells/contract` (163): every registered shell built at four content sizes, asserting the bay slot equals the content and the legibility rules hold, self-tested with deliberately broken shells |
