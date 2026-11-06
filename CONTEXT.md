@@ -689,7 +689,7 @@ folder or in `.scratch/DECISIONS.md`.
 | Vitest suite over the frontend's pure domain modules | §12 | ✅ | |
 | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
 | Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check; landing page (problem, offline-verifiable certificate, differentiators, "what we are not", one early-access CTA); product, standards posture (certification roadmap labelled future), segment (ITAD, enterprise IT, government), pricing ("early-access pricing on request"), contact, privacy and terms pages; early-access and contact forms | ADR-0006 / ROADMAP W1.1–W1.4 | ✅ partial | The forms post nowhere (no `action`, submit disabled) until `lead-capture` adds `POST /api/leads`; pricing has no amounts until `offerings-and-payments`; privacy and terms are placeholders to publish before launch; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); copy and statuses await vendor sign-off |
-| Vendor hub foundation — `crates/wipe-hub` (`wipe-hub serve`), flag/`WIPE_HUB_*` env config validated at start-up (`fake`\|`stripe` payment provider; `stripe` refuses to start without a webhook secret; optional 32-byte vendor root seed file, warned as file-held on every start), lazy Postgres pool, embedded sqlx migrations applied before listening (start-up exits within ~5 s if Postgres is unreachable), append-only `audit_log` table (ADR-0007 §6; written only through `audit::record`, which takes any executor so an action and its audit row share a transaction; UPDATE/DELETE/TRUNCATE rejected by triggers), `GET /api/health` probing Postgres and SMTP (≤2 s each; 503 `degraded` when either is down), root `compose.yaml` with Postgres and Mailpit, integration-test harness (`tests/support`: per-test `TestDb` databases dropped with their guard, `Mailpit` API client) | ADR-0007 / ROADMAP A1.1, A1.4 | ✅ partial | No portal serving yet (`hub-foundation` story 4); nothing calls `audit::record` yet (later stories add the call sites); append-only does not stop the table owner (the hub's own role) or a superuser disabling the triggers (a separate unprivileged runtime role is a deployment decision, ROADMAP §0.5); no accounts, payments or licence issuance; vendor root custody is a file (production must not launch on it, ROADMAP A1.5); `cargo test --workspace` now needs `docker compose up -d` |
+| Vendor hub foundation — `crates/wipe-hub` (`wipe-hub serve`), flag/`WIPE_HUB_*` env config validated at start-up (`fake`\|`stripe` payment provider; `stripe` refuses to start without a webhook secret; optional 32-byte vendor root seed file, warned as file-held on every start), lazy Postgres pool, embedded sqlx migrations applied before listening (start-up exits within ~5 s if Postgres is unreachable), append-only `audit_log` table (ADR-0007 §6; written only through `audit::record`, which takes any executor so an action and its audit row share a transaction; UPDATE/DELETE/TRUNCATE rejected by triggers), `GET /api/health` probing Postgres and SMTP (≤2 s each; 503 `degraded` when either is down), root `compose.yaml` with Postgres and Mailpit, integration-test harness (`tests/support`: per-test `TestDb` databases dropped with their guard, `Mailpit` API client), portal serving (`apps/portal/dist` under the working directory or `--portal-dir`/`WIPE_HUB_PORTAL_DIR`; SPA fallback to `index.html`, `/assets/*` with no fallback, unknown `/api/*` paths JSON 404s; an explicit `--portal-dir` without `index.html` refuses to start, an unbuilt default is warned and non-API paths 404 naming the build) | ADR-0007 / ADR-0006 §1 / ROADMAP A1.1, A1.4 | ✅ partial | The portal (`apps/portal`) is an empty shell: one page showing hub status, no sign-in or other routes; nothing calls `audit::record` yet (later stories add the call sites); append-only does not stop the table owner (the hub's own role) or a superuser disabling the triggers (a separate unprivileged runtime role is a deployment decision, ROADMAP §0.5); no accounts, payments or licence issuance; vendor root custody is a file (production must not launch on it, ROADMAP A1.5); `cargo test --workspace` now needs `docker compose up -d` |
 
 ## 11. Deferred — known and committed
 
@@ -973,7 +973,9 @@ and resolve. None of these have a decided answer.
 - **mDNS / DNS-SD** — multicast DNS service discovery; how stations
   find each other on a LAN.
 - **Lead** — the elected canonical station on a LAN.
-- **Hub** — multi-LAN / multi-site coordinator (deferred).
+- **Hub** — station-side multi-LAN / multi-site coordinator (deferred).
+  Distinct from the vendor-side `wipe-hub` (ADR-0007), which is the
+  control plane, not a station coordinator.
 - **Job** — the outcome-bearing unit of processing one Asset to a
   terminal disposition (Erased / Destroyed / Quarantined / Aborted);
   composes one or more typed events; signs one Certificate.
@@ -1032,6 +1034,10 @@ and resolve. None of these have a decided answer.
 - **Revocation list** — signed, time-windowed list of invalidated
   licences, pulled when a station is online. A station that never
   connects can never learn that its licence was revoked.
+- **Portal (`apps/portal`)** — the customer and vendor-admin web app
+  served by `wipe-hub` from its API's origin (ADR-0006 §1); home of the
+  vendor and fleet consoles' customer-facing UI. Not the operator's bench
+  UI (`apps/desktop`) and not the verification portal.
 - **Verification portal / playground** — public, client-side certificate
   verification. Runs the same code path as offline `verify-cert`, with
   no network call and no lookup against us.

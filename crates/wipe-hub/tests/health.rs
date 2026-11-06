@@ -50,6 +50,7 @@ fn config(database_url: &str, smtp_port: u16) -> Config {
         payment_provider: wipe_hub::PaymentProvider::Fake,
         stripe_webhook_secret: None,
         vendor_root_seed: None,
+        portal_dir: None,
     };
     Config::from_args(args).unwrap()
 }

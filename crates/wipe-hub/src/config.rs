@@ -20,6 +20,13 @@ pub const DEFAULT_SMTP_HOST: &str = "127.0.0.1";
 pub const DEFAULT_SMTP_PORT: u16 = 1025;
 pub const DEFAULT_PUBLIC_BASE_URL: &str = "http://127.0.0.1:7900";
 
+/// Where the portal is looked for when `--portal-dir` is absent, relative to
+/// the working directory.
+pub const DEFAULT_PORTAL_DIR: &str = "apps/portal/dist";
+
+/// The command that builds the portal, named in warnings and errors.
+pub const PORTAL_BUILD_HINT: &str = "cd apps/portal && pnpm build";
+
 /// Env var that carries the Stripe webhook signing secret.
 pub const STRIPE_WEBHOOK_SECRET_ENV: &str = "WIPE_HUB_STRIPE_WEBHOOK_SECRET";
 
@@ -64,6 +71,10 @@ pub struct Args {
     /// Path to a 32-byte vendor root seed. Absent: licence issuance is unavailable.
     #[arg(long, env = "WIPE_HUB_VENDOR_ROOT_SEED")]
     pub vendor_root_seed: Option<PathBuf>,
+    /// Built portal directory (must hold `index.html`). Absent: `apps/portal/dist`
+    /// under the working directory if built, else the portal is not served.
+    #[arg(long, env = "WIPE_HUB_PORTAL_DIR")]
+    pub portal_dir: Option<PathBuf>,
 }
 
 /// A loaded vendor root and where it came from.
@@ -83,6 +94,8 @@ pub struct Config {
     pub stripe_webhook_secret: Option<String>,
     /// `None` means licence issuance is unavailable.
     pub vendor_root: Option<FileVendorRoot>,
+    /// Built portal to serve at `/`. `None` means the portal is not served.
+    pub portal_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -101,6 +114,12 @@ pub enum ConfigError {
     },
     #[error("vendor root seed {} is not a 32-byte seed (got {len} bytes)", path.display())]
     SeedWrongLength { path: PathBuf, len: usize },
+    #[error(
+        "--portal-dir {} has no index.html: build the portal ({PORTAL_BUILD_HINT}) \
+         or fix the path",
+        path.display()
+    )]
+    PortalDirInvalid { path: PathBuf },
 }
 
 impl Config {
@@ -128,6 +147,9 @@ impl Config {
             None => None,
         };
 
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let portal_dir = resolve_portal_dir(args.portal_dir, &cwd)?;
+
         Ok(Self {
             addr: args.addr,
             database_url: args.database_url,
@@ -137,7 +159,30 @@ impl Config {
             payment_provider: args.payment_provider,
             stripe_webhook_secret,
             vendor_root,
+            portal_dir,
         })
+    }
+}
+
+/// Resolve the portal directory. An explicit path without `index.html` is an
+/// error, never a silent fallback; without one, `<cwd>/apps/portal/dist` is
+/// used when it is built.
+pub fn resolve_portal_dir(
+    explicit: Option<PathBuf>,
+    cwd: &Path,
+) -> Result<Option<PathBuf>, ConfigError> {
+    match explicit {
+        Some(path) => {
+            if path.join("index.html").is_file() {
+                Ok(Some(path))
+            } else {
+                Err(ConfigError::PortalDirInvalid { path })
+            }
+        }
+        None => {
+            let dir = cwd.join(DEFAULT_PORTAL_DIR);
+            Ok(dir.join("index.html").is_file().then_some(dir))
+        }
     }
 }
 
@@ -163,6 +208,10 @@ impl fmt::Debug for Config {
                     .as_ref()
                     .map(|r| (r.path.display().to_string(), r.root.public_key_id())),
             )
+            .field(
+                "portal_dir",
+                &self.portal_dir.as_ref().map(|p| p.display().to_string()),
+            )
             .finish()
     }
 }
@@ -182,6 +231,16 @@ pub fn startup_warnings(config: &Config) -> Vec<String> {
              licence issuance is unavailable"
                 .to_string(),
         ),
+    }
+    if config.portal_dir.is_none() {
+        let looked = std::env::current_dir()
+            .map(|cwd| cwd.join(DEFAULT_PORTAL_DIR))
+            .unwrap_or_else(|_| PathBuf::from(DEFAULT_PORTAL_DIR));
+        out.push(format!(
+            "portal is not served: no built portal at {}; \
+             run `{PORTAL_BUILD_HINT}` or pass --portal-dir / WIPE_HUB_PORTAL_DIR",
+            looked.display()
+        ));
     }
     out
 }
@@ -234,6 +293,7 @@ mod tests {
             payment_provider: PaymentProvider::Fake,
             stripe_webhook_secret: None,
             vendor_root_seed: None,
+            portal_dir: None,
         }
     }
 
@@ -285,7 +345,10 @@ mod tests {
             VendorRoot::from_signing_key(SigningKey::from_seed([7u8; 32])).public_key_id();
         let r = c.vendor_root.as_ref().unwrap();
         assert_eq!(r.root.public_key_id(), expected_id);
-        let warnings = startup_warnings(&c);
+        let warnings: Vec<String> = startup_warnings(&c)
+            .into_iter()
+            .filter(|w| w.contains("vendor root"))
+            .collect();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("file-held"), "{warnings:?}");
         assert!(
@@ -374,7 +437,7 @@ mod tests {
     fn clap_defaults_match_the_constants() {
         use clap::CommandFactory;
         let smtp_port = DEFAULT_SMTP_PORT.to_string();
-        let expected: [(&str, Option<&str>); 8] = [
+        let expected: [(&str, Option<&str>); 9] = [
             ("addr", Some(DEFAULT_ADDR)),
             ("database_url", Some(DEFAULT_DATABASE_URL)),
             ("smtp_host", Some(DEFAULT_SMTP_HOST)),
@@ -383,6 +446,7 @@ mod tests {
             ("payment_provider", Some("fake")),
             ("stripe_webhook_secret", None),
             ("vendor_root_seed", None),
+            ("portal_dir", None),
         ];
         let cmd = Args::command();
         let mut seen = 0;
@@ -406,5 +470,86 @@ mod tests {
             seen += 1;
         }
         assert_eq!(seen, expected.len());
+    }
+
+    fn built_portal(root: &Path) -> PathBuf {
+        let dir = root.join(DEFAULT_PORTAL_DIR);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("index.html"), "<!doctype html>").unwrap();
+        dir
+    }
+
+    #[test]
+    fn explicit_portal_dir_with_index_is_used() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = built_portal(tmp.path());
+        let got = resolve_portal_dir(Some(dir.clone()), Path::new("/nonexistent")).unwrap();
+        assert_eq!(got, Some(dir));
+    }
+
+    #[test]
+    fn explicit_missing_portal_dir_is_an_error_naming_path_and_build() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("does-not-exist");
+        // Even with a built default present, an explicit wrong path never falls back.
+        built_portal(tmp.path());
+        let err = resolve_portal_dir(Some(path.clone()), tmp.path()).unwrap_err();
+        assert!(matches!(err, ConfigError::PortalDirInvalid { .. }), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+        assert!(msg.contains("pnpm build"), "{msg}");
+    }
+
+    #[test]
+    fn explicit_portal_dir_without_index_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("assets")).unwrap();
+        let err = resolve_portal_dir(Some(tmp.path().to_path_buf()), tmp.path()).unwrap_err();
+        assert!(matches!(err, ConfigError::PortalDirInvalid { .. }), "{err}");
+    }
+
+    #[test]
+    fn explicit_bad_portal_dir_fails_from_args() {
+        let mut a = args();
+        a.portal_dir = Some(PathBuf::from("/does/not/exist"));
+        let err = Config::from_args(a).unwrap_err();
+        assert!(matches!(err, ConfigError::PortalDirInvalid { .. }), "{err}");
+        assert!(err.to_string().contains("/does/not/exist"));
+    }
+
+    #[test]
+    fn absent_portal_dir_uses_built_cwd_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = built_portal(tmp.path());
+        assert_eq!(resolve_portal_dir(None, tmp.path()).unwrap(), Some(dir));
+    }
+
+    #[test]
+    fn absent_portal_dir_without_build_is_none_and_warns() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(resolve_portal_dir(None, tmp.path()).unwrap(), None);
+        // An unbuilt default (directory without index.html) is also None.
+        fs::create_dir_all(tmp.path().join(DEFAULT_PORTAL_DIR)).unwrap();
+        assert_eq!(resolve_portal_dir(None, tmp.path()).unwrap(), None);
+
+        let mut c = Config::from_args(args()).unwrap();
+        c.portal_dir = None;
+        let warnings = startup_warnings(&c);
+        let w = warnings
+            .iter()
+            .find(|w| w.contains("portal is not served"))
+            .unwrap_or_else(|| panic!("{warnings:?}"));
+        assert!(w.contains(PORTAL_BUILD_HINT), "{w}");
+        assert!(w.contains("--portal-dir"), "{w}");
+    }
+
+    #[test]
+    fn portal_dir_is_in_debug() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = built_portal(tmp.path());
+        let mut a = args();
+        a.portal_dir = Some(dir.clone());
+        let c = Config::from_args(a).unwrap();
+        assert!(format!("{c:?}").contains(&dir.display().to_string()));
     }
 }

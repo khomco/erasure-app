@@ -21,6 +21,7 @@ wipe-common = { path = "../wipe-common" }
 wipe-cert = { path = "../wipe-cert" }
 wipe-license = { path = "../wipe-license" }
 axum = { workspace = true }
+tower-http = { workspace = true }
 tokio = { workspace = true }
 sqlx = { workspace = true }
 clap = { workspace = true }

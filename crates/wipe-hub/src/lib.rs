@@ -1,5 +1,9 @@
 //! `wipe-hub`: the vendor-side service for accounts, payments and licence
-//! delivery (ADR-0007). It serves `/api/*` from one Axum origin.
+//! delivery (ADR-0007). It serves `/api/*` and the built portal
+//! (`apps/portal`, ADR-0006 §1) from one Axum origin: `/api/*` paths that
+//! match no route are JSON 404s and never fall through to the portal,
+//! `/assets/*` has no fallback, and any other unknown path gets the portal's
+//! `index.html` (SPA fallback).
 //!
 //! Dependency rule (ADR-0007 §1): this crate may depend on `wipe-common`,
 //! `wipe-cert` and `wipe-license` only, and no station crate may depend on it.
@@ -12,10 +16,13 @@ pub mod health;
 
 use std::sync::Arc;
 
-use axum::routing::get;
-use axum::Router;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::{any, get};
+use axum::{Json, Router};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use tokio::net::TcpListener;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
 
 pub use config::{startup_warnings, Args, Config, ConfigError, PaymentProvider};
@@ -41,9 +48,46 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let api = Router::new()
         .route("/api/health", get(health::health))
-        .with_state(state)
+        // Unknown API paths are JSON 404s, portal or not: a typo in a client
+        // must never get `index.html` back with a 200.
+        .route("/api", any(api_not_found))
+        .route("/api/", any(api_not_found))
+        .route("/api/*rest", any(api_not_found));
+
+    let site = match &state.config.portal_dir {
+        Some(dir) => {
+            // Vite fingerprints asset names, so a stale tab asking for an old
+            // hash must get a 404, never HTML parsed as JS: no fallback here.
+            let assets = ServeDir::new(dir.join("assets"));
+            let spa = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));
+            Router::new()
+                .nest_service("/assets", assets)
+                .fallback_service(spa)
+        }
+        None => Router::new().fallback(portal_not_built),
+    };
+
+    api.merge(site).with_state(state)
+}
+
+async fn api_not_found() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": "not found"})),
+    )
+}
+
+async fn portal_not_built() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        format!(
+            "not found: the portal is not served by this hub. Build it with `{}` \
+             or pass --portal-dir.\n",
+            config::PORTAL_BUILD_HINT
+        ),
+    )
 }
 
 /// Serve on an already-bound listener (tests bind port 0).
@@ -64,6 +108,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         %addr,
         public_base_url = %state.config.public_base_url,
         payment_provider = ?state.config.payment_provider,
+        portal_dir = ?state.config.portal_dir,
         "wipe-hub listening"
     );
     serve_on(listener, state).await

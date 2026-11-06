@@ -22,7 +22,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 
 ## Running and verifying
 
-- `cargo test --workspace` — 191 tests, ~30s. Needs `docker compose up -d` first (root
+- `cargo test --workspace` — 209 tests, ~30s. Needs `docker compose up -d` first (root
   `compose.yaml`: Postgres on `127.0.0.1:55432`, Mailpit SMTP `:1025`, UI/API `:8025`):
   `wipe-hub`'s compose-backed tests fail, never skip, when they are down.
 - Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and
@@ -39,6 +39,12 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 - Never pipe `cargo test` through `grep`/`awk` to summarize: compile errors are discarded and
   a broken build prints as a clean run (68844bf).
 - Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 200 tests, under a second.
+- Portal (ADR-0006 §1): `pnpm install` at the root, then `pnpm --filter portal build`,
+  `pnpm --filter portal typecheck`, `pnpm --filter portal test` (dev server on :5174, proxying
+  `/api` to the hub on :7900). `wipe-hub serve` serves `apps/portal/dist` under the working
+  directory, or `--portal-dir` / `WIPE_HUB_PORTAL_DIR`; unbuilt, it logs a warning and answers
+  non-API paths with a 404 naming the build. A `--portal-dir` without `index.html` refuses to
+  start. Unknown `/api/*` paths are JSON 404s and `/assets/*` never falls back to `index.html`.
 - Marketing site: `pnpm install` at the root, then `pnpm --filter www build` (fails on any
   overclaim — wrap the copy in `<Capability id>`, never weaken a guarded phrase), `pnpm --filter
   www typecheck`, `pnpm --filter www test`; `pnpm --filter www lighthouse` needs local Chrome.
