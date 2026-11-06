@@ -7,9 +7,11 @@
 
 pub mod app;
 pub mod handlers;
+pub mod licensing;
 pub mod store;
 pub mod ws;
 
 pub use app::*;
+pub use licensing::{LicenseContext, SigningDecision};
 pub use store::{StoreStatus, StoreTier, TopologyStore};
 

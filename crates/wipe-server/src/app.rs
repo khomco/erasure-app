@@ -48,6 +48,17 @@ pub struct AppState {
     /// by a site-local overlay, served to the UI so the builder and the bay
     /// map agree on what a given `model_ref` means.
     pub catalog: Arc<wipe_common::Catalog>,
+    /// Licensing state (ADR-0005). Never gates erasure — it only decides
+    /// whether a certificate carries a vendor attestation chain or is marked
+    /// `evaluation`.
+    ///
+    /// Behind a shared cell rather than a bare `Arc` because
+    /// `spawn_cert_generator` captures a clone of this state at construction
+    /// time. Replacing the `Arc` in a builder method afterwards would leave
+    /// the already-spawned task holding the pre-licence context — which is
+    /// exactly the bug that shipped the first time round: the station logged
+    /// "Licensed" and then emitted evaluation certificates.
+    pub license: Arc<RwLock<Arc<crate::licensing::LicenseContext>>>,
 }
 
 impl AppState {
@@ -84,6 +95,15 @@ impl AppState {
             )),
             simulator: None,
             catalog: Arc::new(wipe_common::Catalog::bundled()),
+            // Free tier until a host installs a licence. A station with no
+            // licence still erases and still signs — the certs are just
+            // marked evaluation.
+            license: Arc::new(RwLock::new(Arc::new(
+                crate::licensing::LicenseContext::unlicensed(
+                    "standalone",
+                    time::OffsetDateTime::now_utc(),
+                ),
+            ))),
         };
         state.spawn_cert_generator();
         state
@@ -126,6 +146,20 @@ impl AppState {
     pub fn with_catalog_overlay(mut self, overlay: &wipe_common::Catalog) -> Self {
         self.catalog = Arc::new(self.catalog.overlay(overlay));
         self
+    }
+
+    /// Install licensing state. Absent this the station runs free-tier.
+    ///
+    /// Writes *through* the shared cell so a cert generator already spawned
+    /// by the constructor picks it up.
+    pub fn with_license(self, license: Arc<crate::licensing::LicenseContext>) -> Self {
+        *self.license.write() = license;
+        self
+    }
+
+    /// Current licensing state.
+    pub fn license(&self) -> Arc<crate::licensing::LicenseContext> {
+        self.license.read().clone()
     }
 
     /// Attach a hot-plug simulator, enabling the `/api/sim/*` routes.
@@ -209,18 +243,37 @@ impl AppState {
                         job_for_cert.ended_at = Some(time::OffsetDateTime::now_utc());
                     }
                 }
+                // ADR-0005: licensing decides how the cert is *marked*, never
+                // whether the erasure happened. An unlicensed, expired or
+                // quota-exhausted station still signs — the cert just says so.
+                let decision = state
+                    .license()
+                    .signing_decision(time::OffsetDateTime::now_utc());
                 let Some(cert) = wipe_cert::Certificate::from_job(
                     &job_for_cert,
                     issuer,
                     validation,
                     media_status,
+                    decision.evaluation,
                 ) else {
                     tracing::warn!(%job_id, "Certificate::from_job returned None");
                     continue;
                 };
                 match wipe_cert::sign(cert, &state.signing_key) {
-                    Ok(signed) => {
-                        info!(%job_id, ?new_state, "certificate signed and stored");
+                    Ok(mut signed) => {
+                        if let Some(attestation) = decision.attestation {
+                            wipe_cert::attach_attestation(&mut signed, attestation);
+                        } else {
+                            tracing::info!(
+                                %job_id, status = ?decision.status,
+                                "certificate marked evaluation (no valid licence)"
+                            );
+                        }
+                        if !decision.evaluation {
+                            state.license().record_erasure();
+                        }
+                        info!(%job_id, ?new_state, evaluation = decision.evaluation,
+                              "certificate signed and stored");
                         state.certs.write().insert(job_id, signed);
                     }
                     Err(e) => {

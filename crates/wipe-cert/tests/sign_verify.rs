@@ -72,6 +72,9 @@ fn build_cert(job: &Job, key: &SigningKey) -> Certificate {
             damaged: false,
             notes: None,
         },
+        // These fixtures exercise the signature machinery, not licensing;
+        // an unlicensed station is the free-tier default (ADR-0005 §5).
+        true,
     )
     .unwrap()
 }

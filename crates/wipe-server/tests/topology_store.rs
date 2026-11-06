@@ -307,3 +307,61 @@ fn path_bindings_learned_by_identify_mode_persist_and_resolve() {
     assert!(r.occupancy.is_empty());
     assert_eq!(r.unplaced_devices.len(), 1);
 }
+
+// --- licensing wiring (ADR-0005) -------------------------------------------
+
+#[tokio::test]
+async fn installing_a_licence_after_construction_reaches_the_cert_generator() {
+    // Regression: `spawn_cert_generator` captures a clone of AppState in the
+    // constructor. When the licence lived behind a bare Arc that a builder
+    // method *replaced*, the already-spawned task kept the pre-licence
+    // context — so a station logged "Licensed" and then emitted evaluation
+    // certificates. The licence must be shared, not swapped.
+    use std::sync::Arc;
+    use wipe_server::licensing::LicenseContext;
+
+    let backend = Arc::new(wipe_engine_mock::MockBackend::fast_catalog());
+    let key = Arc::new(wipe_cert::SigningKey::generate());
+    let state = wipe_server::AppState::new(backend, None, key);
+
+    // A clone taken *before* installation stands in for the spawned task.
+    let captured = state.clone();
+    assert!(
+        captured.license().signing_decision(now_utc()).evaluation,
+        "a fresh station is free-tier"
+    );
+
+    let root = wipe_license::VendorRoot::generate();
+    let instance = wipe_cert::SigningKey::generate();
+    let ent = wipe_license::Entitlements {
+        customer_id: "c".into(),
+        customer_name: "C".into(),
+        quota: wipe_license::Quota::Unlimited,
+        scope: wipe_license::Scope::Site {
+            site_id: "s".into(),
+        },
+        not_before: now_utc() - time::Duration::days(1),
+        not_after: now_utc() + time::Duration::days(30),
+        features: vec![],
+        allowed_methods: wipe_license::AllowedMethods::All,
+        machine_binding: None,
+    };
+    let license = root
+        .issue("lic", instance.public_key_id(), ent, now_utc())
+        .unwrap();
+    let state = state.with_license(Arc::new(LicenseContext::licensed(
+        "station-1",
+        wipe_license::AttestationChain::new(license),
+        wipe_license::LeaseState::new(now_utc()),
+    )));
+
+    // The pre-installation clone must see it too, or certs go out unmarked.
+    let decision = captured.license().signing_decision(now_utc());
+    assert!(!decision.evaluation, "captured clone still unlicensed");
+    assert!(decision.attestation.is_some());
+    assert!(!state.license().signing_decision(now_utc()).evaluation);
+}
+
+fn now_utc() -> time::OffsetDateTime {
+    time::OffsetDateTime::now_utc()
+}

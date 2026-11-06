@@ -70,6 +70,15 @@ pub struct SignedCertificate {
     /// attached when the linked `DestructionManifest` is signed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub co_signatures: Vec<CoSignatureBlock>,
+    /// Vendor attestation chain (ADR-0005). `None` is a valid, fully
+    /// verifiable *evaluation* certificate — see `Certificate.evaluation`.
+    ///
+    /// Carried as opaque JSON so `wipe-cert` does not depend on
+    /// `wipe-license`: the licence model must be free to evolve without
+    /// touching the certificate crate, and a verifier that only cares about
+    /// the erasure signature never needs to parse this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,7 +125,22 @@ pub fn sign(cert: Certificate, key: &SigningKey) -> CertResult<SignedCertificate
             signature_b64: B64.encode(sig.to_bytes()),
         },
         co_signatures: Vec::new(),
+        attestation: None,
     })
+}
+
+/// Attach a vendor attestation chain to an already-signed certificate.
+///
+/// Deliberately *outside* the signed payload: the chain proves who was
+/// entitled to hold the signing key, not what the erasure did. Keeping it out
+/// means a licence can be re-stapled (say, after a renewal reissue) without
+/// invalidating the erasure signature an auditor already verified.
+///
+/// The link that makes it a chain rather than two unrelated signatures is
+/// checked at verification time — the licence must name the key that signed
+/// this certificate.
+pub fn attach_attestation(signed: &mut SignedCertificate, attestation: serde_json::Value) {
+    signed.attestation = Some(attestation);
 }
 
 /// Attach a co-signature to an already-signed certificate. Used for
