@@ -357,6 +357,36 @@ pub async fn create_manifest(
     State(state): State<AppState>,
     Json(req): Json<CreateManifestRequest>,
 ) -> Result<Json<DestructionManifest>, ApiError> {
+    if req.job_ids.is_empty() {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a manifest needs at least one job".into(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    if let Some(dup) = req.job_ids.iter().find(|j| !seen.insert(**j)) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("job {dup} is listed twice"),
+        ));
+    }
+    // A Job belongs to at most one live manifest. Without this, the second
+    // co-sign appends a second supervisor signature to an already-final cert
+    // and then fails half-way through `mark_destroyed`.
+    {
+        let manifests = state.manifests.read();
+        for jid in &req.job_ids {
+            if let Some(other) = manifests
+                .values()
+                .find(|m| m.state != ManifestState::Rejected && m.job_ids.contains(jid))
+            {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    format!("job {jid} is already on manifest {}", other.id),
+                ));
+            }
+        }
+    }
     // Validate every job is PendingCoSign.
     for jid in &req.job_ids {
         let job = state
@@ -412,6 +442,34 @@ pub async fn cosign_manifest(
             StatusCode::CONFLICT,
             format!("manifest {id} is not pending (state {:?})", manifest.state),
         ));
+    }
+
+    // Validate the whole manifest before mutating anything, so a refusal
+    // leaves every cert and Job exactly as it was.
+    //
+    // A Job with no certificate must never be finalised as Destroyed: that
+    // would record a destruction the station cannot attest to. This happens
+    // when a Job is escalated before any erasure activity existed (the cert
+    // generator has no device snapshot to certify). Refuse, and leave the
+    // manifest pending so the gap stays visible rather than silent.
+    {
+        let certs = state.certs.read();
+        let mut problems = Vec::new();
+        for jid in &manifest.job_ids {
+            match state.runner.get(*jid) {
+                None => problems.push(format!("job {jid} not found")),
+                Some(job) if job.state != wipe_common::JobState::PendingCoSign => {
+                    problems.push(format!("job {jid} is not in PendingCoSign"))
+                }
+                Some(_) if !certs.contains_key(jid) => problems.push(format!(
+                    "job {jid} has no certificate; it cannot be certified as destroyed"
+                )),
+                Some(_) => {}
+            }
+        }
+        if !problems.is_empty() {
+            return Err(ApiError(StatusCode::CONFLICT, problems.join("; ")));
+        }
     }
 
     // Co-sign each linked cert, then mark the Job as Destroyed.

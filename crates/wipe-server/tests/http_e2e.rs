@@ -134,7 +134,10 @@ async fn full_http_flow_completes_with_signed_cert() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let signed = signed.expect("certificate should be available");
-    assert_eq!(signed["certificate"]["operator"]["email"], "alice@example.com");
+    assert_eq!(
+        signed["certificate"]["operator"]["email"],
+        "alice@example.com"
+    );
     assert_eq!(signed["certificate"]["disposition"], "erased");
     assert_eq!(signed["certificate"]["cert_format_version"], 2);
     assert_eq!(signed["signature"]["algorithm"], "ed25519");
@@ -273,7 +276,10 @@ async fn destroy_path_via_manifest_cosign_produces_two_signatures() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(started, "job did not reach in_progress with an erasure activity");
+    assert!(
+        started,
+        "job did not reach in_progress with an erasure activity"
+    );
 
     // Escalate to destroy.
     let resp = client
@@ -290,7 +296,11 @@ async fn destroy_path_via_manifest_cosign_produces_two_signatures() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "escalate failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "escalate failed: {}",
+        resp.status()
+    );
 
     // Job should now be in pending_co_sign and a cert should be generated.
     let mut pending = false;
@@ -325,7 +335,8 @@ async fn destroy_path_via_manifest_cosign_produces_two_signatures() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let signed_json = signed_json.expect("destroy-path cert should be generated at pending_co_sign");
+    let signed_json =
+        signed_json.expect("destroy-path cert should be generated at pending_co_sign");
     assert_eq!(signed_json["certificate"]["disposition"], "destroyed");
     // `co_signatures` is omitted from JSON when empty (skip_serializing_if).
     let pre_cosigs = signed_json["co_signatures"]
@@ -471,4 +482,136 @@ async fn unsaved_topology_resolves_as_a_dry_run() {
         after["label"], "Draft bench",
         "resolve must not persist the draft it was given"
     );
+}
+
+/// A Job escalated before any erasure activity exists has nothing for the
+/// cert generator to certify. Co-signing must refuse to finalise it as
+/// Destroyed — an uncertified destruction is the failure this product
+/// exists to prevent — and the refusal must leave the Job untouched.
+#[tokio::test]
+async fn cosign_refuses_to_destroy_a_job_with_no_certificate() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let op = json!({ "id": "op-1", "display_name": "Alice", "email": "alice@example.com" });
+
+    let created: serde_json::Value = client
+        .post(format!("{base}/api/jobs"))
+        .json(&json!({
+            "device_id": "dev-nvme-0",
+            "classification": "high",
+            "intent": "destroy",
+            "operator": op,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let job_id = created["job_id"].as_str().unwrap().to_string();
+
+    // Escalate while still Queued: no erasure activity, so no cert.
+    let resp = client
+        .post(format!("{base}/api/jobs/{job_id}/escalate-to-destroy"))
+        .json(&json!({ "method": "disintegrate", "operator": op }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let manifest: serde_json::Value = client
+        .post(format!("{base}/api/manifests"))
+        .json(&json!({ "assembled_by": op, "job_ids": [job_id] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let manifest_id = manifest["id"].as_str().unwrap().to_string();
+
+    let cosign = client
+        .post(format!("{base}/api/manifests/{manifest_id}/cosign"))
+        .json(&json!({ "supervisor": op }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cosign.status(), 409);
+    assert!(cosign.text().await.unwrap().contains("has no certificate"));
+
+    let job: serde_json::Value = client
+        .get(format!("{base}/api/jobs/{job_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(job["state"]["state"], "pending_co_sign");
+
+    let m: serde_json::Value = client
+        .get(format!("{base}/api/manifests/{manifest_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(m["state"], "pending");
+}
+
+/// One Job, one live manifest: a second manifest would let a second
+/// co-sign append another supervisor signature to an already-final cert.
+#[tokio::test]
+async fn a_job_cannot_be_on_two_manifests() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let op = json!({ "id": "op-1", "display_name": "Alice", "email": "alice@example.com" });
+
+    let created: serde_json::Value = client
+        .post(format!("{base}/api/jobs"))
+        .json(&json!({
+            "device_id": "dev-nvme-0",
+            "classification": "high",
+            "intent": "destroy",
+            "operator": op,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let job_id = created["job_id"].as_str().unwrap().to_string();
+    client
+        .post(format!("{base}/api/jobs/{job_id}/escalate-to-destroy"))
+        .json(&json!({ "method": "disintegrate", "operator": op }))
+        .send()
+        .await
+        .unwrap();
+
+    let first = client
+        .post(format!("{base}/api/manifests"))
+        .json(&json!({ "assembled_by": op, "job_ids": [job_id] }))
+        .send()
+        .await
+        .unwrap();
+    assert!(first.status().is_success());
+
+    let second = client
+        .post(format!("{base}/api/manifests"))
+        .json(&json!({ "assembled_by": op, "job_ids": [job_id] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 409);
+
+    let dup = client
+        .post(format!("{base}/api/manifests"))
+        .json(&json!({ "assembled_by": op, "job_ids": [job_id, job_id] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dup.status(), 422);
 }
