@@ -15,3 +15,6 @@ Pointers only — each document below owns its content; nothing here is a copy.
   pipeline).
 - **[`agents/`](agents/)** — conventions for AI agents working this repo. The always-loaded
   rules are in `../AGENTS.md`; these files hold the detail behind them.
+  - [`agents/autonomous-driver.md`](agents/autonomous-driver.md) — `scripts/bmad-driver.py`, the
+    unattended caller that runs `bmad-build-auto` story by story, with checkpoints and
+    usage-limit waits.

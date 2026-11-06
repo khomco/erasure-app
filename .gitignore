@@ -23,7 +23,14 @@ apps/desktop/dist/
 _bmad/**
 !_bmad/**/
 !_bmad/custom/config.toml
+!_bmad/custom/bmad-build-auto.toml
 .agents/
 .claude/skills/**
 !.claude/skills/**/
 !.claude/skills/*/customize.toml
+.claude/worktrees/
+__pycache__/
+
+# bmad-driver runtime state/logs and checkpoint approval markers (scripts/bmad-driver.py)
+.scratch/.driver/
+.scratch/*/stories/*.approved

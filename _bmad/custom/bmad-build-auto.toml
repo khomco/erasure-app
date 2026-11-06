@@ -1,0 +1,32 @@
+# Team overrides for bmad-build-auto (merged over
+# .claude/skills/bmad-build-auto/customize.toml).
+# Merge rules: strings replace, lists append, tables merge key by key.
+# Personal tweaks go in bmad-build-auto.user.toml beside this file.
+#
+# These runs are unattended (scripts/bmad-driver.py dispatches them), so the
+# facts below are the only project context guaranteed to be in front of the
+# model besides the story itself.
+
+[workflow]
+
+persistent_facts = [
+  "file:AGENTS.md",
+  "file:CONTEXT.md",
+  "file:docs/adr/*.md",
+  # docs/ROADMAP.md §0 invariants, verbatim. They hold for every story,
+  # including stories that never touch the roadmap surfaces.
+  "Invariant (docs/ROADMAP.md §0.2, Never block a wipe on licensing): An unlicensed, expired, quota-exhausted, revoked or clock-rolled-back station **still erases drives**; what changes is that the certificate is marked `evaluation` and the operator is told why. Erasure is a safety-adjacent operation on someone else's schedule — a licence server having a bad day must never be able to stop a drive from being sanitized. Anything in **L** or **A** that would gate erasure is out of scope by default and needs an explicit decision to enter scope.",
+  "Invariant (docs/ROADMAP.md §0.3, The archive is an index, never an authority): Certificates are offline-verifiable by construction (ADR-0005; `verify-cert` needs only the vendor root). The moment a cert's validity depends on a lookup against our archive, we have rebuilt the competitor weakness named in CONTEXT §1 (\"verification of authenticity is vendor-dependent\"). **A2/A3 build a cert archive. It is a search index and a convenience.** A cert that our archive has never seen and a cert we have deleted are both still valid, and the verification page must say so.",
+  "Invariant (docs/ROADMAP.md §0.1, The only `DeviceBackend` implementation is still the mock): The only thing that produces command evidence is `wipe-engine-mock`, which **synthesises** the evidence the product's entire value proposition rests on. A marketing site that says \"Wipestation sanitizes NVMe drives with NIST 800-88 Rev. 2 Purge\" cannot ship before `wipe-engine-linux` runs on real hardware, because that sentence would be false. Make no hardware-sanitization claim — in code, copy, docs or certificate text — while only the mock backend exists.",
+]
+
+on_complete = """
+Version control, by final status:
+
+- `done`: make sure every change from this story, including its story spec file under the spec folder, is committed on the current branch. If anything remains uncommitted, commit it with a Conventional Commits message (`feat: ...`, `fix: ...`, `docs: ...`, `refactor: ...`, `test: ...`, `chore: ...`) that names the story id, and end the message with this exact final line:
+  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+- `ready-for-dev` (halted after planning so a human can review the spec): commit only the story spec file, with message `docs(spec): plan story <id> - <title>`, ending with the same Co-Authored-By line.
+- `blocked` or any other status: make no commit; leave the working tree as it is for a human to inspect.
+
+Never push, never create or switch branches, never amend or rewrite existing commits.
+"""
