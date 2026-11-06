@@ -18,6 +18,11 @@ fn hub() -> Command {
     cmd
 }
 
+fn closed_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    l.local_addr().unwrap().port()
+}
+
 fn combined(out: &Output) -> String {
     format!(
         "{}{}",
@@ -85,6 +90,13 @@ fn file_held_vendor_root_is_logged_at_start() {
     let mut child = hub()
         .args(["serve", "--addr", "127.0.0.1:0", "--vendor-root-seed"])
         .arg(&seed)
+        // A closed port, so the test touches no database: the warning is
+        // logged before `serve` tries to migrate.
+        .arg("--database-url")
+        .arg(format!(
+            "postgres://wipehub:wipehub@127.0.0.1:{}/wipehub",
+            closed_port()
+        ))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()

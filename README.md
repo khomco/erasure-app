@@ -59,10 +59,11 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
 # SMTP on :1025 with its UI on http://127.0.0.1:8025). The hub's tests need them:
 docker compose up -d
 
-# Run all Rust tests (161 across 9 crates):
+# Run all Rust tests (177 across 9 crates):
 cargo test --workspace
 
-# Run the vendor hub and check its dependencies are reachable:
+# Run the vendor hub (it applies its database migrations before listening, and
+# exits if Postgres is unreachable) and check its dependencies are reachable:
 cargo run -p wipe-hub -- serve &
 curl 127.0.0.1:7900/api/health   # {"status":"ok","database":"up","mail":"up"}
 

@@ -22,13 +22,20 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 
 ## Running and verifying
 
-- `cargo test --workspace` — 161 tests, ~30s. Needs `docker compose up -d` first (root
+- `cargo test --workspace` — 177 tests, ~30s. Needs `docker compose up -d` first (root
   `compose.yaml`: Postgres on `127.0.0.1:55432`, Mailpit SMTP `:1025`, UI/API `:8025`):
-  `wipe-hub`'s green health test fails, never skips, when they are down.
+  `wipe-hub`'s compose-backed tests fail, never skip, when they are down.
 - Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and
   `curl 127.0.0.1:7900/api/health`. Flags have `WIPE_HUB_*` env twins whose defaults match the
   compose file; `--payment-provider stripe` refuses to start without
   `WIPE_HUB_STRIPE_WEBHOOK_SECRET`. No `sqlx::query!` macros: there is no build-time database.
+- Hub migrations are embedded (`sqlx::migrate!`) and applied by `wipe-hub serve` before it
+  listens; it exits non-zero within ~5 s if Postgres is unreachable. Add a migration as
+  `crates/wipe-hub/migrations/NNNN_name.sql`; never edit an applied one.
+- Hub tests use `crates/wipe-hub/tests/support` (`mod support;`): `TestDb::empty()` /
+  `TestDb::migrated()` give each test its own `wipehub_test_<uuid>` database, dropped with the
+  guard; `Mailpit` reads captured mail. Isolate mail by sending to `unique_address()`, never by
+  deleting Mailpit messages.
 - Never pipe `cargo test` through `grep`/`awk` to summarize: compile errors are discarded and
   a broken build prints as a clean run (68844bf).
 - Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 200 tests, under a second.

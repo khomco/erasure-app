@@ -6,6 +6,7 @@
 //! A station never needs the hub to erase, sign or verify.
 
 pub mod config;
+pub mod db;
 pub mod health;
 
 use std::sync::Arc;
@@ -50,9 +51,13 @@ pub async fn serve_on(listener: TcpListener, state: AppState) -> anyhow::Result<
     Ok(())
 }
 
+/// Apply migrations (failing fast if Postgres is unreachable), then bind and
+/// serve. [`serve_on`] does not migrate.
 pub async fn serve(config: Config) -> anyhow::Result<()> {
     let addr = config.addr;
     let state = AppState::new(config)?;
+    // Migrate before binding: a hub must never serve an unmigrated schema.
+    db::migrate_url(&state.config.database_url).await?;
     let listener = TcpListener::bind(addr).await?;
     info!(
         %addr,
