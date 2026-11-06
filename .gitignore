@@ -9,4 +9,21 @@ dist/
 .idea/
 apps/desktop/src-tauri/gen/
 apps/desktop/dist/
+*.tsbuildinfo
 .claude/settings.local.json
+
+# BMad and agent-skill installs: the trees are installer-generated and
+# regenerated on every install, so they are not reviewed and not committed.
+# Two exceptions are genuinely ours and stay versioned: the team config
+# override, and each skill's customize.toml.
+# Planning artifacts under _bmad-output/ are work product — NOT ignored.
+# _bmad/render/.gitignore also stays tracked: it is the installer's own
+# keep-the-dir stub, and a nested .gitignore outranks this file for paths
+# under it, so it cannot be excluded from here.
+_bmad/**
+!_bmad/**/
+!_bmad/custom/config.toml
+.agents/
+.claude/skills/**
+!.claude/skills/**/
+!.claude/skills/*/customize.toml

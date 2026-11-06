@@ -1,0 +1,21 @@
+# Team / enterprise overrides for _bmad/config.toml.
+# Committed to the repo — applies to every developer on the project.
+# Tables deep-merge over base config; keyed entries merge by key.
+# Example: override an agent descriptor, or add a new agent.
+#
+# [agents.bmad-agent-pm]
+# description = "Prefers short, bulleted PRDs over narrative drafts."
+
+# Pinned deliberately. `project_knowledge` is consumed as a single path, and the
+# richest document in this repo — CONTEXT.md, product context plus the domain
+# glossary — sits at the repo root, outside docs/, because agents/domain.md and
+# the grill-with-docs convention both expect it there.
+#
+# Do NOT "fix" this by pointing it at {project-root}: that sweeps crates/,
+# target/, and Cargo.lock into every context scan. CONTEXT.md is reached two
+# other ways instead:
+#   1. docs/INDEX.md — a pointer map any scan of docs/ lands on
+#   2. AGENTS.md — always loaded, and it instructs reading CONTEXT.md plus the
+#      ADRs touching the area before changing behaviour there
+[modules.bmm]
+project_knowledge = "{project-root}/docs"
