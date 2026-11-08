@@ -22,7 +22,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 
 ## Running and verifying
 
-- `cargo test --workspace` — 628 tests, ~30s. Needs `docker compose up -d` first (root
+- `cargo test --workspace` — 665 tests, ~30s. Needs `docker compose up -d` first (root
   `compose.yaml`: Postgres on `127.0.0.1:55432`, Mailpit SMTP `:1025`, UI/API `:8025`):
   `wipe-hub`'s compose-backed tests fail, never skip, when they are down.
 - Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and
@@ -31,7 +31,12 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   `WIPE_HUB_STRIPE_SECRET_KEY` and `WIPE_HUB_STRIPE_WEBHOOK_SECRET`, and `--stripe-api-base`
   accepts only https or http on a local host (tests point it at a local mock). `--site-origin` / `WIPE_HUB_SITE_ORIGIN` (default
   `http://localhost:4321`) is the one origin sent CORS headers, on `GET /api/auth/csrf` and
-  `POST /api/leads` only; anything but a bare http(s) origin refuses to start. No `sqlx::query!` macros: there is no build-time database.
+  `POST /api/leads` only; anything but a bare http(s) origin refuses to start. Release files go
+  to `--artifact-dir` / `WIPE_HUB_ARTIFACT_DIR` (default `.wipe-hub/artifacts` under the working
+  directory, git-ignored, created at start; a file path refuses to start); tests always pass a
+  temp dir (`Hub::artifacts`, or `WIPE_HUB_ARTIFACT_DIR` for the binary). `wipe-hub release
+  publish --version V --notes N --file <platform>=<path>` writes to the database and that
+  directory directly, like `admin create`. No `sqlx::query!` macros: there is no build-time database.
 - Hub migrations are embedded (`sqlx::migrate!`) and applied by `wipe-hub serve` before it
   listens; it exits non-zero within ~5 s if Postgres is unreachable. Add a migration as
   `crates/wipe-hub/migrations/NNNN_name.sql`; never edit an applied one.

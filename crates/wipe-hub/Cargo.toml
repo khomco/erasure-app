@@ -48,6 +48,12 @@ argon2 = "0.5"
 # 0.11.19 is the last lettre release with rust-version <= 1.80. Plain SMTP
 # only: STARTTLS/auth for a production relay is a deployment decision.
 lettre = { version = "=0.11.19", default-features = false, features = ["builder", "smtp-transport", "tokio1", "hostname"] }
+# Releases (software-downloads story 1): SemVer versions, the
+# `ArtifactStore` trait, and streaming an upload's body into it.
+semver = "1"
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

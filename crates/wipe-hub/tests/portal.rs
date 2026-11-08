@@ -27,6 +27,7 @@ fn built_portal(root: &Path) -> PathBuf {
 }
 
 async fn spawn_hub(portal_dir: Option<PathBuf>) -> SocketAddr {
+    let artifacts = tempfile::tempdir().unwrap();
     let args = Args {
         addr: "127.0.0.1:0".parse().unwrap(),
         database_url: format!(
@@ -44,6 +45,9 @@ async fn spawn_hub(portal_dir: Option<PathBuf>) -> SocketAddr {
         vendor_root_seed: None,
         portal_dir: portal_dir.clone(),
         site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
+        // No upload happens here: the directory only has to exist while
+        // the configuration is checked, and is removed with `artifacts`.
+        artifact_dir: artifacts.path().to_path_buf(),
     };
     let mut config = Config::from_args(args).unwrap();
     // `from_args` may pick up a built `apps/portal/dist` under the cwd when

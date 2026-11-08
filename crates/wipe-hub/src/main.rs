@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
-use wipe_hub::config::AdminCreateArgs;
+use wipe_hub::config::{AdminCreateArgs, ReleasePublishArgs};
 use wipe_hub::{startup_warnings, Args, Config};
 
 #[derive(Parser)]
@@ -21,6 +21,17 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AdminCmd,
     },
+    /// Manage releases (station software customers download).
+    Release {
+        #[command(subcommand)]
+        cmd: ReleaseCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCmd {
+    /// Create a release, store its files and publish it, in one step.
+    Publish(ReleasePublishArgs),
 }
 
 #[derive(Subcommand)]
@@ -67,5 +78,32 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Release {
+            cmd: ReleaseCmd::Publish(args),
+        } => {
+            let release = wipe_hub::release_admin::publish_from_cli(args).await?;
+            println!(
+                "published release {} ({}) on the {} channel",
+                release.version, release.id, release.channel
+            );
+            for a in &release.artifacts {
+                println!(
+                    "  {}  {}  {} bytes  sha256 {}",
+                    a.platform, a.filename, a.size_bytes, a.sha256
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_command_line_is_well_formed() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
     }
 }

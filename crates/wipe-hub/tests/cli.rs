@@ -15,6 +15,12 @@ fn hub() -> Command {
         }
     }
     cmd.env("RUST_LOG", "info");
+    // Never `.wipe-hub/artifacts` under the crate: one shared scratch
+    // directory (these runs store nothing in it).
+    cmd.env(
+        "WIPE_HUB_ARTIFACT_DIR",
+        std::env::temp_dir().join("wipe-hub-test-artifacts"),
+    );
     cmd
 }
 
@@ -293,5 +299,50 @@ fn a_site_origin_with_a_path_refuses_to_start() {
             stderr.contains("--site-origin \"https://x.example/path\""),
             "stderr does not name the value:\n{stderr}"
         );
+    }
+}
+
+#[test]
+fn the_artifact_dir_defaults_under_the_cwd_and_is_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = hub()
+        .env_remove("WIPE_HUB_ARTIFACT_DIR")
+        .args(["serve", "--addr", "127.0.0.1:0", "--database-url"])
+        .arg(format!(
+            "postgres://wipehub:wipehub@127.0.0.1:{}/wipehub",
+            closed_port()
+        ))
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    // It fails on the closed database port, after the directory is made.
+    assert!(!out.status.success(), "{}", combined(&out));
+    assert!(
+        dir.path().join(".wipe-hub/artifacts").is_dir(),
+        "{}",
+        combined(&out)
+    );
+}
+
+#[test]
+fn an_artifact_dir_that_is_a_file_refuses_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("not-a-dir");
+    std::fs::write(&file, "x").unwrap();
+    for (flag, env) in [(true, false), (false, true)] {
+        let mut cmd = hub();
+        cmd.args(["serve", "--addr", "127.0.0.1:0"]);
+        if flag {
+            cmd.arg("--artifact-dir").arg(&file);
+        }
+        if env {
+            cmd.env("WIPE_HUB_ARTIFACT_DIR", &file);
+        }
+        let out = cmd.output().unwrap();
+        assert!(!out.status.success(), "{}", combined(&out));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("--artifact-dir"), "{stderr}");
+        assert!(stderr.contains(&file.display().to_string()), "{stderr}");
+        assert!(stderr.contains("not a directory"), "{stderr}");
     }
 }

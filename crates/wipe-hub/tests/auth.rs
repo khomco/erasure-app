@@ -42,6 +42,7 @@ async fn spawn_hub_with(smtp_port: u16, public_base_url: &str) -> Hub {
 }
 
 fn hub_state(db: &TestDb, smtp_port: u16, public_base_url: &str, mail_from: &str) -> AppState {
+    let artifacts = tempfile::tempdir().unwrap();
     let args = Args {
         addr: "127.0.0.1:0".parse().unwrap(),
         database_url: db.url.clone(),
@@ -56,6 +57,9 @@ fn hub_state(db: &TestDb, smtp_port: u16, public_base_url: &str, mail_from: &str
         vendor_root_seed: None,
         portal_dir: None,
         site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
+        // No upload happens here: the directory only has to exist while
+        // the configuration is checked, and is removed with `artifacts`.
+        artifact_dir: artifacts.path().to_path_buf(),
     };
     let mut config = Config::from_args(args).unwrap();
     config.portal_dir = None;

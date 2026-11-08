@@ -20,6 +20,12 @@ fn hub() -> Command {
         }
     }
     cmd.env("RUST_LOG", "info");
+    // Never `.wipe-hub/artifacts` under the crate: one shared scratch
+    // directory (these runs store nothing in it).
+    cmd.env(
+        "WIPE_HUB_ARTIFACT_DIR",
+        std::env::temp_dir().join("wipe-hub-test-artifacts"),
+    );
     cmd
 }
 

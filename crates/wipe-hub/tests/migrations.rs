@@ -872,3 +872,255 @@ async fn an_organization_lapse_policy_defaults_to_evaluation_and_is_checked() {
         .unwrap_err();
     assert!(matches!(err, sqlx::Error::Database(_)), "{err:?}");
 }
+
+/// A draft release (version `version`) with one artifact: their ids.
+async fn draft_release_with_artifact(
+    pool: &sqlx::PgPool,
+    version: &str,
+) -> (uuid::Uuid, uuid::Uuid) {
+    let release: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO releases (version, notes, channel) VALUES ($1, 'Notes', 'stable') \
+         RETURNING id",
+    )
+    .bind(version)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let artifact = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO release_artifacts (id, release_id, platform, filename, size_bytes, sha256) \
+         VALUES ($1, $2, 'linux-x86_64', 'wipestation', 3, $3)",
+    )
+    .bind(artifact)
+    .bind(release)
+    .bind("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    .execute(pool)
+    .await
+    .unwrap();
+    (release, artifact)
+}
+
+async fn refused(pool: &sqlx::PgPool, sql: &str, id: uuid::Uuid) -> String {
+    let err = sqlx::query(sql)
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect_err(sql);
+    match err {
+        sqlx::Error::Database(d) => d.message().to_string(),
+        other => panic!("{sql}: expected a database error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn releases_follow_their_lifecycle_and_never_change_or_go() {
+    let t = TestDb::migrated().await;
+    let pool = &t.pool;
+    let (release, artifact) = draft_release_with_artifact(pool, "0.2.0").await;
+
+    // A release is created as a draft only.
+    let err = sqlx::query(
+        "INSERT INTO releases (version, notes, channel, status, published_at) \
+         VALUES ('9.9.9', 'n', 'stable', 'published', now())",
+    )
+    .execute(pool)
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("created as a draft"), "{err}");
+
+    // Stamps without their status step are refused.
+    for sql in [
+        // A published_at without publishing.
+        "UPDATE releases SET published_at = now() WHERE id = $1",
+        // Withdrawn without a time.
+        "UPDATE releases SET status = 'withdrawn' WHERE id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(release)
+            .execute(pool)
+            .await
+            .expect_err(sql);
+    }
+
+    // Version, channel and notes never change, even in a draft.
+    for sql in [
+        "UPDATE releases SET version = '0.2.1' WHERE id = $1",
+        "UPDATE releases SET notes = 'Other' WHERE id = $1",
+        "UPDATE releases SET channel = 'preview' WHERE id = $1",
+        "UPDATE releases SET created_at = now() - interval '1 day' WHERE id = $1",
+    ] {
+        let m = refused(pool, sql, release).await;
+        assert!(m.contains("cannot change"), "{sql}: {m}");
+    }
+    // Artifacts are never updated.
+    let m = refused(
+        pool,
+        "UPDATE release_artifacts SET sha256 = repeat('0', 64) WHERE id = $1",
+        artifact,
+    )
+    .await;
+    assert!(m.contains("never updated"), "{m}");
+
+    // Publish, then the published release is frozen.
+    sqlx::query("UPDATE releases SET status = 'published', published_at = now() WHERE id = $1")
+        .bind(release)
+        .execute(pool)
+        .await
+        .unwrap();
+    for sql in [
+        "UPDATE releases SET version = '0.3.0' WHERE id = $1",
+        "UPDATE releases SET status = 'draft', published_at = NULL WHERE id = $1",
+        "UPDATE releases SET published_at = now() - interval '1 day' WHERE id = $1",
+        "DELETE FROM releases WHERE id = $1",
+    ] {
+        refused(pool, sql, release).await;
+    }
+    let m = refused(pool, "DELETE FROM releases WHERE id = $1", release).await;
+    assert!(m.contains("never deleted"), "{m}");
+    // No file can be added to, or removed from, a published release.
+    let m = refused(
+        pool,
+        "INSERT INTO release_artifacts (id, release_id, platform, filename, size_bytes, sha256) \
+         VALUES (gen_random_uuid(), $1, 'windows-x86_64', 'w.exe', 1, repeat('a', 64))",
+        release,
+    )
+    .await;
+    assert!(m.contains("only while their release is a draft"), "{m}");
+    let m = refused(
+        pool,
+        "DELETE FROM release_artifacts WHERE id = $1",
+        artifact,
+    )
+    .await;
+    assert!(m.contains("only while their release is a draft"), "{m}");
+
+    // Withdraw; withdrawn is terminal.
+    sqlx::query("UPDATE releases SET status = 'withdrawn', withdrawn_at = now() WHERE id = $1")
+        .bind(release)
+        .execute(pool)
+        .await
+        .unwrap();
+    for sql in [
+        "UPDATE releases SET status = 'published', withdrawn_at = NULL WHERE id = $1",
+        "UPDATE releases SET withdrawn_at = now() - interval '1 day' WHERE id = $1",
+        "DELETE FROM releases WHERE id = $1",
+    ] {
+        refused(pool, sql, release).await;
+    }
+
+    // The version stays taken, withdrawn or not.
+    let err = sqlx::query(
+        "INSERT INTO releases (version, notes, channel) VALUES ('0.2.0', 'Again', 'stable')",
+    )
+    .execute(pool)
+    .await
+    .unwrap_err();
+    match err {
+        sqlx::Error::Database(d) => assert_eq!(d.constraint(), Some("releases_version_key")),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_release_skips_no_step_and_publishes_only_with_a_file() {
+    let t = TestDb::migrated().await;
+    let pool = &t.pool;
+    let empty: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO releases (version, notes, channel) VALUES ('1.0.0', 'n', 'preview') \
+         RETURNING id",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let m = refused(
+        pool,
+        "UPDATE releases SET status = 'published', published_at = now() WHERE id = $1",
+        empty,
+    )
+    .await;
+    assert!(m.contains("at least one artifact"), "{m}");
+
+    // draft -> withdrawn is a step; draft -> published -> draft is not.
+    let (release, artifact) = draft_release_with_artifact(pool, "1.1.0").await;
+    // A draft's files can go.
+    sqlx::query("DELETE FROM release_artifacts WHERE id = $1")
+        .bind(artifact)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE releases SET status = 'withdrawn', withdrawn_at = now() WHERE id = $1")
+        .bind(release)
+        .execute(pool)
+        .await
+        .unwrap();
+    let m = refused(
+        pool,
+        "UPDATE releases SET status = 'published', published_at = now(), withdrawn_at = NULL \
+         WHERE id = $1",
+        release,
+    )
+    .await;
+    assert!(m.contains("cannot go from withdrawn to published"), "{m}");
+
+    // Bad values are refused by CHECKs.
+    for (sql, constraint) in [
+        (
+            "INSERT INTO releases (version, notes, channel) VALUES ('2.0.0', ' ', 'stable')",
+            "releases_notes_check",
+        ),
+        (
+            "INSERT INTO releases (version, notes, channel) VALUES ('2.0.0', 'n', 'beta')",
+            "releases_channel_check",
+        ),
+    ] {
+        match sqlx::query(sql).execute(pool).await.unwrap_err() {
+            sqlx::Error::Database(d) => assert_eq!(d.constraint(), Some(constraint), "{sql}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    let (draft, _) = draft_release_with_artifact(pool, "3.0.0").await;
+    for (platform, filename, size, sha) in [
+        ("Linux", "f", 1, "a"),
+        ("linux", ".f", 1, "a"),
+        ("linux", "f", 0, "a"),
+        ("linux", "f", 1, "A"),
+    ] {
+        let sha = if sha == "a" {
+            "a".repeat(64)
+        } else {
+            "A".repeat(64)
+        };
+        let err = sqlx::query(
+            "INSERT INTO release_artifacts (id, release_id, platform, filename, size_bytes, \
+                                            sha256) \
+             VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)",
+        )
+        .bind(draft)
+        .bind(platform)
+        .bind(filename)
+        .bind(size as i64)
+        .bind(&sha)
+        .execute(pool)
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, sqlx::Error::Database(ref d) if d.constraint().is_some()),
+            "{platform} {filename} {size}: {err:?}"
+        );
+    }
+    // One file per platform.
+    let err = sqlx::query(
+        "INSERT INTO release_artifacts (id, release_id, platform, filename, size_bytes, sha256) \
+         VALUES (gen_random_uuid(), $1, 'linux-x86_64', 'other', 1, repeat('b', 64))",
+    )
+    .bind(draft)
+    .execute(pool)
+    .await
+    .unwrap_err();
+    match err {
+        sqlx::Error::Database(d) => {
+            assert_eq!(d.constraint(), Some("release_artifacts_platform_key"))
+        }
+        other => panic!("{other:?}"),
+    }
+}

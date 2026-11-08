@@ -146,16 +146,31 @@ async function isCsrfRejection(res: Response): Promise<boolean> {
   }
 }
 
+/** A body sent as is (a file upload), with its content type. */
+export interface RawBody {
+  body: Blob;
+  contentType: string;
+}
+
+/**
+ * A request to the hub. `body` is sent as JSON; a `RawBody` is sent as is
+ * (the release upload sends a file as `application/octet-stream`). Every
+ * POST carries the CSRF token.
+ */
 export async function request(
   fetchImpl: Fetch,
   method: "GET" | "POST",
   path: string,
   body?: unknown,
+  raw?: RawBody,
 ): Promise<Response> {
   const send = async (): Promise<Response> => {
     const headers: Record<string, string> = { Accept: "application/json" };
     const init: RequestInit = { method, headers, credentials: "same-origin" };
-    if (body !== undefined) {
+    if (raw !== undefined) {
+      headers["Content-Type"] = raw.contentType;
+      init.body = raw.body;
+    } else if (body !== undefined) {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }

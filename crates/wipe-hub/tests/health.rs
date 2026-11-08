@@ -41,6 +41,7 @@ async fn fake_smtp(greeting: Option<&'static [u8]>) -> u16 {
 }
 
 fn config(database_url: &str, smtp_port: u16) -> Config {
+    let artifacts = tempfile::tempdir().unwrap();
     let args = Args {
         addr: "127.0.0.1:0".parse().unwrap(),
         database_url: database_url.to_string(),
@@ -55,6 +56,9 @@ fn config(database_url: &str, smtp_port: u16) -> Config {
         vendor_root_seed: None,
         portal_dir: None,
         site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
+        // No upload happens here: the directory only has to exist while
+        // the configuration is checked, and is removed with `artifacts`.
+        artifact_dir: artifacts.path().to_path_buf(),
     };
     Config::from_args(args).unwrap()
 }

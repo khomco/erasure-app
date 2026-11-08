@@ -56,7 +56,7 @@ pub const MSG_BAD_QUERY: &str = "query must be at most 200 characters without co
 pub const CLI_ACTOR: &str = "cli:admin-create";
 
 /// How long `admin create` waits for its database connection.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `to_char` format for RFC 3339 UTC, whole seconds (as `team.rs`).
 pub(crate) const RFC3339_UTC: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS"Z"'"#;
@@ -436,7 +436,7 @@ impl From<AuditError> for CreateAdminError {
 
 /// The OS user running the command, for the audit row only: `$USER`, else
 /// `$USERNAME`, else `None`. Informational; never trusted.
-fn os_user() -> Option<String> {
+pub(crate) fn os_user() -> Option<String> {
     ["USER", "USERNAME"]
         .iter()
         .filter_map(|k| std::env::var(k).ok())

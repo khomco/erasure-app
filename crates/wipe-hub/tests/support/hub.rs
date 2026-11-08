@@ -38,6 +38,8 @@ pub struct Hub {
     pub http: reqwest::Client,
     pub db: TestDb,
     pub csrf: String,
+    /// The hub's `--artifact-dir`, removed with the hub.
+    pub artifacts: tempfile::TempDir,
 }
 
 pub async fn spawn_hub_with(smtp_port: u16) -> Hub {
@@ -46,7 +48,18 @@ pub async fn spawn_hub_with(smtp_port: u16) -> Hub {
 
 /// A hub whose default arguments `edit` changes first.
 pub async fn spawn_hub_args(edit: impl FnOnce(&mut Args)) -> Hub {
+    spawn_hub_config(edit, |_| {}).await
+}
+
+/// A hub whose default arguments `edit` changes, and whose validated
+/// configuration `edit_config` then changes (for settings that are not
+/// flags, such as `artifact_max_bytes`).
+pub async fn spawn_hub_config(
+    edit: impl FnOnce(&mut Args),
+    edit_config: impl FnOnce(&mut Config),
+) -> Hub {
     let db = TestDb::migrated().await;
+    let artifacts = tempfile::tempdir().unwrap();
     let mut args = Args {
         addr: "127.0.0.1:0".parse().unwrap(),
         database_url: db.url.clone(),
@@ -61,10 +74,12 @@ pub async fn spawn_hub_args(edit: impl FnOnce(&mut Args)) -> Hub {
         vendor_root_seed: None,
         portal_dir: None,
         site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
+        artifact_dir: artifacts.path().to_path_buf(),
     };
     edit(&mut args);
     let mut config = Config::from_args(args).unwrap();
     config.portal_dir = None;
+    edit_config(&mut config);
     let state = AppState::new(config).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -85,6 +100,7 @@ pub async fn spawn_hub_args(edit: impl FnOnce(&mut Args)) -> Hub {
         http,
         db,
         csrf,
+        artifacts,
     }
 }
 

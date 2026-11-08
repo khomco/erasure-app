@@ -39,13 +39,34 @@
 //! - `POST /api/admin/licences/:id/revoke {reason}` — mark a licence
 //!   revoked: `{licence}`; 409 [`stations::MSG_ALREADY_REVOKED`] the second
 //!   time. Recorded in the hub only: stations are not told.
+//! - `GET /api/admin/releases` — `{releases}`: every release, newest first,
+//!   every status, each with its artifacts.
+//! - `POST /api/admin/releases {version, notes, channel}` — create a draft
+//!   release (201 `{release}`); 409 [`release_admin::MSG_VERSION_TAKEN`].
+//! - `GET /api/admin/releases/:id` — `{release}`.
+//! - `POST /api/admin/releases/:id/artifacts?platform=&filename=` — the raw
+//!   request body (`application/octet-stream`, else 415) is one file, stored
+//!   and hashed by the hub (201 `{artifact}`); over the limit 413
+//!   [`release_admin::MSG_ARTIFACT_TOO_LARGE`], empty 400, a platform
+//!   already there or a release not in draft 409, a store failure 503
+//!   [`release_admin::MSG_STORAGE_UNAVAILABLE`].
+//! - `POST /api/admin/releases/:id/artifacts/:artifact_id/remove` — remove
+//!   a draft's file (`{release}`); 404 [`release_admin::MSG_NO_ARTIFACT`].
+//! - `POST /api/admin/releases/:id/publish` — draft (with a file) to
+//!   published (`{release}`).
+//! - `POST /api/admin/releases/:id/withdraw` — draft or published to
+//!   withdrawn, for good (`{release}`); files are kept.
 //!
 //! The organization and user routes are read-only; the lead routes also
 //! change sales leads, through [`crate::lead_admin`], the offering
 //! routes change offerings, through [`crate::offering_admin`], and the
 //! licence routes issue and revoke licences through [`crate::stations`]
 //! and read them through [`crate::licence_admin`]. A non-UUID or unknown
-//! licence id is 404 [`MSG_NO_LICENCE`], writing nothing.
+//! licence id is 404 [`MSG_NO_LICENCE`], writing nothing. The release
+//! routes go through [`crate::release_admin`] and the hub's
+//! [`crate::artifacts::ArtifactStore`]; a non-UUID or unknown release id is
+//! 404 [`release_admin::MSG_NO_RELEASE`], an invalid body or upload query
+//! 400 naming the field, and a refused change 409, none writing anything.
 //!
 //! Only a vendor admin gets in ([`VendorAdmin`]'s extractor, the first
 //! extractor of every handler): no session is 401 `not signed in`; any
@@ -64,11 +85,12 @@
 //! lifecycle step) 409; none writes an audit row either. Error bodies are `{"error": "<message>"}`.
 
 use axum::async_trait;
+use axum::body::Body;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::request::Parts;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -80,10 +102,12 @@ use crate::accounts;
 use crate::admin::{
     self, AdminOrganizationDetail, AdminReadError, OrganizationSearch, UserSearch, VendorAdmin,
 };
+use crate::artifacts::StoreError;
 use crate::auth::{session_token, ApiError, JsonBody, MSG_NOT_SIGNED_IN};
 use crate::lead_admin::{self, FilterParams, LeadDetail, LeadFilter, LeadList};
 use crate::licence_admin::{self, InspectRequest, IssueRequest, RevokeRequest, MSG_NOT_A_LICENCE};
 use crate::offering_admin::{self, NewOffering, OfferingError, OfferingList, OfferingRequest};
+use crate::release_admin::{self, ReleaseError, ReleaseList, ReleaseRequest};
 use crate::station_routes::licence_file_response;
 use crate::stations::{self, MSG_ISSUANCE_UNAVAILABLE, MSG_NO_LICENCE};
 use crate::AppState;
@@ -125,6 +149,18 @@ pub fn routes() -> Router<AppState> {
         .route("/api/admin/licences/:id", get(licence_detail))
         .route("/api/admin/licences/:id/download", get(download_licence))
         .route("/api/admin/licences/:id/revoke", post(revoke_licence))
+        .route(
+            "/api/admin/releases",
+            get(list_releases).post(create_release),
+        )
+        .route("/api/admin/releases/:id", get(release_detail))
+        .route("/api/admin/releases/:id/artifacts", post(upload_artifact))
+        .route(
+            "/api/admin/releases/:id/artifacts/:artifact_id/remove",
+            post(remove_artifact),
+        )
+        .route("/api/admin/releases/:id/publish", post(publish_release))
+        .route("/api/admin/releases/:id/withdraw", post(withdraw_release))
 }
 
 impl From<AdminReadError> for ApiError {
@@ -137,6 +173,38 @@ impl From<OfferingError> for ApiError {
     fn from(e: OfferingError) -> Self {
         match e {
             OfferingError::Conflict(m) => ApiError::new(StatusCode::CONFLICT, m),
+            e => ApiError::internal(e),
+        }
+    }
+}
+
+impl From<ReleaseError> for ApiError {
+    fn from(e: ReleaseError) -> Self {
+        match e {
+            ReleaseError::NotFound(m) => ApiError::new(StatusCode::NOT_FOUND, m),
+            ReleaseError::Conflict(m) => ApiError::new(StatusCode::CONFLICT, m),
+            ReleaseError::Store(StoreError::TooLarge(_)) => ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                release_admin::MSG_ARTIFACT_TOO_LARGE,
+            ),
+            ReleaseError::Store(StoreError::Empty) => {
+                ApiError::new(StatusCode::BAD_REQUEST, release_admin::MSG_EMPTY_ARTIFACT)
+            }
+            ReleaseError::Store(StoreError::Source(cause)) => {
+                tracing::warn!(%cause, "an artifact upload was interrupted");
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    release_admin::MSG_UPLOAD_INTERRUPTED,
+                )
+            }
+            ReleaseError::Store(cause) => {
+                // Disk full, permissions: logged for the operator, never shown.
+                tracing::error!(error = %cause, "artifact storage failed");
+                ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    release_admin::MSG_STORAGE_UNAVAILABLE,
+                )
+            }
             e => ApiError::internal(e),
         }
     }
@@ -571,4 +639,169 @@ async fn revoke_licence(
         .ok_or_else(|| ApiError::internal("a revoked licence vanished"))?;
     tx.commit().await?;
     Ok(Json(json!({ "licence": licence })))
+}
+
+// ---------------------------------------------------------------------------
+// Releases
+
+fn no_release() -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, release_admin::MSG_NO_RELEASE)
+}
+
+/// The release id from the path, or 404.
+fn release_id(id: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(id).map_err(|_| no_release())
+}
+
+async fn list_releases(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+) -> Result<Json<ReleaseList>, ApiError> {
+    let mut tx = state.pool.begin().await?;
+    let found = release_admin::list(&mut tx, &admin).await?;
+    tx.commit().await?;
+    Ok(Json(found))
+}
+
+async fn create_release(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    JsonBody(req): JsonBody<ReleaseRequest>,
+) -> Result<Response, ApiError> {
+    let new = release_admin::validate(&req).map_err(bad_request)?;
+    let mut tx = state.pool.begin().await?;
+    let release = release_admin::create(&mut tx, &admin, &new).await?;
+    tx.commit().await?;
+    Ok((StatusCode::CREATED, Json(json!({ "release": release }))).into_response())
+}
+
+async fn release_detail(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = release_id(&id)?;
+    let mut tx = state.pool.begin().await?;
+    let release = release_admin::detail(&mut tx, &admin, id).await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "release": release })))
+}
+
+/// The upload's query string. Unknown keys are refused.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UploadParams {
+    platform: Option<String>,
+    filename: Option<String>,
+}
+
+const MSG_BAD_UPLOAD_QUERY: &str =
+    "the upload takes exactly two query parameters: platform and filename";
+const MSG_NOT_OCTET_STREAM: &str = "the upload body must be the raw file, sent as \
+     Content-Type: application/octet-stream";
+
+/// Whether the request's content type is `application/octet-stream`
+/// (parameters allowed).
+fn is_octet_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/octet-stream"))
+}
+
+/// The raw body is the file: streamed to the store (never buffered whole),
+/// hashed and counted on the way, then recorded. The body is the last
+/// extractor and is read only after the admin, path, query and content
+/// type checks pass.
+async fn upload_artifact(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+    params: Result<Query<UploadParams>, QueryRejection>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let id = release_id(&id)?;
+    let Query(params) =
+        params.map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, MSG_BAD_UPLOAD_QUERY))?;
+    let platform = release_admin::validate_platform(params.platform.as_deref().unwrap_or(""))
+        .map_err(bad_request)?;
+    let filename = release_admin::validate_filename(params.filename.as_deref().unwrap_or(""))
+        .map_err(bad_request)?;
+    if !is_octet_stream(&headers) {
+        return Err(ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            MSG_NOT_OCTET_STREAM,
+        ));
+    }
+    // A declared length over the limit is refused before a byte is read;
+    // the limit is enforced on the bytes themselves either way.
+    let declared = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if declared.is_some_and(|n| n > state.config.artifact_max_bytes) {
+        return Err(
+            ReleaseError::Store(StoreError::TooLarge(state.config.artifact_max_bytes)).into(),
+        );
+    }
+    use futures::TryStreamExt;
+    let reader =
+        tokio_util::io::StreamReader::new(body.into_data_stream().map_err(std::io::Error::other));
+    let artifact = release_admin::upload(
+        &state.pool,
+        state.artifacts.as_ref(),
+        state.config.artifact_max_bytes,
+        &admin,
+        id,
+        &platform,
+        &filename,
+        reader,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(json!({ "artifact": artifact }))).into_response())
+}
+
+async fn remove_artifact(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path((id, artifact_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = release_id(&id)?;
+    let artifact_id = Uuid::parse_str(&artifact_id)
+        .map_err(|_| ApiError::new(StatusCode::NOT_FOUND, release_admin::MSG_NO_ARTIFACT))?;
+    let release = release_admin::remove_artifact(
+        &state.pool,
+        state.artifacts.as_ref(),
+        &admin,
+        id,
+        artifact_id,
+    )
+    .await?;
+    Ok(Json(json!({ "release": release })))
+}
+
+async fn publish_release(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = release_id(&id)?;
+    let mut tx = state.pool.begin().await?;
+    let release = release_admin::publish(&mut tx, &admin, id).await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "release": release })))
+}
+
+async fn withdraw_release(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = release_id(&id)?;
+    let mut tx = state.pool.begin().await?;
+    let release = release_admin::withdraw(&mut tx, &admin, id).await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "release": release })))
 }

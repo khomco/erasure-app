@@ -35,5 +35,8 @@ __pycache__/
 .scratch/.driver/
 .scratch/*/stories/*.approved
 
+# wipe-hub's default release artifact directory (--artifact-dir)
+.wipe-hub/
+
 # Astro generated types and cache (sites/www)
 sites/www/.astro/

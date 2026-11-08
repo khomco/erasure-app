@@ -15,6 +15,8 @@ use url::Url;
 use wipe_cert::SigningKey;
 use wipe_license::VendorRoot;
 
+pub use crate::artifacts::ARTIFACT_MAX_BYTES;
+
 pub const DEFAULT_ADDR: &str = "127.0.0.1:7900";
 pub const DEFAULT_DATABASE_URL: &str = "postgres://wipehub:wipehub@127.0.0.1:55432/wipehub";
 pub const DEFAULT_SMTP_HOST: &str = "127.0.0.1";
@@ -27,6 +29,10 @@ pub const DEFAULT_SITE_ORIGIN: &str = "http://localhost:4321";
 /// Where the portal is looked for when `--portal-dir` is absent, relative to
 /// the working directory.
 pub const DEFAULT_PORTAL_DIR: &str = "apps/portal/dist";
+
+/// Where release artifacts are stored when `--artifact-dir` is absent,
+/// relative to the working directory (git-ignored).
+pub const DEFAULT_ARTIFACT_DIR: &str = ".wipe-hub/artifacts";
 
 /// The command that builds the portal, named in warnings and errors.
 pub const PORTAL_BUILD_HINT: &str = "cd apps/portal && pnpm build";
@@ -102,6 +108,10 @@ pub struct Args {
     /// and `POST /api/leads`.
     #[arg(long, env = "WIPE_HUB_SITE_ORIGIN", default_value = DEFAULT_SITE_ORIGIN)]
     pub site_origin: String,
+    /// Directory release artifacts are stored in; created if missing.
+    /// Relative paths are under the working directory.
+    #[arg(long, env = "WIPE_HUB_ARTIFACT_DIR", default_value = DEFAULT_ARTIFACT_DIR)]
+    pub artifact_dir: PathBuf,
 }
 
 /// Raw `wipe-hub admin create` flags (portal-accounts story 5). The
@@ -136,6 +146,38 @@ pub struct AdminCreateArgs {
     /// Absolute URL the hub is reached at, used in the emailed link.
     #[arg(long, env = "WIPE_HUB_PUBLIC_BASE_URL", default_value = DEFAULT_PUBLIC_BASE_URL)]
     pub public_base_url: String,
+}
+
+/// Raw `wipe-hub release publish` flags (software-downloads story 1, CAP-5).
+/// `--database-url` and `--artifact-dir` are `serve`'s, with the same env
+/// twins and defaults.
+#[derive(Debug, Clone, Parser)]
+pub struct ReleasePublishArgs {
+    /// SemVer 2.0.0 version, unique across every release (e.g. `0.2.0`).
+    #[arg(long)]
+    pub version: String,
+    /// Release notes shown with the release.
+    #[arg(long)]
+    pub notes: String,
+    /// Release channel: `stable` or `preview`.
+    #[arg(long, default_value = "stable")]
+    pub channel: String,
+    /// One artifact as `<platform>=<path>` (e.g. `linux-x86_64=target/release/wipestation`);
+    /// repeat for each platform.
+    #[arg(long = "file", value_name = "PLATFORM=PATH", required = true)]
+    pub files: Vec<String>,
+    /// Postgres connection URL.
+    #[arg(
+        long,
+        env = "WIPE_HUB_DATABASE_URL",
+        default_value = DEFAULT_DATABASE_URL,
+        hide_env_values = true
+    )]
+    pub database_url: String,
+    /// Directory release artifacts are stored in; created if missing.
+    /// Relative paths are under the working directory.
+    #[arg(long, env = "WIPE_HUB_ARTIFACT_DIR", default_value = DEFAULT_ARTIFACT_DIR)]
+    pub artifact_dir: PathBuf,
 }
 
 /// `--mail-from` as a mailbox, or [`ConfigError::BadMailFrom`].
@@ -174,6 +216,11 @@ pub struct Config {
     /// The marketing site's origin, serialized as a browser sends it in
     /// `Origin` (`scheme://host[:port]`, no default port, no trailing slash).
     pub site_origin: String,
+    /// The existing directory release artifacts are stored in (absolute).
+    pub artifact_dir: PathBuf,
+    /// The largest artifact accepted: [`ARTIFACT_MAX_BYTES`]. Not a flag;
+    /// tests lower it.
+    pub artifact_max_bytes: u64,
 }
 
 #[derive(Debug, Error)]
@@ -211,6 +258,8 @@ pub enum ConfigError {
     PortalDirInvalid { path: PathBuf },
     #[error("--site-origin {value:?} is not a site origin (`http(s)://host[:port]`): {reason}")]
     BadSiteOrigin { value: String, reason: String },
+    #[error("--artifact-dir {}: {reason}", path.display())]
+    ArtifactDirInvalid { path: PathBuf, reason: String },
 }
 
 impl Config {
@@ -247,6 +296,7 @@ impl Config {
 
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let portal_dir = resolve_portal_dir(args.portal_dir, &cwd)?;
+        let artifact_dir = resolve_artifact_dir(&args.artifact_dir, &cwd)?;
 
         Ok(Self {
             addr: args.addr,
@@ -262,6 +312,8 @@ impl Config {
             vendor_root,
             portal_dir,
             site_origin,
+            artifact_dir,
+            artifact_max_bytes: ARTIFACT_MAX_BYTES,
         })
     }
 }
@@ -286,6 +338,33 @@ pub fn resolve_portal_dir(
             Ok(dir.join("index.html").is_file().then_some(dir))
         }
     }
+}
+
+/// The artifact directory as an absolute path (relative ones are under
+/// `cwd`), created if missing. A path that cannot be created, or that is not
+/// a directory, is an error: the hub must not start without somewhere to
+/// keep release files.
+pub fn resolve_artifact_dir(path: &Path, cwd: &Path) -> Result<PathBuf, ConfigError> {
+    let dir = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let bad = |reason: String| ConfigError::ArtifactDirInvalid {
+        path: dir.clone(),
+        reason,
+    };
+    if path.as_os_str().is_empty() {
+        return Err(bad("the path is empty".into()));
+    }
+    if dir.exists() && !dir.is_dir() {
+        return Err(bad("it exists and is not a directory".into()));
+    }
+    fs::create_dir_all(&dir).map_err(|e| bad(format!("it cannot be created: {e}")))?;
+    if !dir.is_dir() {
+        return Err(bad("it is not a directory".into()));
+    }
+    Ok(dir)
 }
 
 // Hand-written so secrets (Stripe key, webhook secret, DB password, root seed) never
@@ -321,6 +400,8 @@ impl fmt::Debug for Config {
                 &self.portal_dir.as_ref().map(|p| p.display().to_string()),
             )
             .field("site_origin", &self.site_origin)
+            .field("artifact_dir", &self.artifact_dir.display().to_string())
+            .field("artifact_max_bytes", &self.artifact_max_bytes)
             .finish()
     }
 }
@@ -485,8 +566,14 @@ mod tests {
             vendor_root_seed: None,
             portal_dir: None,
             site_origin: DEFAULT_SITE_ORIGIN.into(),
+            artifact_dir: ARTIFACTS.path().to_path_buf(),
         }
     }
+
+    /// One artifact directory for every unit test here, so none creates
+    /// `.wipe-hub/artifacts` under the crate.
+    static ARTIFACTS: std::sync::LazyLock<tempfile::TempDir> =
+        std::sync::LazyLock::new(|| tempfile::tempdir().unwrap());
 
     #[test]
     fn defaults_are_valid() {
@@ -776,7 +863,7 @@ mod tests {
     fn clap_defaults_match_the_constants() {
         use clap::CommandFactory;
         let smtp_port = DEFAULT_SMTP_PORT.to_string();
-        let expected: [(&str, Option<&str>); 13] = [
+        let expected: [(&str, Option<&str>); 14] = [
             ("addr", Some(DEFAULT_ADDR)),
             ("database_url", Some(DEFAULT_DATABASE_URL)),
             ("smtp_host", Some(DEFAULT_SMTP_HOST)),
@@ -790,6 +877,7 @@ mod tests {
             ("vendor_root_seed", None),
             ("portal_dir", None),
             ("site_origin", Some(DEFAULT_SITE_ORIGIN)),
+            ("artifact_dir", Some(DEFAULT_ARTIFACT_DIR)),
         ];
         let cmd = Args::command();
         let mut seen = 0;
@@ -974,6 +1062,90 @@ mod tests {
         ] {
             assert!(warned(quiet).is_empty(), "{quiet}");
         }
+    }
+
+    #[test]
+    fn artifact_dir_is_created_under_the_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = resolve_artifact_dir(Path::new(DEFAULT_ARTIFACT_DIR), tmp.path()).unwrap();
+        assert_eq!(dir, tmp.path().join(".wipe-hub/artifacts"));
+        assert!(dir.is_dir());
+        // Existing is fine, and an absolute path ignores the cwd.
+        let again = resolve_artifact_dir(&dir, Path::new("/nonexistent")).unwrap();
+        assert_eq!(again, dir);
+    }
+
+    #[test]
+    fn an_artifact_dir_that_is_a_file_or_cannot_be_made_refuses_to_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a-file");
+        fs::write(&file, "x").unwrap();
+        for path in [file.clone(), file.join("below")] {
+            let mut a = args();
+            a.artifact_dir = path.clone();
+            let err = Config::from_args(a).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::ArtifactDirInvalid { .. }),
+                "{err}"
+            );
+            let msg = err.to_string();
+            assert!(msg.contains("--artifact-dir"), "{msg}");
+            assert!(msg.contains(&path.display().to_string()), "{msg}");
+        }
+        let mut a = args();
+        a.artifact_dir = PathBuf::new();
+        assert!(matches!(
+            Config::from_args(a).unwrap_err(),
+            ConfigError::ArtifactDirInvalid { .. }
+        ));
+    }
+
+    #[test]
+    fn the_artifact_limit_is_a_gibibyte_and_in_debug() {
+        let c = Config::from_args(args()).unwrap();
+        assert_eq!(c.artifact_max_bytes, 1 << 30);
+        let debug = format!("{c:?}");
+        assert!(
+            debug.contains(&c.artifact_dir.display().to_string()),
+            "{debug}"
+        );
+    }
+
+    #[test]
+    fn release_publish_shares_serves_flags() {
+        use clap::CommandFactory;
+        let serve = Args::command();
+        let publish = ReleasePublishArgs::command();
+        let shared = ["database_url", "artifact_dir"];
+        for id in shared {
+            let find = |cmd: &clap::Command| {
+                let arg = cmd
+                    .get_arguments()
+                    .find(|a| a.get_id().as_str() == id)
+                    .unwrap_or_else(|| panic!("--{id} missing"))
+                    .clone();
+                (
+                    arg.get_env().map(|e| e.to_os_string()),
+                    arg.get_default_values().to_vec(),
+                    arg.is_hide_env_values_set(),
+                )
+            };
+            assert_eq!(find(&publish), find(&serve), "--{id}");
+        }
+        publish.clone().debug_assert();
+        let base = ["publish", "--version", "0.2.0", "--notes", "n"];
+        assert!(
+            ReleasePublishArgs::try_parse_from(base).is_err(),
+            "--file is required"
+        );
+        let a = ReleasePublishArgs::try_parse_from(
+            base.iter()
+                .copied()
+                .chain(["--file", "a=x", "--file", "b=y"]),
+        )
+        .unwrap();
+        assert_eq!(a.channel, "stable");
+        assert_eq!(a.files, ["a=x", "b=y"]);
     }
 
     #[test]

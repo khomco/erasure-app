@@ -21,6 +21,8 @@ import { AdminOfferingPage } from "./pages/AdminOfferingPage";
 import { AdminOfferingsPage } from "./pages/AdminOfferingsPage";
 import { AdminOrganizationPage } from "./pages/AdminOrganizationPage";
 import { AdminPage } from "./pages/AdminPage";
+import { AdminReleasePage } from "./pages/AdminReleasePage";
+import { AdminReleasesPage } from "./pages/AdminReleasesPage";
 import { BuyPage } from "./pages/BuyPage";
 import { FakeBillingPage } from "./pages/FakeBillingPage";
 import { FakeCheckoutPage } from "./pages/FakeCheckoutPage";
@@ -276,6 +278,21 @@ const adminOfferingRoute = createRoute({
   },
 });
 
+const adminReleasesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/releases",
+  component: AdminReleasesPage,
+});
+
+const adminReleaseRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/releases/$id",
+  component: function AdminReleaseRoute() {
+    const { id } = adminReleaseRoute.useParams();
+    return <AdminReleasePage id={id} />;
+  },
+});
+
 const adminLicenceInspectRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/admin/licences/inspect",
@@ -317,6 +334,8 @@ const routeTree = rootRoute.addChildren([
   adminLeadRoute,
   adminOfferingsRoute,
   adminOfferingRoute,
+  adminReleasesRoute,
+  adminReleaseRoute,
   adminLicenceInspectRoute,
   adminLicenceRoute,
 ]);

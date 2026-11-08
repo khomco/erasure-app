@@ -12,6 +12,7 @@
 pub mod accounts;
 pub mod admin;
 pub mod admin_routes;
+pub mod artifacts;
 pub mod audit;
 pub mod auth;
 pub mod config;
@@ -31,6 +32,7 @@ pub mod order_routes;
 pub mod orders;
 pub mod payment_events;
 pub mod payments;
+pub mod release_admin;
 pub mod station_routes;
 pub mod stations;
 pub mod stripe;
@@ -60,6 +62,8 @@ pub struct AppState {
     pub mailer: Mailer,
     /// The payment provider `--payment-provider` selects (ADR-0007 §4).
     pub payments: Arc<dyn payments::PaymentProvider>,
+    /// Where release files are kept (ADR-0007 §5): `--artifact-dir`.
+    pub artifacts: Arc<dyn artifacts::ArtifactStore>,
 }
 
 impl AppState {
@@ -77,11 +81,13 @@ impl AppState {
             config.mail_from.clone(),
         );
         let payments = payments::provider_for(&config)?;
+        let artifacts = artifacts::store_for(config.artifact_dir.clone());
         Ok(Self {
             config: Arc::new(config),
             pool,
             mailer,
             payments,
+            artifacts,
         })
     }
 }
@@ -169,6 +175,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         payment_provider = ?state.config.payment_provider,
         portal_dir = ?state.config.portal_dir,
         site_origin = %state.config.site_origin,
+        artifact_dir = %state.config.artifact_dir.display(),
         "wipe-hub listening"
     );
     serve_on(listener, state).await

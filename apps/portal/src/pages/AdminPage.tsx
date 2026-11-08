@@ -14,7 +14,8 @@ import { Field, FormError, SubmitButton } from "./AuthForm";
 
 /**
  * `/admin`: vendor admins search customer organizations and users, and
- * reach the sales leads (`/admin/leads`) and offerings (`/admin/offerings`). Each
+ * reach the sales leads (`/admin/leads`), offerings (`/admin/offerings`) and
+ * releases (`/admin/releases`). Each
  * search is an audited view on the hub, so one runs only when its form is
  * submitted, never per keystroke or on page load. The hub decides who may
  * search; anyone else sees its 403 message.
@@ -48,6 +49,14 @@ export function AdminPage() {
               Offerings
             </Link>{" "}
             <span className="text-slate-400">what the vendor sells: create, publish, retire</span>
+          </p>
+          <p className="text-sm">
+            <Link to="/admin/releases" className="text-indigo-400 hover:underline">
+              Releases
+            </Link>{" "}
+            <span className="text-slate-400">
+              station software: create, upload files, publish, withdraw
+            </span>
           </p>
           <p className="text-sm">
             <Link to="/admin/licences/inspect" className="text-indigo-400 hover:underline">
