@@ -56,11 +56,15 @@ export function stationName(s: Station): string {
 }
 
 /**
- * "Released on …", "Renewal available …", "Expired on …", "Licensed to …" or
- * "No licence", as of `now`.
+ * "Released on …", "Revoked on …", "Renewal available …", "Expired on …",
+ * "Licensed to …" or "No licence", as of `now`. A revocation's reason is the
+ * vendor's and never reaches this page.
  */
 export function stationState(s: Station, now: Date = new Date()): string {
   if (s.released_at) return `Released on ${day(s.released_at)}`;
+  if (s.licence?.status === "revoked" && s.licence.revoked_at) {
+    return `Revoked on ${day(s.licence.revoked_at)}`;
+  }
   if (s.licence?.status === "active") {
     const expired = Date.parse(s.licence.not_after) <= now.getTime();
     if (s.renewal_available) {
@@ -158,6 +162,11 @@ export function SupersessionNote() {
         one a renewed licence here. The station uses the renewed licence only after the renewed
         file is installed on it. The old file keeps working until its own expiry date.
       </p>
+      <p>
+        A station whose licence the vendor revoked shows Revoked: it cannot be renewed or its
+        licence downloaded here, and it keeps its seat until an owner releases it. Contact the
+        vendor about a revoked licence.
+      </p>
     </div>
   );
 }
@@ -253,7 +262,7 @@ export function StationRow({ station: s, canRelease }: { station: Station; canRe
       </td>
       <td className="py-1 pr-3">{stationState(s)}</td>
       <td className="space-x-3 py-1 whitespace-nowrap">
-        {s.licence && !released && (
+        {s.licence && !released && s.licence.status !== "revoked" && (
           <a href={licenceDownloadPath(s.licence.id)} className="text-indigo-400 hover:underline">
             Download licence
           </a>

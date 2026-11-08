@@ -62,6 +62,7 @@ const station: Station = {
     issued_at: "2026-11-08T10:02:00Z",
     status: "active",
     superseded_at: null,
+    revoked_at: null,
   },
   renewal_available: false,
 };
@@ -196,6 +197,49 @@ describe("renewal", () => {
     expect(t).toContain("to 2028-11-08");
     expect(t).toContain("Download the renewed licence");
     expect(t).toContain("until then it keeps using the old file");
+  });
+});
+
+describe("a revoked licence", () => {
+  const revoked: Station = {
+    ...station,
+    licence: { ...station.licence!, status: "revoked", revoked_at: "2026-12-02T09:00:00Z" },
+  };
+
+  function renderRow(s: Station): string {
+    return renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client: new QueryClient() },
+        createElement(
+          "table",
+          null,
+          createElement("tbody", null, createElement(StationRow, { station: s, canRelease: true })),
+        ),
+      ),
+    );
+  }
+
+  it("reads Revoked on its date, even when a renewal would otherwise be due", () => {
+    expect(stationState(revoked, new Date("2026-12-03T00:00:00Z"))).toBe("Revoked on 2026-12-02");
+    expect(stationState({ ...revoked, released_at: "2026-12-04T00:00:00Z" })).toBe(
+      "Released on 2026-12-04",
+    );
+  });
+
+  it("has no download link but can still be released", () => {
+    const html = renderRow(revoked);
+    expect(html).not.toContain("/download");
+    const t = text(html);
+    expect(t).toContain("Revoked on 2026-12-02");
+    expect(t).not.toContain("Download licence");
+    expect(t).toContain("Release");
+    expect(renderRow(station)).toContain(`/api/licences/${station.licence!.id}/download`);
+  });
+
+  it("is explained to every member", () => {
+    const t = text(renderToStaticMarkup(createElement(SupersessionNote)));
+    expect(t).toContain("the vendor revoked shows Revoked");
   });
 });
 

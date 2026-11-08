@@ -652,3 +652,182 @@ async fn entitlements_and_renewals_refuse_illegal_changes() {
             .expect_err(sql);
     }
 }
+
+/// A licence row of `source` inserted directly for organization `org`: its
+/// id. A station licence names `station` and `ent`; a vendor one neither.
+async fn insert_licence(
+    t: &TestDb,
+    org: uuid::Uuid,
+    station: Option<(uuid::Uuid, uuid::Uuid)>,
+    reason: Option<&str>,
+) -> Result<uuid::Uuid, sqlx::Error> {
+    let source = if station.is_some() {
+        "station"
+    } else {
+        "vendor"
+    };
+    sqlx::query_scalar(
+        "INSERT INTO licences (id, organization_id, station_id, entitlement_id, instance_key_id, \
+                               root_key_id, not_after, issued_at, document, source, \
+                               issue_reason) \
+         VALUES (gen_random_uuid(), $1, $2, $3, 'ed25519:AAAAAAAAAAAAAAAAAAAAAA', \
+                 'ed25519:BBBBBBBBBBBBBBBBBBBBBB', now() + interval '30 days', now(), '{}', $4, \
+                 $5) RETURNING id",
+    )
+    .bind(org)
+    .bind(station.map(|s| s.0))
+    .bind(station.map(|s| s.1))
+    .bind(source)
+    .bind(reason)
+    .fetch_one(&t.pool)
+    .await
+}
+
+#[tokio::test]
+async fn licences_refuse_illegal_sources_and_revocations() {
+    let t = TestDb::migrated().await;
+    let (order, org) = paid_order(&t, "annual").await;
+    let pool = &t.pool;
+    let ent: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO entitlements (organization_id, order_id, provider, term_start, term_end, \
+                                   renews) \
+         VALUES ($1, $2, 'stripe', now(), now() + interval '12 months', false) RETURNING id",
+    )
+    .bind(org)
+    .bind(order)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let user: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO users (organization_id, email, name, password_hash, role) \
+         VALUES ($1, 'o@example.test', 'O', 'x', 'owner') RETURNING id",
+    )
+    .bind(org)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let station: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO stations (organization_id, entitlement_id, instance_key_id, registered_by) \
+         VALUES ($1, $2, 'ed25519:AAAAAAAAAAAAAAAAAAAAAA', $3) RETURNING id",
+    )
+    .bind(org)
+    .bind(ent)
+    .bind(user)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    // Source shape: a station licence has a station and entitlement and no
+    // reason; a vendor licence the reverse, with a non-blank reason.
+    let long = "x".repeat(501);
+    for (s, reason) in [
+        (Some((station, ent)), Some("why")),
+        (None, None),
+        (None, Some("   ")),
+        (None, Some(long.as_str())),
+    ] {
+        insert_licence(&t, org, s, reason)
+            .await
+            .expect_err(&format!("{s:?} {reason:?}"));
+    }
+    sqlx::query(
+        "INSERT INTO licences (id, organization_id, station_id, instance_key_id, root_key_id, \
+                               not_after, issued_at, document, source) \
+         VALUES (gen_random_uuid(), $1, $2, 'ed25519:AAAAAAAAAAAAAAAAAAAAAA', 'r', \
+                 now() + interval '1 day', now(), '{}', 'station')",
+    )
+    .bind(org)
+    .bind(station)
+    .execute(pool)
+    .await
+    .expect_err("a station licence without its entitlement");
+    let station_licence = insert_licence(&t, org, Some((station, ent)), None)
+        .await
+        .unwrap();
+    let vendor = insert_licence(&t, org, None, Some("evaluation"))
+        .await
+        .unwrap();
+
+    // Content, source and reason never change; status needs its stamps.
+    for sql in [
+        "UPDATE licences SET source = 'station' WHERE id = $1",
+        "UPDATE licences SET issue_reason = 'other' WHERE id = $1",
+        "UPDATE licences SET status = 'bogus' WHERE id = $1",
+        "UPDATE licences SET status = 'revoked' WHERE id = $1",
+        "UPDATE licences SET status = 'revoked', revoked_at = now() WHERE id = $1",
+        "UPDATE licences SET status = 'revoked', revoked_at = now(), revocation_reason = ' ' \
+         WHERE id = $1",
+        "UPDATE licences SET status = 'revoked', revoked_at = now(), revocation_reason = 'r', \
+         superseded_at = now() WHERE id = $1",
+        "UPDATE licences SET revoked_at = now(), revocation_reason = 'r' WHERE id = $1",
+        "DELETE FROM licences WHERE id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(vendor)
+            .execute(pool)
+            .await
+            .expect_err(sql);
+    }
+    // active -> revoked.
+    sqlx::query(
+        "UPDATE licences SET status = 'revoked', revoked_at = now(), \
+         revocation_reason = 'fraud' WHERE id = $1",
+    )
+    .bind(vendor)
+    .execute(pool)
+    .await
+    .unwrap();
+    // A revoked licence never changes again.
+    for sql in [
+        "UPDATE licences SET status = 'active', revoked_at = NULL, revocation_reason = NULL \
+         WHERE id = $1",
+        "UPDATE licences SET status = 'superseded', superseded_at = now(), revoked_at = NULL, \
+         revocation_reason = NULL WHERE id = $1",
+        "UPDATE licences SET revocation_reason = 'other' WHERE id = $1",
+        "UPDATE licences SET revoked_at = now() - interval '1 day' WHERE id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(vendor)
+            .execute(pool)
+            .await
+            .expect_err(sql);
+    }
+
+    // active -> superseded -> revoked, keeping when it was superseded.
+    sqlx::query(
+        "UPDATE licences SET status = 'superseded', superseded_at = now() - interval '1 hour' \
+         WHERE id = $1",
+    )
+    .bind(station_licence)
+    .execute(pool)
+    .await
+    .unwrap();
+    for sql in [
+        "UPDATE licences SET status = 'active', superseded_at = NULL WHERE id = $1",
+        "UPDATE licences SET status = 'revoked', revoked_at = now(), revocation_reason = 'r', \
+         superseded_at = now() WHERE id = $1",
+        "UPDATE licences SET status = 'revoked', revoked_at = now(), revocation_reason = 'r', \
+         superseded_at = NULL WHERE id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(station_licence)
+            .execute(pool)
+            .await
+            .expect_err(sql);
+    }
+    sqlx::query(
+        "UPDATE licences SET status = 'revoked', revoked_at = now(), revocation_reason = 'r' \
+         WHERE id = $1",
+    )
+    .bind(station_licence)
+    .execute(pool)
+    .await
+    .unwrap();
+    let superseded: bool =
+        sqlx::query_scalar("SELECT superseded_at IS NOT NULL FROM licences WHERE id = $1")
+            .bind(station_licence)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert!(superseded);
+}

@@ -307,6 +307,7 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
             "instance_key_id",
             "issued_at",
             "not_after",
+            "revoked_at",
             "root_key_id",
             "station_id",
             "status",
@@ -330,6 +331,7 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
     assert_eq!(licence["status"], "active");
     assert_eq!(licence["root_key_id"], json!(f.root.public_key_id()));
     assert_eq!(licence["superseded_at"], Value::Null);
+    assert_eq!(licence["revoked_at"], Value::Null);
 
     // Every role downloads the exact stored file.
     let resp = f.download(&f.member, licence_id).await;

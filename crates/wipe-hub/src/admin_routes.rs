@@ -22,10 +22,30 @@
 //! - `POST /api/admin/offerings/:id {offering}` — edit it (a full body).
 //! - `POST /api/admin/offerings/:id/publish` — draft to published.
 //! - `POST /api/admin/offerings/:id/retire` — published to retired.
+//! - `GET /api/admin/organizations/:id/licences` — every licence of a
+//!   customer organization, station and vendor-issued, newest first.
+//! - `POST /api/admin/organizations/:id/licences {instance_key_id, scope,
+//!   station_id?, site?, quota_erasures, features, days, reason}` — sign a
+//!   licence for the organization outside any entitlement and seat (201
+//!   `{licence}`); 503 [`MSG_ISSUANCE_UNAVAILABLE`] without a vendor root.
+//! - `GET /api/admin/licences/:id` — `{licence, body, verification}`: the
+//!   record, its stored file's decoded body, and whether that file verifies
+//!   against the hub's vendor root (`no_root` when it has none).
+//! - `GET /api/admin/licences/:id/download` — the stored file, byte for
+//!   byte, with the customer download's headers.
+//! - `POST /api/admin/licences/inspect {document}` — decode and verify a
+//!   pasted licence file: `{body, verification, licence}` (the hub's record
+//!   of it or `null`); 400 [`licence_admin::MSG_NOT_A_LICENCE`].
+//! - `POST /api/admin/licences/:id/revoke {reason}` — mark a licence
+//!   revoked: `{licence}`; 409 [`stations::MSG_ALREADY_REVOKED`] the second
+//!   time. Recorded in the hub only: stations are not told.
 //!
 //! The organization and user routes are read-only; the lead routes also
-//! change sales leads, through [`crate::lead_admin`], and the offering
-//! routes change offerings, through [`crate::offering_admin`].
+//! change sales leads, through [`crate::lead_admin`], the offering
+//! routes change offerings, through [`crate::offering_admin`], and the
+//! licence routes issue and revoke licences through [`crate::stations`]
+//! and read them through [`crate::licence_admin`]. A non-UUID or unknown
+//! licence id is 404 [`MSG_NO_LICENCE`], writing nothing.
 //!
 //! Only a vendor admin gets in ([`VendorAdmin`]'s extractor, the first
 //! extractor of every handler): no session is 401 `not signed in`; any
@@ -62,7 +82,10 @@ use crate::admin::{
 };
 use crate::auth::{session_token, ApiError, JsonBody, MSG_NOT_SIGNED_IN};
 use crate::lead_admin::{self, FilterParams, LeadDetail, LeadFilter, LeadList};
+use crate::licence_admin::{self, InspectRequest, IssueRequest, RevokeRequest, MSG_NOT_A_LICENCE};
 use crate::offering_admin::{self, NewOffering, OfferingError, OfferingList, OfferingRequest};
+use crate::station_routes::licence_file_response;
+use crate::stations::{self, MSG_ISSUANCE_UNAVAILABLE, MSG_NO_LICENCE};
 use crate::AppState;
 
 pub const MSG_ADMIN_ONLY: &str = "only vendor admins can use the admin area";
@@ -94,6 +117,14 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/admin/offerings/:id/publish", post(publish_offering))
         .route("/api/admin/offerings/:id/retire", post(retire_offering))
+        .route(
+            "/api/admin/organizations/:id/licences",
+            get(organization_licences).post(issue_licence),
+        )
+        .route("/api/admin/licences/inspect", post(inspect_licence))
+        .route("/api/admin/licences/:id", get(licence_detail))
+        .route("/api/admin/licences/:id/download", get(download_licence))
+        .route("/api/admin/licences/:id/revoke", post(revoke_licence))
 }
 
 impl From<AdminReadError> for ApiError {
@@ -420,4 +451,124 @@ async fn retire_offering(
         .ok_or_else(no_offering)?;
     tx.commit().await?;
     Ok(Json(json!({ "offering": offering })))
+}
+
+// ---------------------------------------------------------------------------
+// Licences
+
+fn no_organization() -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, MSG_NO_ORGANIZATION)
+}
+
+fn no_licence() -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, MSG_NO_LICENCE)
+}
+
+/// The licence id from the path, or 404.
+fn licence_id(id: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(id).map_err(|_| no_licence())
+}
+
+fn bad_request(m: String) -> ApiError {
+    ApiError::new(StatusCode::BAD_REQUEST, m)
+}
+
+async fn organization_licences(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = Uuid::parse_str(&id).map_err(|_| no_organization())?;
+    let mut tx = state.pool.begin().await?;
+    let licences = licence_admin::list_for_organization(&mut tx, &admin, id)
+        .await?
+        .ok_or_else(no_organization)?;
+    tx.commit().await?;
+    Ok(Json(json!({ "licences": licences })))
+}
+
+async fn issue_licence(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+    body: Result<JsonBody<IssueRequest>, ApiError>,
+) -> Result<Response, ApiError> {
+    let Some(vendor) = state.config.vendor_root.as_ref() else {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            MSG_ISSUANCE_UNAVAILABLE,
+        ));
+    };
+    let id = Uuid::parse_str(&id).map_err(|_| no_organization())?;
+    let JsonBody(req) = body?;
+    let new = req.validate().map_err(bad_request)?;
+    let mut tx = state.pool.begin().await?;
+    let licence_id = stations::vendor_issue(&mut tx, &vendor.root, &admin, id, &new).await?;
+    let licence = licence_admin::get(&mut tx, licence_id)
+        .await?
+        .ok_or_else(|| ApiError::internal("an issued licence vanished"))?;
+    tx.commit().await?;
+    Ok((StatusCode::CREATED, Json(json!({ "licence": licence }))).into_response())
+}
+
+async fn licence_detail(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+) -> Result<Json<licence_admin::LicenceDetail>, ApiError> {
+    let id = licence_id(&id)?;
+    let root = state.config.vendor_root.as_ref().map(|v| &v.root);
+    let mut tx = state.pool.begin().await?;
+    let detail = licence_admin::detail(&mut tx, &admin, root, id)
+        .await?
+        .ok_or_else(no_licence)?;
+    tx.commit().await?;
+    Ok(Json(detail))
+}
+
+async fn download_licence(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let id = licence_id(&id)?;
+    let mut tx = state.pool.begin().await?;
+    let document = licence_admin::document(&mut tx, &admin, id)
+        .await?
+        .ok_or_else(no_licence)?;
+    tx.commit().await?;
+    licence_file_response(id, document)
+}
+
+/// Any body that is not `{document: "<text>"}` is [`MSG_NOT_A_LICENCE`].
+async fn inspect_licence(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    body: Result<JsonBody<InspectRequest>, ApiError>,
+) -> Result<Json<licence_admin::Inspected>, ApiError> {
+    let JsonBody(req) =
+        body.map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, MSG_NOT_A_LICENCE))?;
+    let root = state.config.vendor_root.as_ref().map(|v| &v.root);
+    let mut tx = state.pool.begin().await?;
+    let inspected = licence_admin::inspect_document(&mut tx, &admin, root, &req.document).await?;
+    tx.commit().await?;
+    Ok(Json(inspected))
+}
+
+async fn revoke_licence(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+    body: Result<JsonBody<RevokeRequest>, ApiError>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = licence_id(&id)?;
+    let JsonBody(req) = body?;
+    let reason = licence_admin::validate_reason("reason", &req.reason).map_err(bad_request)?;
+    let mut tx = state.pool.begin().await?;
+    stations::revoke(&mut tx, &admin, id, &reason).await?;
+    let licence = licence_admin::get(&mut tx, id)
+        .await?
+        .ok_or_else(|| ApiError::internal("a revoked licence vanished"))?;
+    tx.commit().await?;
+    Ok(Json(json!({ "licence": licence })))
 }

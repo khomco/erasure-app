@@ -8,7 +8,7 @@
 import { ensureOk, isObject, json, request, type Fetch } from "./auth";
 import { SCOPES, type Scope } from "./adminOfferings";
 
-export const LICENCE_STATUSES = ["active", "superseded"] as const;
+export const LICENCE_STATUSES = ["active", "superseded", "revoked"] as const;
 export type LicenceStatus = (typeof LICENCE_STATUSES)[number];
 
 /**
@@ -27,6 +27,11 @@ export interface Licence {
   issued_at: string;
   status: LicenceStatus;
   superseded_at: string | null;
+  /**
+   * Set when a vendor admin revoked it. The hub records this only: the file
+   * keeps working offline until its own expiry. The reason is never shown here.
+   */
+  revoked_at: string | null;
 }
 
 /** A registered station and its most recently issued licence. */
@@ -98,7 +103,8 @@ export function isLicence(v: unknown): v is Licence {
     typeof v.not_after === "string" &&
     typeof v.issued_at === "string" &&
     oneOf(LICENCE_STATUSES, v.status) &&
-    isNullableString(v.superseded_at)
+    isNullableString(v.superseded_at) &&
+    isNullableString(v.revoked_at)
   );
 }
 

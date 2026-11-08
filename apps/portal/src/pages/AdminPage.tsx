@@ -49,6 +49,15 @@ export function AdminPage() {
             </Link>{" "}
             <span className="text-slate-400">what the vendor sells: create, publish, retire</span>
           </p>
+          <p className="text-sm">
+            <Link to="/admin/licences/inspect" className="text-indigo-400 hover:underline">
+              Inspect a licence file
+            </Link>{" "}
+            <span className="text-slate-400">
+              decode one and check it against this hub's vendor root; issue and revoke licences
+              from an organization's page
+            </span>
+          </p>
           <OrganizationSearchForm />
           <UserSearchForm />
         </>

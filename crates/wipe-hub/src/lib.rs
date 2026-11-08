@@ -23,6 +23,7 @@ pub mod health;
 pub mod lead_admin;
 pub mod lead_routes;
 pub mod leads;
+pub mod licence_admin;
 pub mod mail;
 pub mod offering_admin;
 pub mod order_routes;

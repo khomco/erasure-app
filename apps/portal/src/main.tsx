@@ -14,6 +14,8 @@ import "./index.css";
 import { AcceptInvitePage } from "./pages/AcceptInvitePage";
 import { AccountPage } from "./pages/AccountPage";
 import { AdminLeadPage } from "./pages/AdminLeadPage";
+import { AdminLicenceInspectPage } from "./pages/AdminLicenceInspectPage";
+import { AdminLicencePage } from "./pages/AdminLicencePage";
 import { AdminLeadsPage } from "./pages/AdminLeadsPage";
 import { AdminOfferingPage } from "./pages/AdminOfferingPage";
 import { AdminOfferingsPage } from "./pages/AdminOfferingsPage";
@@ -274,6 +276,21 @@ const adminOfferingRoute = createRoute({
   },
 });
 
+const adminLicenceInspectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/licences/inspect",
+  component: AdminLicenceInspectPage,
+});
+
+const adminLicenceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/licences/$id",
+  component: function AdminLicenceRoute() {
+    const { id } = adminLicenceRoute.useParams();
+    return <AdminLicencePage id={id} />;
+  },
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   signUpRoute,
@@ -300,6 +317,8 @@ const routeTree = rootRoute.addChildren([
   adminLeadRoute,
   adminOfferingsRoute,
   adminOfferingRoute,
+  adminLicenceInspectRoute,
+  adminLicenceRoute,
 ]);
 
 const router = createRouter({ routeTree });

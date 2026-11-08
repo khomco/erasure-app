@@ -20,7 +20,11 @@
 //!   refusals are [`stations::reissue`]'s.
 //! - `GET /api/licences/:id/download` — any role: the stored licence file,
 //!   byte for byte, as `application/json` with `Content-Disposition:
-//!   attachment`; audited.
+//!   attachment`; audited. A revoked licence is 409
+//!   [`stations::MSG_LICENCE_REVOKED`] and a vendor-issued one 404: those
+//!   reach a customer only through the vendor.
+//! - `POST /api/stations/:id/reissue` refuses a station whose latest
+//!   licence is revoked (409 [`stations::MSG_LICENCE_REVOKED`]).
 //! - `GET /api/licensing/root` — any role: `{root: {public_key_id,
 //!   public_key_b64} | null}`, the vendor root public key a station passes as
 //!   `--vendor-root-b64` and an auditor verifies against.
@@ -180,6 +184,13 @@ async fn download(
         .await?
         .ok_or_else(not_found)?;
     tx.commit().await?;
+    licence_file_response(id, document)
+}
+
+/// Licence `id`'s stored file as a download: `application/json`,
+/// `Content-Disposition: attachment`, `Cache-Control: no-store`. The
+/// customer and the admin download share it.
+pub(crate) fn licence_file_response(id: Uuid, document: String) -> Result<Response, ApiError> {
     let disposition = HeaderValue::from_str(&format!("attachment; filename=\"licence-{id}.json\""))
         .map_err(ApiError::internal)?;
     Ok((

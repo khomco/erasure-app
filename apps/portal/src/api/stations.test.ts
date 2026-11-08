@@ -28,6 +28,7 @@ const licence: Licence = {
   issued_at: "2026-11-08T10:02:00Z",
   status: "active",
   superseded_at: null,
+  revoked_at: null,
 };
 
 const station: Station = {
@@ -94,6 +95,9 @@ describe("guards", () => {
     expect(
       isLicence({ ...licence, status: "superseded", superseded_at: "2026-12-01T00:00:00Z" }),
     ).toBe(true);
+    expect(
+      isLicence({ ...licence, status: "revoked", revoked_at: "2026-12-02T00:00:00Z" }),
+    ).toBe(true);
     expect(isStation(station)).toBe(true);
     expect(isStation({ ...station, renewal_available: true })).toBe(true);
     expect(isStation({ ...station, licence: null, scope: "site", station_id: null })).toBe(true);
@@ -101,7 +105,8 @@ describe("guards", () => {
   });
 
   it("reject malformed stations and licences", () => {
-    expect(isLicence({ ...licence, status: "revoked" })).toBe(false);
+    expect(isLicence({ ...licence, status: "cancelled" })).toBe(false);
+    expect(isLicence({ ...licence, revoked_at: undefined })).toBe(false);
     expect(isLicence({ ...licence, superseded_at: undefined })).toBe(false);
     expect(isStation({ ...station, scope: "fleet" })).toBe(false);
     expect(isStation({ ...station, released_at: undefined })).toBe(false);
