@@ -2,44 +2,86 @@
 
 ## Layering
 
+Station side (one `wipestation` process per bench):
+
 ```
 +----------------------------------------------------------------+
-|  apps/desktop  (Tauri 2 + React/Vite)                          |
-|   • WebKit/WebView2 native window                              |
-|   • Same React bundle is also served by the HTTP API for       |
-|     remote tablet operators                                    |
+|  apps/desktop  (React/Vite bundle)                             |
+|   • served by wipe-server at / to browsers and tablets         |
+|   • also shown in the Tauri 2 window (see hosts below)         |
 +----------------------------------------------------------------+
                               |
                               |  HTTP REST + WebSocket
                               v
 +----------------------------------------------------------------+
-|  wipe-server  (Axum)                                           |
-|   • /api/devices, /api/jobs, /api/jobs/:id/certificate         |
-|   • /api/jobs/:id/escalate-to-destroy, /api/manifests[/:id]    |
-|   • /api/events (WS) — JobBroadcast + FleetEvent fan-out       |
-|   • Auto-signs Certificate on JobState::Erased|PendingCoSign   |
+|  hosts: wipe-cli (binary `wipestation`)                        |
+|         wipestation-desktop (Tauri 2 shell, src-tauri)         |
+|   each starts wipe-server in-process                           |
 +----------------------------------------------------------------+
-                |               |               |
-                v               v               v
-       +--------------+ +-----------------+ +--------------+
-       | wipe-engine  | | wipe-fleet      | | wipe-cert    |
-       |  • Runner    | |  • mDNS adv+brw | |  • Schema    |
-       |  • State mch | |  • Lead elect.  | |  • Canonical |
-       |  • Backend△  | |  • Peers        | |  • Ed25519   |
-       +------△-------+ +-----------------+ +--------------+
-              │                                       
-              │ trait impl                            
-       +------┴-----------+                           
-       | wipe-engine-mock |  (today: simulated)       
-       | wipe-engine-linux|  (future: ioctl + raw I/O)
-       +------------------+                           
-                                                      
-       +------------------+                           
-       | wipe-common      |  (types: Device, Method,  
-       |  • shared types  |   Capabilities, Job,      
-       |  • method select |   StationInfo, Evidence)  
-       +------------------+                           
+                              |
+                              v
++----------------------------------------------------------------+
+|  wipe-server  (Axum)                                           |
+|   • /api/health, /api/station, /api/public_key                 |
+|   • /api/fleet/peers, /api/fleet/lead                          |
+|   • /api/devices, /api/devices/:id/capabilities                |
+|   • /api/bay-topology (GET/PUT), …/config, …/resolve,          |
+|     …/store, …/store/acknowledge; /api/enclosure-catalog       |
+|   • /api/jobs[/:id], …/start, …/abort, …/escalate-to-destroy,  |
+|     …/certificate                                              |
+|   • /api/manifests[/:id], /api/manifests/:id/cosign            |
+|   • /api/sim/devices[/attach|/detach] — always routed, 404     |
+|     unless the backend simulates hot-plug                      |
+|   • /api/events (WS) — JobBroadcast + FleetEvent fan-out       |
+|   • Auto-signs Certificate on JobState::Erased|PendingCoSign;  |
+|     certs held in RAM only                                     |
++----------------------------------------------------------------+
+          |               |               |               |
+          v               v               v               v
+ +--------------+ +-----------------+ +--------------+ +-----------------+
+ | wipe-engine  | | wipe-fleet      | | wipe-cert    | | wipe-license    |
+ |  • Runner    | |  • mDNS adv+brw | |  • Schema    | |  • root→licence |
+ |  • State mch | |  • Lead elect.  | |  • Canonical | |    →key→cert    |
+ |  • Backend△  | |  • Peers        | |  • Ed25519   | |  • lease (RAM)  |
+ +------△-------+ +-----------------+ +--------------+ +-----------------+
+        │
+        │ trait impl
+ +------┴-----------+
+ | wipe-engine-mock |  (today: simulated)
+ | wipe-engine-linux|  (future: ioctl + raw I/O)
+ +------------------+
+
+ +------------------+
+ | wipe-common      |  (types: Device, Method, Capabilities, Job,
+ |  • shared types  |   ErasureEvent, StationInfo, Evidence);
+ |  • method select |   depends on no sibling crate
+ +------------------+
 ```
+
+`wipe-server` is a library with two hosts:
+
+- **`wipe-cli`**, the `wipestation` binary: `serve` (all station options),
+  `bay-presets`, `verify-cert`, `inspect`, and the vendor-side
+  `license new-root | issue | inspect`.
+- **`apps/desktop/src-tauri`**, package `wipestation-desktop`: the Tauri 2
+  shell, which starts `wipe-server` in-process on `127.0.0.1:7878` (or
+  `WIPESTATION_API_ADDR`) with fixed defaults and none of `serve`'s
+  options (see Operating modes).
+
+Vendor side (separate binary, ADR-0007):
+
+```
++----------------------------------------------------------------+
+|  wipe-hub  — binary `wipe-hub` (serve | admin | release)       |
+|   Axum + Postgres; accounts, payments, entitlements, licence   |
+|   issuing, releases and downloads; serves apps/portal          |
+|   depends on wipe-common, wipe-cert, wipe-license only         |
++----------------------------------------------------------------+
+```
+
+No station crate depends on `wipe-hub`, and no station talks to it: a
+licence the hub issues reaches a station as a file passed to
+`wipestation serve --license`.
 
 ## Why Rust + Tauri (not Bun + Hono)
 
@@ -73,7 +115,9 @@ change.
 ## Job lifecycle (ADR-0001)
 
 Two nested state machines. The **outer `Job`** tracks the Asset's
-disposition; the **inner `ErasureEvent`** tracks one wipe attempt.
+disposition; the **inner `ErasureEvent`** tracks one wipe attempt. Today a
+Job holds at most one `ErasureEvent` (none if it is escalated or aborted
+from `Queued`).
 
 Outer — `JobState`:
 
@@ -82,30 +126,41 @@ Queued ─▶ InProgress ─┬─▶ Erased
                       │
                       ├─▶ PendingCoSign ─▶ Destroyed   (supervisor co-sign
                       │                                  on a manifest)
-                      ├─▶ Quarantined
+                      ├─▶ Quarantined                 (declared; nothing
+                      │                                  transitions into it)
                       └─▶ Aborted                       (operator)
+
+Aborted is reachable from any non-terminal state, including Queued and
+PendingCoSign (an already-signed cert remains).
 ```
 
 Inner — `ErasureEventState`, one per attempt:
 
 ```
-Queued ─▶ Probing ─▶ (Unfreezing?) ─▶ Confirming ─▶ Running ─▶ Verifying
-                                                                  │
-                                                                  ▼
-                                              GeneratingCert ─▶ Signing
-                                                                  │
-                                                                  ▼
-                                                              Completed
+Queued ─▶ Probing ─▶ (Unfreezing?) ─▶ Confirming ─▶ Running ─▶ Completed
                                        │
-                                       ├─▶ Failed   (any stage)
+                                       ├─▶ Failed   (a command poll
+                                       │             reports failure)
                                        └─▶ Aborted  (operator)
+
+A backend error from the capabilities probe, unfreeze or issue leaves
+the event in its last state rather than Failed.
 ```
 
+The inner machine ends at `Completed`. Post-erase verification is not an
+inner state: the runner then runs the sampled reads and appends a sibling
+`JobActivity::Verification` to the Job; if the sampled reads fail, the
+event stays `Completed`, the failing Verification is recorded and the Job
+stays `InProgress`. Certificate signing is not an inner state either;
+it is done by `wipe-server` (below) when the outer Job reaches `Erased`
+or `PendingCoSign`.
+
 A `Failed` ErasureEvent does **not** fail the Job — the Job stays
-`InProgress` awaiting an operator decision (retry, method fallback, or
-`escalate-to-destroy`). A Job accumulates its attempts and results in
-`activities: Vec<JobActivity>`; on a successful attempt the runner
-appends a sibling `JobActivity::Verification`, and on escalation a
+`InProgress` awaiting an operator decision: abort, or
+`escalate-to-destroy`. There is no retry or method-fallback route yet.
+A Job keeps its attempt and results in `activities: Vec<JobActivity>`;
+after the attempt completes the runner appends a sibling
+`JobActivity::Verification`, and on escalation a
 `JobActivity::Destruction`. `Diagnostic` and `HealthCheck` variants
 exist in the type but the runner never emits them.
 
@@ -128,7 +183,9 @@ attempt) — which flow channel → WebSocket → frontend.
 3. It calls `Certificate::from_job(...)` which flattens the job's
    `activities` chain into a JSON-LD payload (schema v2), stamping
    `media_status.operational = false` on the `PendingCoSign` path and
-   recording the resolved `AssetDisposition`.
+   recording the resolved `AssetDisposition`. A Job with no erasure activity
+   (escalated from `Queued`) is skipped and gets no certificate; co-sign
+   then refuses to destroy it.
 4. `wipe_cert::sign(cert, signing_key)` canonicalizes the JSON (BTreeMap key
    sorting at every depth, finite-number check), hashes it with SHA-256,
    signs with Ed25519, and emits a `SignedCertificate { certificate,
@@ -137,12 +194,17 @@ attempt) — which flow channel → WebSocket → frontend.
    `GET /api/jobs/:id/certificate`.
 6. **Destroy path only.** When the linked `DestructionManifest` is
    co-signed, `wipe_cert::co_sign(...)` appends a `CoSignatureBlock`
-   over the *same* canonical bytes the primary signer used, carrying the
-   co-signer's role, identity, `manifest_ref` and timestamp. Because the
-   payload is unchanged, a verifier holding only the supervisor's public
-   key can independently confirm "this party attested to this exact
-   cert" without trusting the station key. `co_signatures` is empty on
-   Erased certs.
+   over the *same* canonical bytes the primary signer used. As built, the
+   handler signs it with the **station's own signing key**; the supervisor
+   is recorded only as an `OperatorRef` label on the block. The block's
+   signer, role, `manifest_ref` and timestamp sit outside the signed
+   bytes, so they can be edited without breaking any signature, and the
+   co-signature proves nothing beyond the station's primary signature.
+   `manifest_ref` is also never stamped on the Job itself.
+   [ADR-0011](adr/0011-destruction-by-operator-attestation.md) replaces
+   this destroy path with one certificate signed once at completion,
+   carrying the attestation inside the signed bytes; it is accepted but
+   not yet built. `co_signatures` is empty on Erased certs.
 
 `wipe_cert::verify(signed, &[trusted_keys])`:
 - Re-canonicalizes the embedded certificate to compute the actual
@@ -153,8 +215,13 @@ attempt) — which flow channel → WebSocket → frontend.
 - Verifies the Ed25519 signature.
 
 This is the offline-verification path. The CLI command
-`wipestation verify-cert` exposes it; auditors only need the published
-public key.
+`wipestation verify-cert <cert> --public-key-b64 <station key>` exposes
+it; with `--vendor-root-b64` it also checks the ADR-0005 attestation chain
+(who the station key was licensed to), and `--require-licensed` fails an
+evaluation cert; it takes effect only together with `--vendor-root-b64`.
+It checks the primary signature only, never co-signatures. The signed
+cert lives only in the station's RAM, so it must be downloaded before the
+station restarts.
 
 ## Station configuration store
 
@@ -165,11 +232,16 @@ detects for itself at startup (ADR-0003):
 ```
   writable config path?  ──yes──▶  LocalFile     atomic write, survives reboot
         │ no
-  control plane set?     ──yes──▶  ControlPlane  PUT/GET keyed by station id
-        │ no                                     (client seam; hub is future work)
+  control plane set?     ──yes──▶  ControlPlane  stub: probe always fails,
+        │ no                                     so detection falls through
         ▼
   Tier 3: ask the operator ──acknowledged──▶ Ephemeral   RAM only, stated in the UI
 ```
+
+Tier 2 is a stub: `--control-plane-url` is accepted, but no HTTP client
+is wired in and `ControlPlaneStore::probe` always returns an error, so a
+station with no writable path always ends up on the ephemeral tier. Nothing
+serves the control-plane side; `wipe-hub` does not.
 
 Detection is a write probe — create a temp file in the target directory and
 remove it — rather than an inference from mount flags or uid, which get
@@ -191,7 +263,7 @@ buried in a log line.
 4. Recompute lead deterministically: `min_by_key(|s| (s.started_at, s.id))`.
 
 This is intentionally simple. Raft / SWIM gossip is the wrong amount of
-machinery for a 5–50-station LAN; the hub/cloud tier handles cross-LAN.
+machinery for a 5–50-station LAN; cross-LAN fleets are left to a future hub/cloud tier.
 The seam to add full gossip later is the `FleetService` API — peers and
 lead are read-side; the discovery transport is pluggable.
 
@@ -199,26 +271,37 @@ lead are read-side; the discovery transport is pluggable.
 
 | Mode | Binary | Frontend |
 | --- | --- | --- |
-| Standalone with monitor | `wipestation serve` | Tauri 2 window (`pnpm tauri dev` / `pnpm tauri build`) |
+| Standalone, browser | `wipestation serve` | Same React bundle at `http://127.0.0.1:7878` |
+| Standalone, native window | `wipestation-desktop` (`cargo run -p wipestation-desktop`, or `pnpm tauri dev` / `pnpm tauri build`) | Tauri 2 window over an in-process `wipe-server` on `127.0.0.1:7878`. Only `WIPESTATION_API_ADDR` is honoured (it moves the API; the window URL stays `127.0.0.1:7878`); none of `serve`'s options apply: no topology store, licence or simulator, default mock timing, and a fresh signing key and random station id on every launch. It advertises on mDNS, so each launch appears as a new peer. If the port is taken the bind error is only logged and the window shows whatever answers there |
+| Headless, no mDNS | `wipestation serve --no-fleet` | Same bundle; tablets must be given the address |
 | Headless wipestation (PXE / rack) | `wipestation serve --no-ui` (future flag) | none on device; operator tablet connects to it |
 | Roaming operator tablet | Same React bundle | Pointed at any station's `/api` |
-| Hub (multi-site) | `wipestation serve --hub` (future) | Same React bundle in "fleet" mode |
+| Hub multi-site fleet view | `wipestation serve --hub` (future) | Same React bundle in "fleet" mode |
+
+The vendor hub is not a station mode: it is the separate `wipe-hub` binary
+(ADR-0007) serving `apps/portal`.
 
 ## Pricing-model implications
 
-Two SKUs share one binary:
+Two SKUs share one station binary:
 
-- **Tier 1 — Station / annual unlimited.** No cloud. Local signing via
-  embedded key (or YubiKey/PIV at the operator desk in v0.2). LAN
+- **Tier 1 — Station / annual unlimited.** No cloud. Local signing with a
+  station key (`--key-path` keeps it across restarts; without it a new key
+  is generated on every start). YubiKey/PIV signing is future work. LAN
   discovery + lead election. Air-gap clean. The KillDisk-like pricing
   model, without the legacy crapness.
-- **Tier 2 — Cloud / per-station + cloud features.** Same binary, with a
-  `--hub-url` pointing at the cloud. Cloud-side cert archive, multi-site
-  fleet view, customer-facing cert portal, ITAM integrations, SAML/OIDC.
-  Cloud KMS signing as an alternative to YubiKey.
+- **Tier 2 — Cloud / per-station + cloud features** (future). Cloud-side
+  cert archive, multi-site fleet view, customer-facing cert portal, ITAM
+  integrations, SAML/OIDC, cloud KMS signing. None of this exists, and
+  there is no station flag that points a station at a cloud or hub.
 
-A single customer can run both — `--hub-url` is per-station configuration.
-Air-gapped fleets simply omit it.
+What exists today: a station is licensed by a licence file passed with
+`wipestation serve --license <file> --vendor-root-b64 <root>` (ADR-0005);
+without one it runs free-tier and marks every certificate `evaluation`.
+The vendor hub (`wipe-hub`) sells entitlements and issues those licence
+files for customers to download from the portal; stations never contact
+the hub, so air-gapped fleets need nothing extra. Licensing never stops an
+erasure.
 
 ## Where the code will need to grow
 
@@ -226,13 +309,21 @@ Replace, add, or extend:
 
 1. `wipe-engine-linux` crate — real `nix::ioctl_*` calls, `SG_IO`,
    `NVME_IOCTL_ADMIN_CMD`, `/dev/sdX` O_DIRECT reads.
-2. `wipe-license` crate — token verification (license signed by the
-   vendor's key, embedded in the binary), per-success usage accounting.
-3. `wipe-hub` crate — same protocol the stations already speak, but
-   tenant-aware; immutable cert archive; cert verification API for
-   customer portals.
+2. `wipe-license` (exists) — the attestation chain, entitlements and the
+   in-payload `evaluation` marker are built; licences verify against vendor
+   root keys passed at run time. Remaining: persist lease state (the
+   anti-rollback watermark and quota count reset on every restart), wire
+   in allowed-method and feature checks, and the online reconciliation
+   client (`client.rs` is a seam with no server).
+3. `wipe-hub` (exists) — accounts, payments, entitlements, licence issuing,
+   releases and downloads (ADR-0007). Remaining: any station ↔ hub
+   protocol (cert upload, licence or config sync, control-plane tier),
+   an immutable cert archive and a cert verification API for customer
+   portals.
 4. `wipe-pdf` — render the signed JSON-LD into a PDF/A-3 with the JSON
    embedded as an attachment, for audit-friendly delivery.
 5. Operator RBAC inside `wipe-server` — SSO via OIDC, audit attribution.
+   Destruction moves to ADR-0011's operator attestation (accepted, not
+   yet built), replacing the appended co-signature.
 6. `wipe-iso` — bootable image build (Alpine + signed shim + GRUB +
    the binary).
