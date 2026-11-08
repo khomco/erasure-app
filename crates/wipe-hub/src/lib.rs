@@ -23,6 +23,7 @@ pub mod lead_admin;
 pub mod lead_routes;
 pub mod leads;
 pub mod mail;
+pub mod offering_admin;
 pub mod team;
 pub mod team_routes;
 pub mod throttle;

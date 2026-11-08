@@ -1,5 +1,5 @@
 //! The admin area's routes (portal-accounts story 5; sales leads,
-//! lead-capture story 2):
+//! lead-capture story 2; offerings, offerings-and-payments story 1):
 //!
 //! - `GET /api/admin/organizations?q=` — search customer organizations by
 //!   name or by their users' emails and names.
@@ -16,9 +16,16 @@
 //! - `POST /api/admin/leads/export {segment?, status?, from?, to?}` — every
 //!   matching lead as a CSV download. A CSRF-protected POST, not a GET, so
 //!   no other site can start a download of personal data.
+//! - `GET /api/admin/offerings` — every offering, drafts first.
+//! - `POST /api/admin/offerings {offering}` — create a draft offering (201).
+//! - `GET /api/admin/offerings/:id` — one offering.
+//! - `POST /api/admin/offerings/:id {offering}` — edit it (a full body).
+//! - `POST /api/admin/offerings/:id/publish` — draft to published.
+//! - `POST /api/admin/offerings/:id/retire` — published to retired.
 //!
 //! The organization and user routes are read-only; the lead routes also
-//! change sales leads, through [`crate::lead_admin`].
+//! change sales leads, through [`crate::lead_admin`], and the offering
+//! routes change offerings, through [`crate::offering_admin`].
 //!
 //! Only a vendor admin gets in ([`VendorAdmin`]'s extractor, the first
 //! extractor of every handler): no session is 401 `not signed in`; any
@@ -31,7 +38,10 @@
 //! [`admin::MSG_BAD_QUERY`], a bad lead filter 400 [`MSG_BAD_FILTER`], an
 //! unknown, non-UUID or vendor organization id 404 [`MSG_NO_ORGANIZATION`]
 //! and an unknown, non-UUID or erased lead id 404 [`MSG_NO_LEAD`]; none
-//! writes an audit row. Error bodies are `{"error": "<message>"}`.
+//! writes an audit row. An invalid offering body is 400 naming the field,
+//! an unknown or non-UUID offering id 404 [`MSG_NO_OFFERING`], and a
+//! refused offering change (a duplicate name, a frozen term, a wrong
+//! lifecycle step) 409; none writes an audit row either. Error bodies are `{"error": "<message>"}`.
 
 use axum::async_trait;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
@@ -52,11 +62,13 @@ use crate::admin::{
 };
 use crate::auth::{session_token, ApiError, JsonBody, MSG_NOT_SIGNED_IN};
 use crate::lead_admin::{self, FilterParams, LeadDetail, LeadFilter, LeadList};
+use crate::offering_admin::{self, NewOffering, OfferingError, OfferingList, OfferingRequest};
 use crate::AppState;
 
 pub const MSG_ADMIN_ONLY: &str = "only vendor admins can use the admin area";
 pub const MSG_NO_ORGANIZATION: &str = "no such organization";
 pub const MSG_NO_LEAD: &str = "no such sales lead";
+pub const MSG_NO_OFFERING: &str = "no such offering";
 pub const MSG_BAD_FILTER: &str = "segment must be one of itad, enterprise-it, government, other, \
      none; status one of new, contacted, qualified, closed; from and to dates as YYYY-MM-DD, \
      from not after to";
@@ -72,11 +84,30 @@ pub fn routes() -> Router<AppState> {
         .route("/api/admin/leads/:id/status", post(set_lead_status))
         .route("/api/admin/leads/:id/notes", post(add_lead_note))
         .route("/api/admin/leads/:id/erase", post(erase_lead))
+        .route(
+            "/api/admin/offerings",
+            get(list_offerings).post(create_offering),
+        )
+        .route(
+            "/api/admin/offerings/:id",
+            get(offering_detail).post(update_offering),
+        )
+        .route("/api/admin/offerings/:id/publish", post(publish_offering))
+        .route("/api/admin/offerings/:id/retire", post(retire_offering))
 }
 
 impl From<AdminReadError> for ApiError {
     fn from(e: AdminReadError) -> Self {
         ApiError::internal(e)
+    }
+}
+
+impl From<OfferingError> for ApiError {
+    fn from(e: OfferingError) -> Self {
+        match e {
+            OfferingError::Conflict(m) => ApiError::new(StatusCode::CONFLICT, m),
+            e => ApiError::internal(e),
+        }
     }
 }
 
@@ -292,4 +323,101 @@ async fn erase_lead(
         .ok_or_else(no_lead)?;
     tx.commit().await?;
     Ok(Json(json!({})))
+}
+
+// ---------------------------------------------------------------------------
+// Offerings
+
+fn no_offering() -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, MSG_NO_OFFERING)
+}
+
+/// The offering id from the path, or 404.
+fn offering_id(id: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(id).map_err(|_| no_offering())
+}
+
+/// A validated offering body, or 400 naming the field.
+fn offering_of(req: &OfferingRequest) -> Result<NewOffering, ApiError> {
+    offering_admin::validate(req).map_err(|m| ApiError::new(StatusCode::BAD_REQUEST, m))
+}
+
+async fn list_offerings(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+) -> Result<Json<OfferingList>, ApiError> {
+    let mut tx = state.pool.begin().await?;
+    let found = offering_admin::list(&mut tx, &admin).await?;
+    tx.commit().await?;
+    Ok(Json(found))
+}
+
+async fn create_offering(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    JsonBody(req): JsonBody<OfferingRequest>,
+) -> Result<Response, ApiError> {
+    let new = offering_of(&req)?;
+    let mut tx = state.pool.begin().await?;
+    let offering = offering_admin::create(&mut tx, &admin, &new).await?;
+    tx.commit().await?;
+    Ok((StatusCode::CREATED, Json(json!({ "offering": offering }))).into_response())
+}
+
+async fn offering_detail(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = offering_id(&id)?;
+    let mut tx = state.pool.begin().await?;
+    let offering = offering_admin::detail(&mut tx, &admin, id)
+        .await?
+        .ok_or_else(no_offering)?;
+    tx.commit().await?;
+    Ok(Json(json!({ "offering": offering })))
+}
+
+async fn update_offering(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+    JsonBody(req): JsonBody<OfferingRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = offering_id(&id)?;
+    let new = offering_of(&req)?;
+    let mut tx = state.pool.begin().await?;
+    let offering = offering_admin::update(&mut tx, &admin, id, &new)
+        .await?
+        .ok_or_else(no_offering)?;
+    tx.commit().await?;
+    Ok(Json(json!({ "offering": offering })))
+}
+
+async fn publish_offering(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = offering_id(&id)?;
+    let mut tx = state.pool.begin().await?;
+    let offering = offering_admin::publish(&mut tx, &admin, id)
+        .await?
+        .ok_or_else(no_offering)?;
+    tx.commit().await?;
+    Ok(Json(json!({ "offering": offering })))
+}
+
+async fn retire_offering(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = offering_id(&id)?;
+    let mut tx = state.pool.begin().await?;
+    let offering = offering_admin::retire(&mut tx, &admin, id)
+        .await?
+        .ok_or_else(no_offering)?;
+    tx.commit().await?;
+    Ok(Json(json!({ "offering": offering })))
 }

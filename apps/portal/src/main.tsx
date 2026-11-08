@@ -15,6 +15,8 @@ import { AcceptInvitePage } from "./pages/AcceptInvitePage";
 import { AccountPage } from "./pages/AccountPage";
 import { AdminLeadPage } from "./pages/AdminLeadPage";
 import { AdminLeadsPage } from "./pages/AdminLeadsPage";
+import { AdminOfferingPage } from "./pages/AdminOfferingPage";
+import { AdminOfferingsPage } from "./pages/AdminOfferingsPage";
 import { AdminOrganizationPage } from "./pages/AdminOrganizationPage";
 import { AdminPage } from "./pages/AdminPage";
 import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
@@ -198,6 +200,21 @@ const adminLeadRoute = createRoute({
   },
 });
 
+const adminOfferingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/offerings",
+  component: AdminOfferingsPage,
+});
+
+const adminOfferingRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/offerings/$id",
+  component: function AdminOfferingRoute() {
+    const { id } = adminOfferingRoute.useParams();
+    return <AdminOfferingPage id={id} />;
+  },
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   signUpRoute,
@@ -215,6 +232,8 @@ const routeTree = rootRoute.addChildren([
   adminOrganizationRoute,
   adminLeadsRoute,
   adminLeadRoute,
+  adminOfferingsRoute,
+  adminOfferingRoute,
 ]);
 
 const router = createRouter({ routeTree });
