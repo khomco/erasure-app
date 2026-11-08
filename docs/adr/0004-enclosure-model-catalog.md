@@ -301,3 +301,46 @@ no longer needs identify mode for that chassis at all.
   its *spec* can arrive by overlay. Accepted deliberately — the alternative,
   shipping arbitrary SVG as catalog data, means rendering untrusted markup and
   gives up every check in the contract test.
+
+## As built (2026-11-05)
+
+The decision stands. Four points in the code differ from what is written
+above; they are recorded here rather than edited above, and they sit
+alongside the "As built." paragraphs under §3 and §4, which are unchanged.
+Taken from the 2026-11-05 shipped-claims audit and re-checked against the
+code on 2026-11-08.
+
+1. **§2, `art`: a shell-registry key, not an SVG-template object.**
+   `EnclosureModel.art` is `Option<String>` (`crates/wipe-common/src/catalog.rs`),
+   a key into the frontend shell registry
+   (`apps/desktop/src/bench/shells/registry.ts`), not the
+   `{kind, shell, bay_slot, aspect}` object in the §2 schema. The shell and
+   its bay slot live in the TypeScript `ShellDef`, as the last Consequence
+   already describes. The `verified_by` provenance field the Consequences
+   ask for exists, but the Consequence that "the UI needs to make
+   'unverified' visible" is not met: the model picker (`BenchSetupPage.tsx`)
+   appends " · verified" when `verified_by` is set and shows nothing
+   otherwise, so an unverified entry carries no marking.
+2. **§2 and §7, versioning: not per entry, and not fail-closed.** There is
+   no per-entry `schema_version`; only `Catalog.schema_version` exists.
+   `Catalog::bundled()` parses the bundled JSON without checking it, and
+   `Catalog::overlay` stamps `CATALOG_SCHEMA_VERSION` on the result whatever
+   the overlay declared, so an overlay of an unknown version is merged
+   rather than refused. Same-id overlay entries do win over bundled ones, as
+   §7 says.
+3. **§7, extensibility: the overlay exists but is unwired.**
+   `AppState::with_catalog_overlay` (`crates/wipe-server/src/app.rs`) has no
+   caller in `wipe-cli` or `apps/desktop/src-tauri`. There is no station-local
+   overlay directory and no control-plane catalog loader, so every station
+   runs on the bundled catalog only.
+4. **§5, the matcher is built but has no caller.** The Consequences list
+   the matcher among the three seams left unimplemented until
+   `wipe-engine-linux` exists. It is in fact built:
+   `Catalog::match_identity` / `best_match` (`catalog.rs`) implement the
+   ranked matching and are tested (`crates/wipe-common/tests/catalog.rs`),
+   but no production code calls them, so nothing pre-selects or suggests a
+   model.
+
+Conforms as written: the `EnclosureDiscovery` and `EnclosureControl` seams
+(`crates/wipe-engine/src/backend.rs`) are defined with no implementation, as
+the Status line and Consequences say.

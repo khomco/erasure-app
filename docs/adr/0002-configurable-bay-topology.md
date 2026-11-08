@@ -137,3 +137,53 @@ property that makes it useful.
   audit chain, that is a separate decision.
 - No persistence layer is added. Topology is read at startup from a
   file, consistent with the PXE-ephemeral discipline in CONTEXT §7.
+
+## As built (2026-11-05)
+
+The decision stands. Three points in the code differ from, or add to, what
+is written above; they are recorded here rather than edited above, so the original
+intent stays readable. Taken from the 2026-11-05 shipped-claims audit and
+re-checked against the code on 2026-11-08.
+
+1. **Consequences, "No persistence layer is added": superseded by
+   [ADR-0003](0003-station-config-persistence.md).** A layout saved from
+   the bench-setup builder is persisted through ADR-0003's tiered store
+   (`crates/wipe-server/src/store.rs`), and every write goes through
+   `AppState::save_bay_topology` (`crates/wipe-server/src/app.rs`), which
+   applies the revision check. The `--bay-topology` file and the
+   `--bay-profile` preset or catalog-model name (`load_bay_topology` and the
+   profile resolver in `crates/wipe-cli/src/main.rs`) remain as start-up
+   sources, but they seed the bench only when the store holds no saved
+   layout ("a saved layout is the operator's and outranks it", `main.rs`).
+   The `--bay-topology` path is also the local-file store's write target:
+   `main.rs` passes it as `StoreConfig.explicit_path`
+   (`crates/wipe-server/src/store.rs`), so a save from the builder
+   overwrites that file.
+2. **§3, "the frontend is a renderer": matching conforms, but some
+   topology logic is mirrored in TypeScript.** Bay→device matching stays
+   server-side: `GET /api/bay-topology` returns resolved bays, and the
+   builder previews an unsaved draft through the dry-run
+   `POST /api/bay-topology/resolve` (`BenchSetupPage.tsx`, `resolveBayTopology`).
+   Bay generation and numbering are re-implemented in
+   `apps/desktop/src/bench/topologyEdit.ts` (`generateBays`, commented
+   "Mirrors `grid_bank`"; `rebuildBank`, commented "Mirrors
+   `renumber_bank`"; `enclosureFromModel`, mirroring
+   `EnclosureModel::expand`), and `validateLocal` there is a subset of
+   `BayTopology::validate` for live feedback; the server re-validates on
+   save. `topologyEdit.test.ts` tests the TypeScript alone: no test checks
+   that the two implementations agree.
+3. **Two separate starting-layout lists that have drifted.** §1 conforms:
+   both the Rust presets and the UI's templates expand into the general
+   model. But they are two sources of truth for the same thing. The Rust
+   presets (`preset` / `preset_names` in
+   `crates/wipe-common/src/bay.rs`) are `arma-4u-32`, `dock-2bay` and
+   `nvme-carrier-8`. The builder's template menu (`TemplateMenu` in
+   `apps/desktop/src/pages/BenchSetupPage.tsx`) builds its own: Empty bench,
+   Rackmount 24 bay (4 × 6), Hot-swap dock 2 bay and NVMe carrier 8 socket.
+   The UI has no ARMA 32-bay template and Rust has no 24-bay rackmount
+   preset; the bundled enclosure catalog, a third list, has both as models.
+
+Conforms as written: §2's `ses_slot` binding is still populated by nothing
+(`BayBinding::matches` returns `false` for `SesSlot`; there is no
+`wipe-engine-linux`), and the unconfigured bench is the labelled, honest
+fallback (`generated_bench`).

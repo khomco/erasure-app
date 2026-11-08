@@ -219,3 +219,81 @@ first-class. Defined as `CertAnchor` with no implementation.
 - Marking free-tier certs as `evaluation` is a compatibility commitment: the
   marker must remain stable, or old evaluation certs become
   indistinguishable from licensed ones.
+
+## As built (2026-11-05)
+
+The decision stands. The points below are where the code differs from what
+is written above; they are recorded here rather than edited above, so the
+original intent stays readable. Taken from the 2026-11-05 shipped-claims
+audit and re-checked against the code on 2026-11-08. None of them changes
+how a certificate is marked when the station is unlicensed.
+
+1. **§3a, the lease is not persisted.** Both station start-up paths build a
+   fresh lease: `build_license_context` in `crates/wipe-cli/src/main.rs`
+   passes `LeaseState::new(now)` for a licensed station, and
+   `LicenseContext::unlicensed` (`crates/wipe-server/src/licensing.rs`) does
+   the same. The watermark and `erasures_used` are held in memory and reset
+   on every start, so a restart defeats rollback detection and resets the
+   local count a `Count` quota is checked against. The doc comment on
+   `LeaseState` (`crates/wipe-license/src/lease.rs`) says it is stored
+   through the ADR-0003 tiered store; it is not.
+2. **§3b, counters.** The `MonotonicCounter` trait exists (`lease.rs`), but
+   `FileCounter` is named only in a comment and does not exist. `TpmCounter`
+   returns `Unsupported` from `read` and `increment`, as written, but its
+   `is_hardware_backed()` returns `true`: a counter that cannot count
+   reports itself hardware-backed, against §3b's "nothing pretends to
+   succeed".
+3. **§2, `allowed_methods` and `features` are not enforced.**
+   `AllowedMethods::permits` (`crates/wipe-license/src/entitlement.rs`) is
+   tested (`crates/wipe-license/tests/attestation.rs`) and called by no
+   server, engine or CLI code. The allow-list is over `MethodClass`, not over
+   `Method` discriminants as §2 describes. Likewise `feature_available`
+   (`lease.rs`) is called only from that test file, so no feature flag in a
+   licence turns anything on or off.
+4. **§1, root-only verification is not possible yet.** The licence
+   certificate carries the instance key's id (`instance_public_key_id`,
+   `crates/wipe-license/src/chain.rs`), which `verify_chain` compares with
+   the id of the key that signed the certificate, but not the instance
+   public key itself. An auditor therefore needs the station's public key as
+   well as the vendor root: `wipestation verify-cert` requires
+   `--public-key-b64` (`VerifyCert` in `crates/wipe-cli/src/main.rs`), and
+   `--vendor-root-b64` alone cannot check the certificate signature.
+5. **§5, the free-tier count is not tracked; §2, destroy-path
+   certificates consume a `Count` quota.** The certificate hook in
+   `crates/wipe-server/src/app.rs` calls `record_erasure` only when the
+   certificate is not `evaluation`, so an unlicensed station counts nothing,
+   and no API route or UI surfaces a count (§5). The same hook signs a
+   certificate when a Job enters `PendingCoSign` (the destroy path), and
+   under a valid licence that certificate is counted against §2's
+   `quota: Count { erasures }` like an erasure, although under
+   [ADR-0011](0011-destruction-by-operator-attestation.md) a destruction is
+   an operator attestation, not an erasure.
+6. **§2, `scope`: stations can share a fingerprint, and site scope is not
+   checked.** `machine_fingerprint` (`crates/wipe-license/src/lib.rs`)
+   hashes the station id, and `wipestation serve` defaults the station id to
+   `standalone` (`crates/wipe-cli/src/main.rs`), so every station started
+   without `--station-id` has the same fingerprint. `--station-id` does not
+   cover every station: `AppState::with_static_dir`
+   (`crates/wipe-server/src/app.rs`) starts from
+   `LicenseContext::unlicensed("standalone", ..)`, and the desktop shell
+   calls it, has no `--station-id` and installs no licence. For site scope,
+   `evaluate` (`lease.rs`) checks only `required_fingerprint()`, which is
+   `None` for `Scope::Site`, and nothing compares `site_id` with anything,
+   so a site licence validates on any station.
+7. **§4, the client seam is never constructed.** `HttpLicenseClient`
+   (`crates/wipe-license/src/client.rs`) always reports `Unreachable`, as
+   "seam only" intends, and nothing outside its own module constructs it.
+8. **§5 as amended by [ADR-0012](0012-opt-in-hard-stop-on-licence-lapse.md),
+   the lapse policy is not read by the station.** `lapse_policy` is carried
+   in the signed licence (`LicenseCertificate`'s body in `chain.rs`), but
+   no code in `wipe-server`, `wipe-cli` or `wipe-engine` reads it, so a
+   `stop` policy does not stop a lapsed station from starting new jobs.
+   ADR-0012 post-dates the 2026-11-05 audit; this item was added at the
+   2026-11-08 re-check.
+
+Conforms as written: licensing never stops a job from running
+(`crates/wipe-server/src/licensing.rs` and the signing decision in `app.rs`);
+`evaluation` is inside the signed certificate payload
+(`crates/wipe-cert/src/schema.rs`); `verify-cert` prints EVALUATION for an
+evaluation certificate; §6's `CertAnchor` has only the failing
+`UnconfiguredAnchor` (`crates/wipe-license/src/anchor.rs`).
