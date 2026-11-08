@@ -51,6 +51,7 @@ pub async fn spawn_hub_with(smtp_port: u16) -> Hub {
         stripe_webhook_secret: None,
         vendor_root_seed: None,
         portal_dir: None,
+        site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
     };
     let mut config = Config::from_args(args).unwrap();
     config.portal_dir = None;

@@ -53,6 +53,7 @@ fn hub_state(db: &TestDb, smtp_port: u16, public_base_url: &str, mail_from: &str
         stripe_webhook_secret: None,
         vendor_root_seed: None,
         portal_dir: None,
+        site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
     };
     let mut config = Config::from_args(args).unwrap();
     config.portal_dir = None;

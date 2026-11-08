@@ -15,9 +15,12 @@ pub mod admin_routes;
 pub mod audit;
 pub mod auth;
 pub mod config;
+pub mod cors;
 pub mod csrf;
 pub mod db;
 pub mod health;
+pub mod lead_routes;
+pub mod leads;
 pub mod mail;
 pub mod team;
 pub mod team_routes;
@@ -73,6 +76,7 @@ pub fn router(state: AppState) -> Router {
         .merge(auth::routes())
         .merge(team_routes::routes())
         .merge(admin_routes::routes())
+        .merge(lead_routes::routes())
         // Unknown API paths are JSON 404s, portal or not: a typo in a client
         // must never get `index.html` back with a 200.
         .route("/api", any(api_not_found))
@@ -80,7 +84,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/*rest", any(api_not_found))
         // After the catch-alls, so unknown `/api` paths are covered too: every
         // mutating `/api` request needs the double-submit CSRF token.
-        .layer(axum::middleware::from_fn(csrf::require));
+        .layer(axum::middleware::from_fn(csrf::require))
+        // Outside the CSRF check, so the marketing site can read its 403s
+        // too; it touches only `cors::SITE_PATHS` from `--site-origin`.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            cors::site_cors,
+        ));
 
     let site = match &state.config.portal_dir {
         Some(dir) => {
@@ -140,6 +150,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         public_base_url = %state.config.public_base_url,
         payment_provider = ?state.config.payment_provider,
         portal_dir = ?state.config.portal_dir,
+        site_origin = %state.config.site_origin,
         "wipe-hub listening"
     );
     serve_on(listener, state).await

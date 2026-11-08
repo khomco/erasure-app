@@ -234,3 +234,28 @@ fn admin_create_without_an_email_exits_non_zero() {
     assert!(!out.status.success());
     assert!(combined(&out).contains("--email"), "{}", combined(&out));
 }
+
+#[test]
+fn a_site_origin_with_a_path_refuses_to_start() {
+    for (flag, env) in [(true, false), (false, true)] {
+        let mut cmd = hub();
+        cmd.args(["serve", "--addr", "127.0.0.1:0", "--database-url"])
+            .arg(format!(
+                "postgres://wipehub:wipehub@127.0.0.1:{}/wipehub",
+                closed_port()
+            ));
+        if flag {
+            cmd.args(["--site-origin", "https://x.example/path"]);
+        }
+        if env {
+            cmd.env("WIPE_HUB_SITE_ORIGIN", "https://x.example/path");
+        }
+        let out = cmd.output().unwrap();
+        assert!(!out.status.success(), "{}", combined(&out));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--site-origin \"https://x.example/path\""),
+            "stderr does not name the value:\n{stderr}"
+        );
+    }
+}

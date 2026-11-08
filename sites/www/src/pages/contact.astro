@@ -1,23 +1,30 @@
 ---
 /**
  * Contact (marketing-site story 3). No email, phone or postal address: the
- * brand and domain are undecided. The form posts nowhere until `lead-capture`.
+ * brand and domain are undecided. The form is open only in builds given
+ * `PUBLIC_HUB_ORIGIN` (lead-capture story 1); otherwise it posts nowhere, and
+ * the copy says so.
  */
 import Base from "../layouts/Base.astro";
 import LeadForm from "../components/LeadForm.astro";
+import { hubOrigin } from "../config";
 import { h1, link, prose } from "../lib/ui";
+
+const open = hubOrigin() !== "";
 ---
 
 <Base
   title="Contact"
-  description="How to reach the Wipestation team before launch. The contact form is not open yet and sends nothing."
+  description={open
+    ? "How to reach the Wipestation team before launch: the contact form."
+    : "How to reach the Wipestation team before launch. The contact form is not open yet and sends nothing."}
 >
   <h1 class={h1}>Contact</h1>
   <div class={prose}>
     <p>
       Wipestation is pre-launch, and we do not publish an email address, phone number or postal
-      address yet. When the contact form opens, it will be the way to ask about the product, the
-      standards posture or early access.
+      address yet. {open ? "The contact form below is" : "When the contact form opens, it will be"}
+      the way to ask about the product, the standards posture or early access.
     </p>
     <p>
       In the meantime, the <a href="/product/" class={link}>product</a>,

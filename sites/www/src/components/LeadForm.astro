@@ -1,22 +1,42 @@
 ---
 /**
- * The early-access and contact form (marketing-site story 3). One component
- * for both pages, with field names matching `lead-capture` CAP-1, so that
- * story only has to add `action`/`method` and enable the button.
+ * The early-access and contact form (marketing-site story 3, lead-capture
+ * story 1). One component for both pages, with the field names of
+ * `POST /api/leads` (`crates/wipe-hub/src/leads.rs`).
  *
- * Until then it posts nowhere: no `action`, and the submit button is
- * `disabled`. A form with no `action` and an enabled button would submit to
- * the page URL and leak the visitor's details into a query string or a POST to
- * the static host; with the default button disabled, implicit submission
- * (Enter in a field) does nothing either.
+ * Closed (the default: no `PUBLIC_HUB_ORIGIN`): it posts nowhere. There is no
+ * `action`, the submit button is `disabled` and no script ships. A form with
+ * no `action` and an enabled button would submit to the page URL and leak the
+ * visitor's details into a query string or a POST to the static host; with
+ * the default button disabled, implicit submission (Enter in a field) does
+ * nothing either.
+ *
+ * Open (`PUBLIC_HUB_ORIGIN` set): the form carries `data-hub-origin`, still
+ * has no `action`, and its button is disabled in the HTML; the script
+ * (`src/lib/lead-submit.ts`) enables it and posts with `fetch`, so without
+ * JavaScript nothing is sent and a `<noscript>` note says so. A labelled,
+ * off-screen, `aria-hidden` honeypot field (`website`) catches naive bots.
+ * `astro build` refuses an open form while the privacy notice is a
+ * placeholder (`src/integrations/site-check.ts`).
+ *
+ * The consent label is `src/data/consent.ts`, the text the hub stores.
  */
+import { CONSENT_STATEMENTS, PRIVACY_LINK_TEXT, PRIVACY_SENTENCE } from "../data/consent";
+import { hubOrigin as configuredHubOrigin } from "../config";
+import { parseHubOrigin } from "../lib/lead-submit";
+
 interface Props {
   kind: "early-access" | "contact";
   /** Show the developer notice; defaults to development builds only. */
   devNotice?: boolean;
+  /** The hub to post to; defaults to `PUBLIC_HUB_ORIGIN`. `""` keeps the form closed. */
+  hubOrigin?: string;
 }
 
 const { kind, devNotice = import.meta.env.DEV } = Astro.props;
+const hubOrigin =
+  Astro.props.hubOrigin === undefined ? configuredHubOrigin() : parseHubOrigin(Astro.props.hubOrigin);
+const open = hubOrigin !== "";
 const id = (field: string) => `${kind}-${field}`;
 const segments = [
   { value: "itad", label: "ITAD operator" },
@@ -24,29 +44,51 @@ const segments = [
   { value: "government", label: "Government or defense" },
   { value: "other", label: "Other" },
 ];
+const [privacyBefore, privacyAfter] = PRIVACY_SENTENCE.split(PRIVACY_LINK_TEXT);
 const label = "block text-sm font-semibold text-slate-900";
 const control =
   "mt-1 block w-full rounded border border-slate-400 px-3 py-2 text-slate-900 focus:outline-2 focus:outline-offset-2 focus:outline-slate-900";
 const optional = "font-normal text-slate-700";
+const submitLabel = kind === "early-access" ? "Join early access" : "Send message";
 ---
 
 <form
   aria-labelledby={id("title")}
   data-lead-form={kind}
+  data-hub-origin={open ? hubOrigin : undefined}
   class="mt-6 max-w-prose space-y-4 rounded border border-slate-200 p-4"
 >
   <h2 id={id("title")} class="text-xl font-semibold">
     {kind === "early-access" ? "Join the early-access list" : "Send a message"}
   </h2>
-  <p class="font-semibold text-slate-900" data-not-open>
-    {kind === "early-access" ? "Sign-up is not open yet." : "This form is not open yet."}
-    It is shown so you can see what we will ask; nothing you type here is sent or stored.
-  </p>
+  {
+    open ? (
+      <noscript>
+        <p class="font-semibold text-slate-900" data-noscript>
+          This form needs JavaScript to send. With JavaScript off, nothing you type here is sent.
+        </p>
+      </noscript>
+    ) : (
+      <p class="font-semibold text-slate-900" data-not-open>
+        {kind === "early-access" ? "Sign-up is not open yet." : "This form is not open yet."}
+        It is shown so you can see what we will ask; nothing you type here is sent or stored.
+      </p>
+    )
+  }
   {
     devNotice && (
       <p data-dev-notice class="rounded bg-sky-100 px-3 py-2 text-sm text-sky-950">
-        Development build: this form posts nowhere until <code>lead-capture</code> adds
-        <code>POST /api/leads</code>.
+        {open ? (
+          <>
+            Development build: this form posts to <code>{hubOrigin}/api/leads</code>.
+          </>
+        ) : (
+          <>
+            Development build: this form is closed. Set <code>PUBLIC_HUB_ORIGIN</code> to the hub's
+            origin (for example <code>http://localhost:7900</code>) to post to
+            <code>POST /api/leads</code>.
+          </>
+        )}
       </p>
     )
   }
@@ -110,8 +152,17 @@ const optional = "font-normal text-slate-700";
       name="message"
       rows="4"
       required={kind === "contact"}
+      maxlength="5000"
       class={control}></textarea>
   </div>
+  {
+    open && (
+      <div class="absolute -left-[10000px] top-auto h-px w-px overflow-hidden" aria-hidden="true">
+        <label for={id("website")}>Website (leave this empty)</label>
+        <input id={id("website")} name="website" type="text" tabindex="-1" autocomplete="off" />
+      </div>
+    )
+  }
   <div class="flex items-start gap-3">
     <input
       id={id("consent")}
@@ -120,20 +171,25 @@ const optional = "font-normal text-slate-700";
       required
       class="mt-1 size-5 shrink-0 accent-slate-900"
     />
-    <label for={id("consent")} class="text-sm text-slate-700">
-      {
-        kind === "early-access"
-          ? "I agree that these details are used only to follow up on early access."
-          : "I agree that these details are used only to reply to this message."
-      }
-      See the <a href="/privacy/" class="underline underline-offset-2">privacy notice</a>.
+    <label for={id("consent")} class="text-sm text-slate-700" data-consent-label>
+      {`${CONSENT_STATEMENTS[kind]} ${privacyBefore}`}<a href="/privacy/" class="underline underline-offset-2">{PRIVACY_LINK_TEXT}</a
+      >{privacyAfter}
     </label>
   </div>
   <button
     type="submit"
     disabled
-    class="rounded bg-slate-300 px-5 py-2.5 font-semibold text-slate-700 disabled:cursor-not-allowed"
+    class="rounded bg-slate-900 px-5 py-2.5 font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-700"
   >
-    {kind === "early-access" ? "Join early access" : "Send message"} (not open yet)
+    {open ? submitLabel : `${submitLabel} (not open yet)`}
   </button>
+  {open && <p data-lead-status role="status" aria-live="polite" class="text-sm font-semibold text-slate-900"></p>}
 </form>
+{
+  open && (
+    <script>
+      import { initLeadForms } from "../lib/lead-submit";
+      initLeadForms();
+    </script>
+  )
+}

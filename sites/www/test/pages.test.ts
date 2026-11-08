@@ -20,8 +20,10 @@ import Contact from "../src/pages/contact.astro";
 import Privacy from "../src/pages/privacy.astro";
 import Terms from "../src/pages/terms.astro";
 import LeadForm from "../src/components/LeadForm.astro";
+import { consentText } from "../src/data/consent";
 
 const ORIGIN = "https://wipestation.example";
+const HUB = "http://localhost:7900";
 
 let container: AstroContainer;
 beforeAll(async () => {
@@ -71,13 +73,27 @@ const LEAD_FIELDS = {
   contact: ["name", "email", "company", "message", "consent"],
 } as const;
 
-describe.each([
+/** The form's submit controls (an implicit-type button submits). */
+const submitsOf = (form: HTMLElement) =>
+  form
+    .querySelectorAll("button, input")
+    .filter((el) =>
+      el.tagName === "BUTTON"
+        ? (el.getAttribute("type") ?? "submit") === "submit"
+        : ["submit", "image"].includes(el.getAttribute("type") ?? ""),
+    );
+
+const formPages = [
   ["/early-access/", EarlyAccess, "early-access"],
   ["/contact/", Contact, "contact"],
-] as const)("form on %s", (path, page, kind) => {
+] as const;
+
+describe.each(formPages)("closed form on %s (no PUBLIC_HUB_ORIGIN)", (path, page, kind) => {
+  let html: string;
   let root: HTMLElement;
   beforeAll(async () => {
-    root = parse(await render(page, path));
+    html = await render(page, path);
+    root = parse(html);
   });
 
   it("posts nowhere: one form, no action, its only submit button disabled", () => {
@@ -86,17 +102,18 @@ describe.each([
     const form = forms[0];
     expect(form.hasAttribute("action")).toBe(false);
     expect(form.hasAttribute("method")).toBe(false);
-    const submits = form
-      .querySelectorAll("button, input")
-      .filter((el) =>
-        el.tagName === "BUTTON"
-          ? (el.getAttribute("type") ?? "submit") === "submit"
-          : ["submit", "image"].includes(el.getAttribute("type") ?? ""),
-      );
+    expect(form.hasAttribute("data-hub-origin")).toBe(false);
+    const submits = submitsOf(form);
     expect(submits).toHaveLength(1);
     expect(submits[0].hasAttribute("disabled")).toBe(true);
     expect(form.text).toMatch(/not open yet/i);
     expect(form.text).toMatch(/nothing you type here is sent/i);
+  });
+
+  it("ships no script and no honeypot, and the page says the form is not open", () => {
+    expect(html).not.toMatch(/<script|<noscript/i);
+    expect(root.querySelector('[name="website"]')).toBeNull();
+    expect(root.querySelector('meta[name="description"]')!.getAttribute("content")).toMatch(/not open yet/);
   });
 
   it("has exactly the lead-capture field names, each with a visible label", () => {
@@ -116,10 +133,72 @@ describe.each([
     expect(consentLabel.querySelector('a[href="/privacy/"]')).not.toBeNull();
   });
 
+  it("labels the consent box with exactly the text the hub stores", () => {
+    const consent = root.querySelector('input[name="consent"]')!;
+    const label = root.querySelector(`label[for="${consent.getAttribute("id")}"]`)!;
+    expect(label.text.replace(/\s+/g, " ").trim()).toBe(consentText(kind));
+  });
+
   it("collects nothing by other means", () => {
-    const html = root.toString();
     expect(html).not.toMatch(/mailto:|tel:/i);
     expect(html).not.toMatch(/\bfetch\(/);
+  });
+});
+
+describe.each(formPages)("open form on %s (PUBLIC_HUB_ORIGIN set)", (path, page, kind) => {
+  let html: string;
+  let root: HTMLElement;
+  beforeAll(async () => {
+    vi.stubEnv("PUBLIC_HUB_ORIGIN", `${HUB}/`);
+    try {
+      html = await render(page, path);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    root = parse(html);
+  });
+
+  it("names the hub, has no action, and leaves its button for the script to enable", () => {
+    const forms = root.querySelectorAll("form");
+    expect(forms).toHaveLength(1);
+    const form = forms[0];
+    expect(form.getAttribute("data-hub-origin")).toBe(HUB);
+    expect(form.getAttribute("data-lead-form")).toBe(kind);
+    expect(form.hasAttribute("action")).toBe(false);
+    const submits = submitsOf(form);
+    expect(submits).toHaveLength(1);
+    expect(submits[0].hasAttribute("disabled")).toBe(true);
+    expect(form.text).not.toMatch(/not open yet/i);
+    expect(form.querySelector('[data-lead-status][aria-live="polite"]')).not.toBeNull();
+  });
+
+  it("ships the script and a noscript note", () => {
+    expect(html).toMatch(/<script/i);
+    const noscript = root.querySelector("form noscript");
+    expect(noscript?.text).toMatch(/needs JavaScript/);
+  });
+
+  it("adds a labelled, off-screen, aria-hidden, untabbable honeypot", () => {
+    const form = root.querySelector("form")!;
+    const controls = form.querySelectorAll("input, select, textarea");
+    const names = controls.map((c) => c.getAttribute("name"));
+    expect(names.filter((n) => n !== "website")).toEqual([...LEAD_FIELDS[kind]]);
+    const trap = form.querySelector('input[name="website"]')!;
+    expect(trap.getAttribute("tabindex")).toBe("-1");
+    expect(trap.getAttribute("autocomplete")).toBe("off");
+    expect(trap.hasAttribute("required")).toBe(false);
+    expect(form.querySelector(`label[for="${trap.getAttribute("id")}"]`)).not.toBeNull();
+    const wrapper = trap.parentNode as HTMLElement;
+    expect(wrapper.getAttribute("aria-hidden")).toBe("true");
+    expect(wrapper.getAttribute("class")).toMatch(/absolute -left-\[10000px\]/);
+  });
+
+  it("passes the site check and no longer says it sends nothing", () => {
+    expect(checkPage(html, path, capabilities, ORIGIN)).toEqual([]);
+    expect(root.querySelector('meta[name="description"]')!.getAttribute("content")).not.toMatch(
+      /not open|sends nothing/,
+    );
+    expect(root.querySelector("main")!.text).not.toMatch(/sends nothing|until sign-up opens|when the contact form opens/i);
   });
 });
 
@@ -139,11 +218,18 @@ describe("LeadForm dev notice", () => {
   const renderForm = (devNotice: boolean) =>
     container.renderToString(LeadForm, { props: { kind: "early-access", devNotice } });
 
-  it("names lead-capture when dev is on", async () => {
+  it("says how to open the form when dev is on", async () => {
     const root = parse(await renderForm(true));
     const notice = root.querySelector("[data-dev-notice]");
-    expect(notice?.text).toMatch(/lead-capture/);
+    expect(notice?.text).toMatch(/PUBLIC_HUB_ORIGIN/);
     expect(notice?.text).toMatch(/POST \/api\/leads/);
+  });
+
+  it("names the hub it posts to when dev is on and the form is open", async () => {
+    const html = await container.renderToString(LeadForm, {
+      props: { kind: "contact", devNotice: true, hubOrigin: HUB },
+    });
+    expect(parse(html).querySelector("[data-dev-notice]")?.text).toContain(`${HUB}/api/leads`);
   });
 
   describe.each([
@@ -169,7 +255,7 @@ describe("LeadForm dev notice", () => {
 
   it("is absent when dev is off, and the form still says it is not open", async () => {
     const html = await renderForm(false);
-    expect(html).not.toMatch(/data-dev-notice|lead-capture/);
+    expect(html).not.toMatch(/data-dev-notice|PUBLIC_HUB_ORIGIN/);
     expect(parse(html).text).toMatch(/Sign-up is not open yet/);
   });
 });

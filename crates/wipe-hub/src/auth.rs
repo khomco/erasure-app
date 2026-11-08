@@ -533,10 +533,14 @@ pub(crate) fn with_peer(mut detail: serde_json::Value, peer: Option<&str>) -> se
 }
 
 /// The audit action for a summary of `key`'s refusals: email-send keys
-/// (`mail:…`) and sign-in keys are summarised under their own actions.
+/// (`mail:…`), sales-lead submission keys (`lead-form:…`) and sign-in keys are
+/// summarised under their own actions. [`throttle::purge_stale`] returns
+/// every kind of key, so each prefix must be mapped here.
 fn lock_summary_action(key: &str) -> &'static str {
     if key.starts_with(throttle::MAIL_KEY_PREFIX) {
         "auth.mail_lock_summary"
+    } else if key.starts_with(throttle::LEAD_KEY_PREFIX) {
+        "lead.submit_lock_summary"
     } else {
         "auth.sign_in_lock_summary"
     }
@@ -544,7 +548,7 @@ fn lock_summary_action(key: &str) -> &'static str {
 
 /// Audit a throttle row that had refused attempts and is now gone or
 /// restarted: at most one such row per lock.
-async fn audit_lock_summary(
+pub(crate) async fn audit_lock_summary(
     conn: &mut sqlx::PgConnection,
     summary: &throttle::LockSummary,
     peer: Option<&str>,
@@ -563,7 +567,7 @@ async fn audit_lock_summary(
 }
 
 /// 429 `message` with `Retry-After`.
-fn locked_response(message: &str, retry_after_secs: u64) -> Response {
+pub(crate) fn locked_response(message: &str, retry_after_secs: u64) -> Response {
     let mut resp = ApiError::new(StatusCode::TOO_MANY_REQUESTS, message).into_response();
     resp.headers_mut()
         .insert(RETRY_AFTER, HeaderValue::from(retry_after_secs));
@@ -1500,6 +1504,18 @@ mod tests {
         // An address that merely contains `mail:` is still a sign-in key.
         assert_eq!(
             lock_summary_action("email:mail:x@b.co"),
+            "auth.sign_in_lock_summary"
+        );
+        assert_eq!(
+            lock_summary_action("lead-form:ip:192.0.2.1"),
+            "lead.submit_lock_summary"
+        );
+        assert_eq!(
+            lock_summary_action("lead-form:ip:2001:db8::/64"),
+            "lead.submit_lock_summary"
+        );
+        assert_eq!(
+            lock_summary_action("email:lead-form:x@b.co"),
             "auth.sign_in_lock_summary"
         );
     }

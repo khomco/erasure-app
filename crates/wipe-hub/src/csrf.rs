@@ -8,8 +8,11 @@
 //!
 //! One rule covers anonymous and signed-in routes alike, so sign-in and
 //! sign-up (login CSRF) are protected too. A cross-site page cannot set the
-//! custom header: the hub sends no CORS headers. Subdomain cookie-tossing is
-//! the known weakness, accepted until hosting is decided (CONTEXT §10).
+//! custom header: the hub sends CORS headers only to the marketing site's
+//! configured origin, and only on this token endpoint and `POST /api/leads`
+//! ([`crate::cors`]); that origin can read a token and post a sales lead, but
+//! it is the vendor's own site. Subdomain cookie-tossing is the known
+//! weakness, accepted until hosting is decided (CONTEXT §10).
 //!
 //! `GET /api/auth/csrf` hands the token to the portal; it is the only place a
 //! raw CSRF token is ever returned, and none is ever logged.

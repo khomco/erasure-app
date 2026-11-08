@@ -3,8 +3,12 @@
 //! (portal-accounts story 2) uses `email:<address>` and `ip:<peer>`; the
 //! email-send throttle on every route that sends mail (story 3) uses
 //! `mail:to:<address>` and `mail:ip:<peer>` ([`MAIL_KEY_PREFIX`]), with its
-//! own limits; invitations (story 4) also charge `mail:org:<organization id>`. Email sends are always final, so their charges are confirmed
-//! in the same transaction instead of waiting for a check.
+//! own limits; invitations (story 4) also charge `mail:org:<organization id>`.
+//! Sales-lead form submissions (lead-capture story 1) charge
+//! `lead-form:ip:<peer>` ([`LEAD_KEY_PREFIX`]; never `lead:`, which is the
+//! audit subject of a sales lead itself). Email sends and lead submissions are always final,
+//! so their charges are confirmed in the same transaction instead of waiting
+//! for a check.
 //!
 //! The protocol, per key, around one expensive check (e.g. Argon2):
 //!
@@ -56,6 +60,17 @@ pub const MAIL_WINDOW: Duration = Duration::from_secs(60 * 60);
 pub const MAIL_LOCKOUT: Duration = Duration::from_secs(60 * 60);
 /// Every email-send throttle key starts with this; no sign-in key does.
 pub const MAIL_KEY_PREFIX: &str = "mail:";
+
+/// Sales-lead form submissions per client IP (or IPv6 /64) per window.
+pub const LEAD_IP_LIMIT: i32 = 10;
+/// The fixed window sales-lead submissions are counted in.
+pub const LEAD_WINDOW: Duration = Duration::from_secs(60 * 60);
+/// How long a sales-lead submission lock lasts once engaged.
+pub const LEAD_LOCKOUT: Duration = Duration::from_secs(60 * 60);
+/// Every sales-lead submission throttle key starts with this. It is not
+/// `lead:`, so an audit subject `lead:<uuid>` always means a sales lead and
+/// never a throttle key carrying a peer IP.
+pub const LEAD_KEY_PREFIX: &str = "lead-form:";
 
 /// Rows whose window started longer ago than this, and whose lock (if any)
 /// has elapsed, are deleted by [`purge_stale`]. Every window passed to
@@ -320,6 +335,17 @@ mod tests {
     }
 
     #[test]
+    fn lead_constants() {
+        assert_eq!(LEAD_IP_LIMIT, 10);
+        assert_eq!(LEAD_WINDOW.as_secs(), 3600);
+        assert_eq!(LEAD_LOCKOUT.as_secs(), 3600);
+        assert!(LEAD_WINDOW <= PURGE_AFTER);
+        assert_eq!(LEAD_KEY_PREFIX, "lead-form:");
+        assert!(!format!("{LEAD_KEY_PREFIX}ip:192.0.2.1").starts_with("lead:"));
+        assert!(!LEAD_KEY_PREFIX.starts_with(MAIL_KEY_PREFIX));
+    }
+
+    #[test]
     fn summaries_only_for_refusals() {
         assert_eq!(LockSummary::from_row("k".into(), 0, None), None);
         let s = LockSummary::from_row("k".into(), 3, Some("t".into())).unwrap();
@@ -347,5 +373,6 @@ mod tests {
         check_charge_args(MAIL_ADDRESS_LIMIT, MAIL_WINDOW);
         check_charge_args(MAIL_IP_LIMIT, MAIL_WINDOW);
         check_charge_args(MAIL_ORG_LIMIT, MAIL_WINDOW);
+        check_charge_args(LEAD_IP_LIMIT, LEAD_WINDOW);
     }
 }

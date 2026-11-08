@@ -1,0 +1,3591 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 7f95176..fc582b7 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -28,7 +28,9 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
+ - Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and
+   `curl 127.0.0.1:7900/api/health`. Flags have `WIPE_HUB_*` env twins whose defaults match the
+   compose file; `--payment-provider stripe` refuses to start without
+-  `WIPE_HUB_STRIPE_WEBHOOK_SECRET`. No `sqlx::query!` macros: there is no build-time database.
++  `WIPE_HUB_STRIPE_WEBHOOK_SECRET`. `--site-origin` / `WIPE_HUB_SITE_ORIGIN` (default
++  `http://localhost:4321`) is the one origin sent CORS headers, on `GET /api/auth/csrf` and
++  `POST /api/leads` only; anything but a bare http(s) origin refuses to start. No `sqlx::query!` macros: there is no build-time database.
+ - Hub migrations are embedded (`sqlx::migrate!`) and applied by `wipe-hub serve` before it
+   listens; it exits non-zero within ~5 s if Postgres is unreachable. Add a migration as
+   `crates/wipe-hub/migrations/NNNN_name.sql`; never edit an applied one.
+@@ -49,6 +51,10 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
+   overclaim — wrap the copy in `<Capability id>`, never weaken a guarded phrase), `pnpm --filter
+   www typecheck`, `pnpm --filter www test`; `pnpm --filter www lighthouse` needs local Chrome.
+   Capability statuses live in `sites/www/src/data/capabilities.ts` and are a vendor sign-off.
++  The lead forms stay closed (no script) unless built with `PUBLIC_HUB_ORIGIN=http://localhost:7900`
++  (`pnpm --filter www dev` for a local demo); `astro build` refuses that origin while
++  `site.privacyNoticePublished` is `false`. Consent wording lives in `src/data/consent.ts` and
++  is pinned to `crates/wipe-hub/src/leads.rs`: change both together.
+ - `wipestation serve` with no built frontend silently serves an "API only" landing page, as
+   does a `--static-dir` that does not exist; run `cd apps/desktop && pnpm build` first.
+ - Format only the files you touched with `rustfmt --edition 2021 <files>`. Never `--all`, and
+diff --git a/CONTEXT.md b/CONTEXT.md
+index ba125e1..300976c 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -688,13 +688,14 @@ folder or in `.scratch/DECISIONS.md`.
+ | Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark not persisted (resets on restart); no `FileCounter`; `allowed_methods` unenforced; free-tier count not tracked; no API route or UI; desktop shell is always unlicensed |
+ | Vitest suite over the frontend's pure domain modules | §12 | ✅ | |
+ | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
+-| Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check; landing page (problem, offline-verifiable certificate, differentiators, "what we are not", one early-access CTA); product, standards posture (certification roadmap labelled future), segment (ITAD, enterprise IT, government), pricing ("early-access pricing on request"), contact, privacy and terms pages; early-access and contact forms | ADR-0006 / ROADMAP W1.1–W1.4 | ✅ partial | The forms post nowhere (no `action`, submit disabled) until `lead-capture` adds `POST /api/leads`; pricing has no amounts until `offerings-and-payments`; privacy and terms are placeholders to publish before launch; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); copy and statuses await vendor sign-off |
++| Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check; landing page (problem, offline-verifiable certificate, differentiators, "what we are not", one early-access CTA); product, standards posture (certification roadmap labelled future), segment (ITAD, enterprise IT, government), pricing ("early-access pricing on request"), contact, privacy and terms pages; early-access and contact forms | ADR-0006 / ROADMAP W1.1–W1.4 | ✅ partial | The forms stay closed (no script, submit disabled, "not open yet") unless the build is given `PUBLIC_HUB_ORIGIN`, and `astro build` refuses that until the privacy notice is published (`site.privacyNoticePublished`), so production builds cannot take sales leads yet; pricing has no amounts until `offerings-and-payments`; privacy and terms are placeholders to publish before launch; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); copy and statuses await vendor sign-off |
+ | Vendor hub foundation — `crates/wipe-hub` (`wipe-hub serve`), flag/`WIPE_HUB_*` env config validated at start-up (`fake`\|`stripe` payment provider; `stripe` refuses to start without a webhook secret; optional 32-byte vendor root seed file, warned as file-held on every start), lazy Postgres pool, embedded sqlx migrations applied before listening (start-up exits within ~5 s if Postgres is unreachable), append-only `audit_log` table (ADR-0007 §6; written only through `audit::record`, which takes any executor so an action and its audit row share a transaction; UPDATE/DELETE/TRUNCATE rejected by triggers), `GET /api/health` probing Postgres and SMTP (≤2 s each; 503 `degraded` when either is down), root `compose.yaml` with Postgres and Mailpit, integration-test harness (`tests/support`: per-test `TestDb` databases dropped with their guard, `Mailpit` API client), portal serving (`apps/portal/dist` under the working directory or `--portal-dir`/`WIPE_HUB_PORTAL_DIR`; SPA fallback to `index.html`, `/assets/*` with no fallback, unknown `/api/*` paths JSON 404s; an explicit `--portal-dir` without `index.html` refuses to start, an unbuilt default is warned and non-API paths 404 naming the build) | ADR-0007 / ADR-0006 §1 / ROADMAP A1.1, A1.4 | ✅ partial | Only auth events call `audit::record` so far (row below); append-only does not stop the table owner (the hub's own role) or a superuser disabling the triggers (a separate unprivileged runtime role is a deployment decision, ROADMAP §0.5); no payments or licence issuance; vendor root custody is a file (production must not launch on it, ROADMAP A1.5); `cargo test --workspace` now needs `docker compose up -d` |
+ | Hub accounts: sign-up, email verification and password sign-in — migration `0003_accounts` (`organizations`; `users` with role `owner`\|`member`\|`vendor_admin`, unique on `lower(email)`; `auth_tokens` and `sessions` storing only the SHA-256 of 32-byte OS-RNG tokens), Argon2id password hashes (12–1024 chars, hashed off the async runtime), `/api/auth/{sign-up,verify-email,sign-in,sign-out,me,verification-email}` (sign-up creates an organization and its `owner` and signs them in; verification links `{public_base_url}/verify-email?token=…` are single-use and expire in 24 h; one generic 401 for a wrong password or unknown email, which still runs one Argon2 verification), server-side session per sign-up/sign-in in the `wipehub_session` cookie (`HttpOnly; SameSite=Lax; Path=/`, 14 days; `Secure` policy in the story-2 row below), plain-SMTP mailer with `--mail-from`/`WIPE_HUB_MAIL_FROM` sent after commit (SMTP down at sign-up: account still created, `verification_email_sent:false`, resend route recovers), every auth event audited in its transaction (`auth.sign_up`, `auth.email_verified`, `auth.sign_in`, `auth.sign_in_failed`, `auth.sign_out`), customer reads scoped by organization id in `accounts`; portal `/sign-up`, `/sign-in`, `/verify-email` pages and an account panel on home (verify notice with resend, sign-out) | ADR-0007 §3 / SPEC portal-accounts CAP-1, CAP-2 | ✅ partial | Nothing is purchase-gated yet (no purchase route; `email_verified` in `/api/auth/me` is the field to gate on); plain SMTP only, no STARTTLS/auth for a production relay (ROADMAP §0.5); expired tokens are purged per user when that user is next issued one (a user's expired sessions are purged when they next sign in); sign-up's 409 for a taken email reveals whether that email is registered |
+ | Hub sessions hardened: CSRF, sign-in throttles, rotation, sign out everywhere — double-submit CSRF token (`GET /api/auth/csrf` returns `{csrf_token}` with `Cache-Control: no-store`, reusing a well-formed `wipehub_csrf` cookie or minting 32 OS-RNG bytes; every non-GET/HEAD/OPTIONS `/api/*` request, unknown paths included, needs an `X-CSRF-Token` header equal to the cookie, compared in constant time, else 403 `missing or invalid CSRF token` before any handler or audit write; middleware `csrf::require`, no exemptions); migration `0004_auth_throttle` and `throttle::{charge, confirm_failure, refund, clear, purge_stale}` (reusable by story 3): every sign-in attempt, known or unknown email, is charged against `email:<address>` (trimmed, Postgres `lower()`, ≤254 chars) and `ip:<peer>` (IPv4 full address; IPv6 its /64) in one atomic statement per key before any lookup or Argon2 work, in a fixed 15-min window from the first charge; an attempt is refused while the key is locked or once charges in flight plus failures reach 5 per email or 20 per IP, so at most 5 (20) password checks run per window however many arrive at once; a refusal answers 429 `too many failed sign-in attempts; try again later` with `Retry-After` (time left on the lock, or 1 while only in-flight checks fill the window), even for the right password, and never extends a lock; a failure keeps its charge and the one that reaches the limit locks the key for 15 min; a success deletes the email key and refunds its IP charge, so the right password on the 5th try signs in unlocked; audit volume is bounded: `auth.sign_in_locked` once per lock (`{until}`), refusals counted in the row's `refused` and audited once as `auth.sign_in_lock_summary` (`{until, refused}`) when the row is cleared, restarted or purged, every sign-in audit row carrying `peer` except summaries of purged rows, which belong to other keys; the IP key is charged before the email key, so a locked IP never creates `email:` rows; the work after a charge runs in its own task, so a client disconnecting mid-check still has its outcome recorded; stale rows purged on failures with `SKIP LOCKED`; sign-in and sign-up delete the incoming session in the new session's transaction (`auth.sign_in` detail `{rotated}`); `POST /api/auth/sign-out-everywhere` ends every session of the signed-in user (`auth.sign_out_everywhere`, `{sessions: n}`); session and CSRF cookies are `Secure` unless `--public-base-url` is http on `localhost`, `*.localhost` or a loopback IP (http on any other host gets `Secure` and a start-up warning that browsers will drop the cookies); the portal client fetches and caches the token, sends it on every POST and refetches/retries once on a CSRF 403; the sign-in page turns a 429's `Retry-After` into "try again in N minutes"; "Sign out everywhere" on home | ADR-0007 §3 / SPEC portal-accounts CAP-2, CAP-3 | ✅ partial | The IP throttle keys on the TCP peer only (`X-Forwarded-For` is never trusted, ROADMAP §0.5), so behind a reverse proxy or a shared office NAT everyone shares one IP key and 20 failures among them lock all of them out (an IPv6 /64 is likewise one key); anyone who knows an email can lock that account out of password sign-in for 15 min at a time; because in-flight attempts count toward the limit, one failure while 19 other sign-ins from the same IP are mid-check can lock that IP; double-submit CSRF is open to cookie-tossing from a sibling subdomain until hosting is decided; no Origin/`Sec-Fetch-Site` checks; no idle timeout (sessions last 14 days unless signed out) |
+ | Hub magic links, password reset and the email-send throttle — migration `0005_auth_token_purposes` widens `auth_tokens.purpose` to `verify_email`\|`magic_link`\|`password_reset`; every emailed token is 32 OS-RNG bytes with only its SHA-256 stored, consumed by one atomic `UPDATE … WHERE used_at IS NULL AND expires_at > now()` (concurrent uses: exactly one wins), and issuing one deletes that user's expired tokens; `POST /api/auth/magic-link` and `POST /api/auth/password-reset` take `{email}` and answer 202 `{}` for known and unknown emails alike, SMTP down included: the handler only validates and charges the email-send throttle, and the account lookup, the token, the audit row (`auth.magic_link_requested`/`auth.password_reset_requested`) and the send of `{public_base_url}/magic-link?token=…` (15 min) or `/reset-password?token=…` (1 h) all run in a spawned task after the answer is decided, so neither the response nor its timing reveals whether the account exists (a failure there is logged at `warn`, never returned); an unknown email writes no token, mail or audit row; `POST /api/auth/magic-link/sign-in {token}` signs in like a password sign-in (rotating the incoming session), retires the user's other magic links, marks the email verified, clears that email's sign-in lock and is not subject to the sign-in throttle; if this sign-in is what verifies the email (a possibly pre-registered account, whose password was set by someone who never proved they own the mailbox), the same transaction also ends every other session of the user and replaces the password hash with the unusable marker `!unusable` until a reset (`auth.magic_link_sign_in` `{rotated, email_verified, sessions_ended, password_cleared}`); `POST /api/auth/password-reset/complete {token, password}` checks the password first (an invalid one never burns the token), peeks the token before Argon2, then in one transaction consumes it, sets the hash, retires outstanding reset and magic links, ends every session of the user and the browser's incoming session (whoever it belongs to), verifies the email and clears the sign-in lock, and answers `{"password_reset": true}` with the session cookie cleared, without signing in (`auth.password_reset` `{sessions, email_verified}`); a used or expired link is audited as `auth.magic_link_failed`/`auth.password_reset_failed` `{reason: "used"|"expired"}` once per token while the token is still stored (issuing a new link purges the user's expired ones), while an unknown or malformed token writes nothing, so these rows are bounded by the links issued (migration 0005 adds `auth_tokens.failure_audited_at` to mark them); every route that sends email (sign-up, resend verification, magic link, reset) is charged against `mail:to:<address>` (5 per hour) and `mail:ip:<peer>` (20 per hour) before any lookup, Argon2 or send, each charge final whether or not mail goes out, the one reaching a limit locking the key for 1 h (`auth.mail_locked` once; refusals summarised as `auth.mail_lock_summary`), a refusal being 429 `too many emails requested; try again later` with `Retry-After` and writing nothing but its throttle counters (stale throttle rows are purged only on a charged send); portal `/sign-in-link`, `/forgot-password` (same confirmation whether or not the account exists), `/magic-link` (signs in only on a button press, never on load, so a mail scanner cannot use the link) and `/reset-password`, linked from `/sign-in`; email-sending forms show "Too many emails requested. Try again in N minutes." | ADR-0007 §3 / SPEC portal-accounts CAP-2 | ✅ partial | Anyone who knows an address can lock its owner out of every route at once: 5 wrong passwords lock password sign-in for 15 min, and 5 link requests use up the address's emails for an hour, blocking magic link, reset, sign-up and resend (the limit counts unknown addresses too, so it reveals nothing; a sign-up that 409s still counts); when SMTP is down the two request routes still answer 202 and the user is never told the link did not go out; a user who signed up, never verified and then signs in by magic link loses their password and must reset it before password sign-in works again (the pre-registered-account mitigation); story 1's verification link still verifies a pre-registered account without ending its creator's session or password (deferred: on that path the clicker cannot be told apart from the person who just set the password); a send in flight is lost if the hub stops between answering and sending (the user asks again); no notice email when a password is reset or cleared; the per-IP mail limit has the same shared-NAT/proxy caveat as sign-in; expired tokens are only purged per user, with no global sweeper; the reset and magic-link token routes have no throttle of their own (a 256-bit token cannot be guessed); no MFA |
+ | Hub account and team management — `POST /api/account/profile {name}` (own name only; the email is read-only; `account.profile_updated` `{}`, the name kept out of the log); `POST /api/auth/password {current_password, new_password}`: the new password is validated first (nothing charged), then the attempt is charged against the sign-in throttle (`email:<the user's address>`, `ip:<peer>`) exactly like a sign-in, so a stolen session cannot guess the current password unthrottled; a wrong one is 400 `current password is incorrect` (`auth.password_change_failed`, and the 5th locks the email for password sign-in too), the right one sets the new hash, retires outstanding reset and magic links, ends every session of the user and starts a new one for this browser (`auth.password_changed` `{sessions_ended}`); `CurrentUser` carries the role, read in the session query, so a demotion or removal applies to the very next request; organization-scoped data layer `team` (every query takes the session's organization id first, so another organization's user or invitation id is a 404 that changes and audits nothing, and a `vendor_admin` is never a target); `GET /api/organization/members` (any role, ordered by name then email); owner-only routes answer a `member` or `vendor_admin` 403 `only an organization owner can manage the team` before reading the body, charging a throttle or writing: `POST /api/organization {name}` (`organization.renamed` `{from, to}`), `POST /api/organization/members/{id}/role {role}` (`owner`\|`member` only; same role is a no-op; `organization.member_role_changed`), `POST /api/organization/members/{id}/remove` (deletes the user, so sessions and tokens cascade and the address is free again; `organization.member_removed` `{organization_id, email, role, sessions_ended}`; removing yourself is 409); every owner write (rename, invite, revoke, role change, removal) locks the organization row (`SELECT … FOR UPDATE`) and re-checks that the actor is still an owner, so a just-demoted owner cannot act, and an organization always keeps an owner: owners are counted under that lock, so two owners demoting each other at once leave one (409 `an organization must keep at least one owner`); removing or demoting an owner revokes, in the same transaction, every pending invitation they sent, so a departing owner cannot rejoin through one; migration `0006_invitations` and `POST /api/organization/invitations {email, role}` (a verified owner only; charged against the email-send limit plus `mail:org:<organization id>`, 20 invitations per organization per hour, whose refusal gives back the request's IP and address charges; 409 for an address already in the organization, decided under the lock, the charge standing; revokes that address's other pending invitations, so at most one is pending even for concurrent invites, and purges expired ones; `organization.member_invited`; SMTP down still creates it with `invitation_email_sent:false`), `GET …/invitations` (pending only), `POST …/invitations/{id}/revoke`; every revocation is audited as `organization.invitation_revoked` `{invitation_id, email, reason}` with `reason` `revoked`, `replaced`, `sender_demoted` or `sender_removed`; the emailed `{public_base_url}/accept-invite?token=…` link is single-use and expires in 7 days; `POST /api/invitations/lookup {token}` previews it without consuming, `POST /api/invitations/accept {token, name, password}` validates first, peeks before Argon2, then atomically consumes the invitation and creates the user in the inviting organization with its role and a verified email, rotates the incoming session and signs in (`organization.invitation_accepted`); names reject control characters; portal `/account` (name, password change), `/organization` (rename, member list with role select and Remove for owners, both confirmed before acting on yourself; invite form, replaced by the verify-and-resend notice for an unverified owner; pending invitations with Revoke) and `/accept-invite` (looks up on load, joins only on submit, then drops every query cached for the browser's previous user), linked from home | ADR-0007 §3 / SPEC portal-accounts CAP-4 | ✅ partial | No email-address change (needs a confirmation link to the new address and a notice to the old one); one organization per person, so an invitation to an address that already has an account anywhere fails only at acceptance (409, told to the mailbox owner, never to the inviter); removal deletes the user row (the audit log keeps id, email and role; revisit when orders reference users); organization and inviter names appear in invitation emails sent to third parties; the inviter learns only `invitation_email_sent` (handed to SMTP), not delivery; no ownership-transfer flow beyond role changes, no leaving or deleting an organization, no organization fields beyond its name; no notice email when a password is changed or a member removed; invitee and removed-member email addresses, and organization names (`organization.renamed` `{from, to}`), stay in the append-only audit log for good (the log is the record of who was invited and removed; the user's display name is kept out), pending a data-retention decision; a locked email (5 wrong passwords by anyone who knows the address) also blocks the signed-in user's password change for 15 min, since both share the `email:` throttle key; an organization that genuinely invites more than 20 people in an hour waits for the window to pass |
+ | Hub vendor admin area and tenant isolation — migration `0007_vendor_organization` adds `organizations.is_vendor` with a partial unique index (`organizations_one_vendor`), so at most one organization is the **vendor organization** (`Vendor staff`), which sign-up and invitations never create or join; `wipe-hub admin create --email <address> [--name <name>]` (with `serve`'s `--database-url`, `--smtp-*`, `--mail-from`, `--public-base-url` and their `WIPE_HUB_*` twins) validates first, applies migrations, then in one transaction gets or creates the vendor organization (race-free: `INSERT … ON CONFLICT ((true)) WHERE is_vendor DO NOTHING`), inserts a `vendor_admin` with an unusable password and an unverified email, issues a 1-hour password-reset token and audits `admin.created` (actor `cli:admin-create`, `{email, organization_id, vendor_organization_created, os_user}`), then emails the existing reset link; it prints `created vendor admin <email> (<id>)`, exits 0 even when SMTP is down (warning that the admin should use Forgot password) and refuses, writing nothing, an address that is already a vendor admin or belongs to a customer (it never converts a customer user); a session is a vendor admin only when the user's role is `vendor_admin`, their organization is the vendor organization and their email is verified, read live per request, else every `/api/admin/*` route is 403 `only vendor admins can use the admin area` (401 without a session) before the query is read; the admin data layer `admin` is the only code that reads across organizations, excludes the vendor organization and every `vendor_admin` from results and counts, and takes a `VendorAdmin` (built only by the extractor) plus a transaction in which it writes its own audit row before returning data; `GET /api/admin/organizations?q=` (name, or any user's email or name; `{organizations: [{id, name, created_at, user_count}], truncated}`; `admin.organizations_searched` `{query, organization_ids}`), `GET /api/admin/users?q=` (email or name, with organization; `admin.users_searched` `{query, user_ids}`), `GET /api/admin/organizations/{id}` (organization and users; `admin.organization_viewed` `{user_ids}`; unknown, non-UUID or vendor id 404 `no such organization` with no audit row); `q` is trimmed, case-insensitive, LIKE wildcards literal, empty matches everything, over 200 characters or any control character 400; `tests/isolation.rs` calls every customer and admin route as one organization's owner and member with another organization's ids and addresses and asserts no response carries the other's identifiers and its records are byte-for-byte unchanged, and a guard fails on any `/api` path literal in `src/` missing from its classification table; portal `/admin` (organization and user search forms, run only on submit, results as tables linking to the organization) and `/admin/organizations/$id`, linked from home for `vendor_admin` | ADR-0007 §3, §6 / SPEC portal-accounts CAP-5, CAP-6 / ROADMAP A1.3 (customers part) | ✅ partial | Views only: no admin actions on customer accounts (sending a reset, resending verification, changing roles, disabling); no CLI to list or remove admins (deleting the user row by SQL ends their sessions by cascade); admins have the same 14-day session lifetime as customers and no MFA; search queries and the ids they returned stay in the append-only audit log for good; results are capped at 100 with no paging; substring search scans the tables (no trigram index); the set-password email is the password-reset email and reads as a reset; offerings, orders and licences are not in the admin area yet |
++| Sales leads from the marketing site — migration `0008_leads`: `leads` (one per `lower(email)`, unique index; `segment` `itad`\|`enterprise-it`\|`government`\|`other`; `status` `new`\|`contacted`\|`qualified`\|`closed`; `unsubscribed_at`) and `lead_submissions` (kind, message, the exact consent text and `consented_at`, the SHA-256 of a 32-byte OS-RNG unsubscribe token; cascade on lead delete); `POST /api/leads {kind, name, email, company, role?, segment?, message?, consent, consent_text, website?}` keeps the double-submit CSRF check (no exemption) and validates (400; contact needs a message and takes no role or segment; `consent` must be true and `consent_text` must equal the hub's text for the form, pinned to `sites/www/src/data/consent.ts`), then charges `lead:ip:<peer>` (10 an hour, final; the 10th locks the key for an hour, `lead.submit_locked`; refusal 429 `too many submissions; try again later` with `Retry-After`), answers a filled honeypot `website` 202 `{}` doing nothing else, charges the email-send throttle (`mail:` keys, shared with sign-in links), then in one transaction upserts the lead (a known address updates email as typed, name and company, role and segment only when given, clears `unsubscribed_at` and never changes `status`), inserts the submission and audits `lead.submitted` `{kind, created, resubscribed}`; 202 `{}` either way; the confirmation email (per-form subject, no submitted text echoed, a `{public_base_url}/unsubscribe?token=…` link and a "not you?" line) is sent from a spawned task, failures logged at `warn`. `POST /api/leads/unsubscribe {token}`: any of the lead's tokens sets `unsubscribed_at` once (`lead.unsubscribed` `{}` only on change), 200 `{"unsubscribed": true}` also when already unsubscribed, 404 `this unsubscribe link is not valid` otherwise; the portal's `/unsubscribe` page acts only on a button press. Lead audit rows hold ids and flags only (no name, email, company, message or IP). Credentialed CORS (`cors::site_cors`, outside the CSRF middleware) answers only `--site-origin` / `WIPE_HUB_SITE_ORIGIN` (default `http://localhost:4321`; anything but a bare http(s) origin refuses to start), only on `GET /api/auth/csrf` and `POST /api/leads` and their preflights. The site's forms post with `src/lib/lead-submit.ts` only in builds given `PUBLIC_HUB_ORIGIN` | lead-capture story 1 (CAP-1, CAP-2, CAP-4 storage and unsubscribe) / ADR-0007 §3 | ✅ partial | No admin list, notes, export or erasure yet (story 2); the site and hub must be the same *site* (registrable domain) because the CSRF cookie is `SameSite=Lax`: `localhost:4321` with `localhost:7900` works, `localhost` with `127.0.0.1` does not, and production hosting must keep them same-site; no RFC 8058 one-click `List-Unsubscribe` header (it would need a CSRF exemption); no double opt-in, so anyone can put any address on the list once an hour per IP and the owner gets one confirmation email; the email-send throttle's own audit rows (`auth.mail_locked`, `auth.mail_lock_summary`) name the address and peer in their subject, and a `lead.submit_locked` subject names the peer IP, so erasing a sales lead (story 2) cannot remove those; the form script has been exercised in tests and against a running hub with a scripted client, not in a real browser |
+ 
+ ## 11. Deferred — known and committed
+ 
+@@ -978,6 +979,11 @@ and resolve. None of these have a decided answer.
+ - **mDNS / DNS-SD** — multicast DNS service discovery; how stations
+   find each other on a LAN.
+ - **Lead** — the elected canonical station on a LAN.
++- **Sales lead** — a person who submitted the marketing site's
++  early-access or contact form: one `leads` row per email address in
++  `wipe-hub`, with every submission and its consent text kept. Never the
++  elected **Lead** station; code identifiers stay `lead`, prose says
++  "sales lead".
+ - **Hub** — station-side multi-LAN / multi-site coordinator (deferred).
+   Distinct from the vendor-side `wipe-hub` (ADR-0007), which is the
+   control plane, not a station coordinator.
+diff --git a/README.md b/README.md
+index 74e08e3..d8b6ca3 100644
+--- a/README.md
++++ b/README.md
+@@ -45,10 +45,10 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
+ | `wipe-fleet` | mDNS service advertise / browse + deterministic lead election |
+ | `wipe-server` | Axum REST API + WebSocket event stream; auto-signs certs when a Job reaches `Erased` or `PendingCoSign`; destruction-manifest assembly and co-sign |
+ | `wipe-cli` | `wipestation serve / inspect / verify-cert` binary |
+-| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, profile and password change, organization rename and team management (owners invite by emailed single-use link, change roles between `owner` and `member`, and remove members; an organization always keeps an owner), a per-address and per-IP limit on every email it sends (5 per address, 20 per IP per hour; invitations also 20 per organization per hour), every auth event audited, and `wipe-hub admin create --email <address>`, which creates a vendor admin in the one vendor organization and emails them a set-password link (never a password on the command line), for a read-only admin area under `/api/admin/*` (search customer organizations and users, view one organization; vendor admins with a verified email only, and every search and view audited with the ids it returned). `tests/isolation.rs` checks that one organization's owner and member never see or change another organization's records through any customer route, and fails when a new `/api` route is left unclassified. Payments and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
++| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, profile and password change, organization rename and team management (owners invite by emailed single-use link, change roles between `owner` and `member`, and remove members; an organization always keeps an owner), a per-address and per-IP limit on every email it sends (5 per address, 20 per IP per hour; invitations also 20 per organization per hour), every auth event audited, and `wipe-hub admin create --email <address>`, which creates a vendor admin in the one vendor organization and emails them a set-password link (never a password on the command line), for a read-only admin area under `/api/admin/*` (search customer organizations and users, view one organization; vendor admins with a verified email only, and every search and view audited with the ids it returned), and sales leads from the marketing site's forms (`POST /api/leads` behind credentialed CORS for the one `--site-origin` and the usual CSRF token, with a per-IP limit of 10 an hour, a honeypot, one lead per address, the exact consent text stored with every submission, a confirmation email whose link unsubscribes via the portal's `/unsubscribe` page, and lead audit rows that hold no personal data). `tests/isolation.rs` checks that one organization's owner and member never see or change another organization's records through any customer route, and fails when a new `/api` route is left unclassified. Payments and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
+ | `apps/desktop` | Vite + React + TanStack Router + Tailwind frontend, plus Tauri 2 shell |
+-| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in, email-verification, sign-in-link (magic link), password-reset and accept-invitation pages, an account page (name, password change), an organization page (rename, members, invitations, roles and removal for owners), an admin area for vendor admins (`/admin`: organization and user search, run only on submit since each is audited; `/admin/organizations/$id`: one organization and its users), and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere, and a link to the admin area for vendor admins); its API client sends the hub's CSRF token on every POST |
+-| `sites/www` | Static Astro + Tailwind marketing site (pre-launch): landing, product, standards, segment (ITAD, enterprise IT, government), pricing, contact, privacy and terms pages, `/capabilities`, and early-access/contact forms that post nowhere until `lead-capture`; a build-time check fails `astro build` on any capability overclaim, missing meta/OG tag, missing sitemap, or resource loaded from another origin (ADR-0006 §2). See [`sites/www/README.md`](sites/www/README.md) |
++| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in, email-verification, sign-in-link (magic link), password-reset, accept-invitation and sales-lead unsubscribe (`/unsubscribe`, acting only on a button press) pages, an account page (name, password change), an organization page (rename, members, invitations, roles and removal for owners), an admin area for vendor admins (`/admin`: organization and user search, run only on submit since each is audited; `/admin/organizations/$id`: one organization and its users), and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere, and a link to the admin area for vendor admins); its API client sends the hub's CSRF token on every POST |
++| `sites/www` | Static Astro + Tailwind marketing site (pre-launch): landing, product, standards, segment (ITAD, enterprise IT, government), pricing, contact, privacy and terms pages, `/capabilities`, and early-access/contact forms that stay closed (no script, disabled button) unless the build is given `PUBLIC_HUB_ORIGIN`, when a small script posts them to the hub's `POST /api/leads` (`astro build` refuses that while the privacy notice is a placeholder); a build-time check fails `astro build` on any capability overclaim, missing meta/OG tag, missing sitemap, or resource loaded from another origin (ADR-0006 §2). See [`sites/www/README.md`](sites/www/README.md) |
+ 
+ ## Quick start
+ 
+@@ -183,7 +183,7 @@ to `Destroyed`.
+ 
+ | `wipe-server/tests/topology_store.rs` | 15 | All four persistence tiers (ADR-0003); the write probe against a read-only directory; corrupt-config recovery; save-survives-restart; and that a path binding learned by identify mode keeps its bay when a *different* drive is swapped into that port |
+ | `apps/desktop` (`pnpm test`) | 200 | `topologyEdit` (17): numbering runs across every order/origin/offset, grid rebuilds preserving operator edits by position, binding rules, validation. `identify` (12): hot-plug diffing — a reused port is a *different* drive. `shells/catalog` (8): catalog↔artwork drift in both directions, and one bundled model stays on the generic shell so the fallback stays exercised. `shells/contract` (163): every registered shell built at four content sizes, asserting the bay slot equals the content and the legibility rules hold, self-tested with deliberately broken shells |
+-| `sites/www` (`pnpm --filter www test`) | 180 | The real pages rendered with the Astro container (`test/pages.test.ts`): all 13 pages pass the site check, ship no `<script>`, and have one `h1`, a title and a description; the landing page has exactly one primary CTA to `/early-access/`, its sections in order, and labelled claims in every claim section; the early-access and contact forms have no `action`, a disabled submit, "not open yet" text and exactly the `lead-capture` field names each with a `<label for>`; the dev-only notice follows `import.meta.env.DEV`; the segment select starts on an empty, disabled placeholder; pricing shows no amount, currency or per-unit price anywhere in the document; the standards roadmap is labelled future with each target planned; header, footer and `/segments/` link every new page. The build-time site check (`src/lib/site-check.ts`) against fixture HTML: labelled vs bare overclaims (body text, read-aloud attributes, `<title>`, description, `og:*`), invisible characters splitting words, fake or mismatched badges, `available` capabilities unable to own shared phrases, unknown ids, stale statuses, missing/hidden/wrong-text badges, missing meta, third-party scripts, images, frames, media, icons, `style` and CSS `url()`/`@import`; `available` items allowed bare; the real capability list against sample copy; and the `astro:build:done` hook run over temp dirs (recursion, CSS scan, missing sitemap) |
++| `sites/www` (`pnpm --filter www test`) | 210 | The real pages rendered with the Astro container (`test/pages.test.ts`): all 13 pages pass the site check, ship no `<script>`, and have one `h1`, a title and a description; the landing page has exactly one primary CTA to `/early-access/`, its sections in order, and labelled claims in every claim section; closed (default), the early-access and contact forms have no `action`, a disabled submit, "not open yet" text, no script and exactly the `lead-capture` field names each with a `<label for>`, and the consent label is exactly the text the hub stores; open (`PUBLIC_HUB_ORIGIN`), they carry `data-hub-origin`, a script, a `<noscript>` note and an off-screen, `aria-hidden`, untabbable honeypot; the dev-only notice follows `import.meta.env.DEV`; the segment select starts on an empty, disabled placeholder; pricing shows no amount, currency or per-unit price anywhere in the document; the standards roadmap is labelled future with each target planned; header, footer and `/segments/` link every new page. The build-time site check (`src/lib/site-check.ts`) against fixture HTML: labelled vs bare overclaims (body text, read-aloud attributes, `<title>`, description, `og:*`), invisible characters splitting words, fake or mismatched badges, `available` capabilities unable to own shared phrases, unknown ids, stale statuses, missing/hidden/wrong-text badges, missing meta, third-party scripts, images, frames, media, icons, `style` and CSS `url()`/`@import`; `available` items allowed bare; the real capability list against sample copy; the `astro:build:done` hook run over temp dirs (recursion, CSS scan, missing sitemap); the build-only guard refusing `PUBLIC_HUB_ORIGIN` while the privacy notice is unpublished; and the form script (`test/lead-submit.test.ts`): request body, CSRF fetch and one retry, and the 202/400/429/network messages |
+ 
+ Plus the `scripts/demo.sh` end-to-end shell drives two real station processes, mDNS discovery, a real cert issuance, and three negative tests (correct key passes, wrong key rejected, tampered cert rejected).
+ 
+diff --git a/apps/portal/src/api/leads.test.ts b/apps/portal/src/api/leads.test.ts
+new file mode 100644
+index 0000000..c546bbc
+--- /dev/null
++++ b/apps/portal/src/api/leads.test.ts
+@@ -0,0 +1,78 @@
++import { beforeEach, describe, expect, it } from "vitest";
++import { CSRF_ERROR, HubError, resetCsrfCache } from "./auth";
++import { unsubscribeLead } from "./leads";
++
++interface Call {
++  url: string;
++  method: string;
++  body: unknown;
++  csrf: string | null;
++}
++
++type Answer = { status: number; body?: unknown };
++
++/**
++ * A fake hub, as in `auth.test.ts`: `GET /api/auth/csrf` answers
++ * `csrf-<n>`; every other call is recorded and answered by `answer`.
++ */
++function fakeHub(answer: (index: number) => Answer) {
++  const calls: Call[] = [];
++  let csrfFetches = 0;
++  const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
++    const url = String(input);
++    const method = init?.method ?? "GET";
++    if (url === "/api/auth/csrf" && method === "GET") {
++      csrfFetches += 1;
++      return new Response(JSON.stringify({ csrf_token: `csrf-${csrfFetches}` }), {
++        status: 200,
++        headers: { "Content-Type": "application/json" },
++      });
++    }
++    const headers = (init?.headers ?? {}) as Record<string, string>;
++    calls.push({
++      url,
++      method,
++      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
++      csrf: headers["X-CSRF-Token"] ?? null,
++    });
++    const { status, body } = answer(calls.length - 1);
++    return new Response(body === undefined ? null : JSON.stringify(body), {
++      status,
++      headers: body === undefined ? {} : { "Content-Type": "application/json" },
++    });
++  }) as typeof fetch;
++  return { impl, calls };
++}
++
++beforeEach(() => resetCsrfCache());
++
++describe("unsubscribeLead", () => {
++  it("posts the token with the CSRF header", async () => {
++    const f = fakeHub(() => ({ status: 200, body: { unsubscribed: true } }));
++    await unsubscribeLead("tok", f.impl);
++    expect(f.calls).toEqual([
++      { url: "/api/leads/unsubscribe", method: "POST", body: { token: "tok" }, csrf: "csrf-1" },
++    ]);
++  });
++
++  it("surfaces the hub's 404 for an invalid link", async () => {
++    const f = fakeHub(() => ({ status: 404, body: { error: "this unsubscribe link is not valid" } }));
++    const err = await unsubscribeLead("bad", f.impl).catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(HubError);
++    expect((err as HubError).status).toBe(404);
++    expect((err as HubError).message).toBe("this unsubscribe link is not valid");
++  });
++
++  it("retries once with a fresh token after a CSRF rejection", async () => {
++    const f = fakeHub((i) =>
++      i === 0 ? { status: 403, body: { error: CSRF_ERROR } } : { status: 200, body: { unsubscribed: true } },
++    );
++    await unsubscribeLead("tok", f.impl);
++    expect(f.calls.map((c) => c.csrf)).toEqual(["csrf-1", "csrf-2"]);
++  });
++
++  it("rejects an unexpected success body", async () => {
++    const f = fakeHub(() => ({ status: 200, body: {} }));
++    await expect(unsubscribeLead("tok", f.impl)).rejects.toThrow(/unexpected body/);
++  });
++});
+diff --git a/apps/portal/src/api/leads.ts b/apps/portal/src/api/leads.ts
+new file mode 100644
+index 0000000..51a9928
+--- /dev/null
++++ b/apps/portal/src/api/leads.ts
+@@ -0,0 +1,21 @@
++// Mirrors `POST /api/leads/unsubscribe` in crates/wipe-hub/src/lead_routes.rs
++// (lead-capture story 1). Change both together. The marketing site, not the
++// portal, posts sales leads (`sites/www/src/lib/lead-submit.ts`).
++
++import { ensureOk, isObject, json, request, type Fetch } from "./auth";
++
++/**
++ * `POST /api/leads/unsubscribe` with the token from a sales-lead
++ * confirmation email. Resolves once the sales lead is unsubscribed, also
++ * when it already was; a malformed or unknown token is a 404 `HubError`.
++ */
++export async function unsubscribeLead(token: string, fetchImpl: Fetch = fetch): Promise<void> {
++  const res = await ensureOk(
++    await request(fetchImpl, "POST", "/api/leads/unsubscribe", { token }),
++  );
++  await json(
++    res,
++    (v): v is { unsubscribed: true } => isObject(v) && v.unsubscribed === true,
++    "unsubscribe",
++  );
++}
+diff --git a/apps/portal/src/main.tsx b/apps/portal/src/main.tsx
+index 8520e5b..1af3499 100644
+--- a/apps/portal/src/main.tsx
++++ b/apps/portal/src/main.tsx
+@@ -23,6 +23,7 @@ import { ResetPasswordPage } from "./pages/ResetPasswordPage";
+ import { SignInLinkPage } from "./pages/SignInLinkPage";
+ import { SignInPage } from "./pages/SignInPage";
+ import { SignUpPage } from "./pages/SignUpPage";
++import { UnsubscribePage } from "./pages/UnsubscribePage";
+ import { VerifyEmailPage } from "./pages/VerifyEmailPage";
+ 
+ const queryClient = new QueryClient({
+@@ -130,6 +131,17 @@ const resetPasswordRoute = createRoute({
+   },
+ });
+ 
++// The hub emails `{public_base_url}/unsubscribe?token=…` to sales leads.
++const unsubscribeRoute = createRoute({
++  getParentRoute: () => rootRoute,
++  path: "/unsubscribe",
++  validateSearch: tokenSearch,
++  component: function UnsubscribeRoute() {
++    const { token } = unsubscribeRoute.useSearch();
++    return <UnsubscribePage token={token} />;
++  },
++});
++
+ const accountRoute = createRoute({
+   getParentRoute: () => rootRoute,
+   path: "/account",
+@@ -178,6 +190,7 @@ const routeTree = rootRoute.addChildren([
+   forgotPasswordRoute,
+   magicLinkRoute,
+   resetPasswordRoute,
++  unsubscribeRoute,
+   accountRoute,
+   organizationRoute,
+   acceptInviteRoute,
+diff --git a/apps/portal/src/pages/UnsubscribePage.tsx b/apps/portal/src/pages/UnsubscribePage.tsx
+new file mode 100644
+index 0000000..e66a975
+--- /dev/null
++++ b/apps/portal/src/pages/UnsubscribePage.tsx
+@@ -0,0 +1,46 @@
++import { useMutation } from "@tanstack/react-query";
++import { unsubscribeLead } from "@/api/leads";
++
++/**
++ * Landing page for the `/unsubscribe?token=…` link in a sales-lead
++ * confirmation email (lead-capture story 1). It unsubscribes only when the
++ * visitor presses the button, never on load: some mail scanners open links
++ * in a real browser, and must not unsubscribe anyone.
++ */
++export function UnsubscribePage({ token }: { token: string | undefined }) {
++  const mutation = useMutation({ mutationFn: (t: string) => unsubscribeLead(t) });
++
++  return (
++    <section className="max-w-sm space-y-4">
++      <h1 className="text-xl font-semibold">Unsubscribe</h1>
++      {!token ? (
++        <p role="alert" className="text-sm text-rose-400">
++          This link has no unsubscribe token.
++        </p>
++      ) : mutation.isSuccess ? (
++        <p role="status" className="text-sm text-emerald-400">
++          You are unsubscribed. We will not contact you about this request again.
++        </p>
++      ) : (
++        <>
++          <p className="text-sm text-slate-300">
++            Press the button to stop hearing from us about your early-access request or message.
++          </p>
++          <button
++            type="button"
++            onClick={() => mutation.mutate(token)}
++            disabled={mutation.isPending}
++            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
++          >
++            Unsubscribe
++          </button>
++        </>
++      )}
++      {mutation.isError && (
++        <p role="alert" className="text-sm text-rose-400">
++          {mutation.error instanceof Error ? mutation.error.message : "Unsubscribing failed"}
++        </p>
++      )}
++    </section>
++  );
++}
+diff --git a/crates/wipe-hub/migrations/0008_leads.sql b/crates/wipe-hub/migrations/0008_leads.sql
+new file mode 100644
+index 0000000..b12c5d8
+--- /dev/null
++++ b/crates/wipe-hub/migrations/0008_leads.sql
+@@ -0,0 +1,42 @@
++-- Sales leads (lead-capture story 1): people who submitted the marketing
++-- site's early-access or contact form. A sales lead is never the elected
++-- Lead station (CONTEXT §14).
++--
++-- One `leads` row per address, compared by `lower(email)` (the unique index).
++-- A new submission updates the row and clears `unsubscribed_at` (fresh
++-- consent), but never changes `status`, which the vendor works.
++-- Every submission is its own `lead_submissions` row holding the exact
++-- consent text shown with the form and when it was given (CAP-4), plus the
++-- SHA-256 of the unsubscribe token emailed with its confirmation; any of a
++-- lead's tokens unsubscribes the lead. Only the hash is stored.
++--
++-- Never edit an applied migration; add a new NNNN_name.sql.
++
++CREATE TABLE leads (
++    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
++    email           text NOT NULL CHECK (email ~ '\S'),
++    name            text NOT NULL CHECK (name ~ '\S'),
++    company         text NOT NULL CHECK (company ~ '\S'),
++    role            text CHECK (role ~ '\S'),
++    segment         text CHECK (segment IN ('itad', 'enterprise-it', 'government', 'other')),
++    status          text NOT NULL DEFAULT 'new'
++                    CHECK (status IN ('new', 'contacted', 'qualified', 'closed')),
++    created_at      timestamptz NOT NULL DEFAULT now(),
++    updated_at      timestamptz NOT NULL DEFAULT now(),
++    unsubscribed_at timestamptz
++);
++
++CREATE UNIQUE INDEX leads_email_key ON leads (lower(email));
++
++CREATE TABLE lead_submissions (
++    id                     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
++    lead_id                uuid NOT NULL REFERENCES leads (id) ON DELETE CASCADE,
++    kind                   text NOT NULL CHECK (kind IN ('early-access', 'contact')),
++    message                text,
++    consent_text           text NOT NULL CHECK (consent_text ~ '\S'),
++    consented_at           timestamptz NOT NULL DEFAULT now(),
++    unsubscribe_token_hash bytea NOT NULL CHECK (octet_length(unsubscribe_token_hash) = 32),
++    CONSTRAINT lead_submissions_unsubscribe_token_hash_key UNIQUE (unsubscribe_token_hash)
++);
++
++CREATE INDEX lead_submissions_lead_id_idx ON lead_submissions (lead_id);
+diff --git a/crates/wipe-hub/src/auth.rs b/crates/wipe-hub/src/auth.rs
+index d86c417..3aabf04 100644
+--- a/crates/wipe-hub/src/auth.rs
++++ b/crates/wipe-hub/src/auth.rs
+@@ -533,10 +533,14 @@ pub(crate) fn with_peer(mut detail: serde_json::Value, peer: Option<&str>) -> se
+ }
+ 
+ /// The audit action for a summary of `key`'s refusals: email-send keys
+-/// (`mail:…`) and sign-in keys are summarised under their own actions.
++/// (`mail:…`), sales-lead submission keys (`lead:…`) and sign-in keys are
++/// summarised under their own actions. [`throttle::purge_stale`] returns
++/// every kind of key, so each prefix must be mapped here.
+ fn lock_summary_action(key: &str) -> &'static str {
+     if key.starts_with(throttle::MAIL_KEY_PREFIX) {
+         "auth.mail_lock_summary"
++    } else if key.starts_with(throttle::LEAD_KEY_PREFIX) {
++        "lead.submit_lock_summary"
+     } else {
+         "auth.sign_in_lock_summary"
+     }
+@@ -544,7 +548,7 @@ fn lock_summary_action(key: &str) -> &'static str {
+ 
+ /// Audit a throttle row that had refused attempts and is now gone or
+ /// restarted: at most one such row per lock.
+-async fn audit_lock_summary(
++pub(crate) async fn audit_lock_summary(
+     conn: &mut sqlx::PgConnection,
+     summary: &throttle::LockSummary,
+     peer: Option<&str>,
+@@ -563,7 +567,7 @@ async fn audit_lock_summary(
+ }
+ 
+ /// 429 `message` with `Retry-After`.
+-fn locked_response(message: &str, retry_after_secs: u64) -> Response {
++pub(crate) fn locked_response(message: &str, retry_after_secs: u64) -> Response {
+     let mut resp = ApiError::new(StatusCode::TOO_MANY_REQUESTS, message).into_response();
+     resp.headers_mut()
+         .insert(RETRY_AFTER, HeaderValue::from(retry_after_secs));
+@@ -1502,6 +1506,18 @@ mod tests {
+             lock_summary_action("email:mail:x@b.co"),
+             "auth.sign_in_lock_summary"
+         );
++        assert_eq!(
++            lock_summary_action("lead:ip:192.0.2.1"),
++            "lead.submit_lock_summary"
++        );
++        assert_eq!(
++            lock_summary_action("lead:ip:2001:db8::/64"),
++            "lead.submit_lock_summary"
++        );
++        assert_eq!(
++            lock_summary_action("email:lead:x@b.co"),
++            "auth.sign_in_lock_summary"
++        );
+     }
+ 
+     #[test]
+diff --git a/crates/wipe-hub/src/config.rs b/crates/wipe-hub/src/config.rs
+index 09edea1..380db0e 100644
+--- a/crates/wipe-hub/src/config.rs
++++ b/crates/wipe-hub/src/config.rs
+@@ -21,6 +21,8 @@ pub const DEFAULT_SMTP_HOST: &str = "127.0.0.1";
+ pub const DEFAULT_SMTP_PORT: u16 = 1025;
+ pub const DEFAULT_PUBLIC_BASE_URL: &str = "http://127.0.0.1:7900";
+ pub const DEFAULT_MAIL_FROM: &str = "Wipestation <no-reply@wipestation.localhost>";
++/// The marketing site's origin in development (Astro's dev port).
++pub const DEFAULT_SITE_ORIGIN: &str = "http://localhost:4321";
+ 
+ /// Where the portal is looked for when `--portal-dir` is absent, relative to
+ /// the working directory.
+@@ -81,6 +83,11 @@ pub struct Args {
+     /// under the working directory if built, else the portal is not served.
+     #[arg(long, env = "WIPE_HUB_PORTAL_DIR")]
+     pub portal_dir: Option<PathBuf>,
++    /// Origin of the marketing site (`http(s)://host[:port]`) whose forms post
++    /// sales leads; the only origin sent CORS headers, on `GET /api/auth/csrf`
++    /// and `POST /api/leads`.
++    #[arg(long, env = "WIPE_HUB_SITE_ORIGIN", default_value = DEFAULT_SITE_ORIGIN)]
++    pub site_origin: String,
+ }
+ 
+ /// Raw `wipe-hub admin create` flags (portal-accounts story 5). The
+@@ -147,6 +154,9 @@ pub struct Config {
+     pub vendor_root: Option<FileVendorRoot>,
+     /// Built portal to serve at `/`. `None` means the portal is not served.
+     pub portal_dir: Option<PathBuf>,
++    /// The marketing site's origin, serialized as a browser sends it in
++    /// `Origin` (`scheme://host[:port]`, no default port, no trailing slash).
++    pub site_origin: String,
+ }
+ 
+ #[derive(Debug, Error)]
+@@ -173,12 +183,15 @@ pub enum ConfigError {
+         path.display()
+     )]
+     PortalDirInvalid { path: PathBuf },
++    #[error("--site-origin {value:?} is not a site origin (`http(s)://host[:port]`): {reason}")]
++    BadSiteOrigin { value: String, reason: String },
+ }
+ 
+ impl Config {
+     pub fn from_args(args: Args) -> Result<Self, ConfigError> {
+         let public_base_url = parse_base_url(&args.public_base_url)?;
+         let mail_from = parse_mail_from(&args.mail_from)?;
++        let site_origin = parse_site_origin(&args.site_origin)?;
+ 
+         let stripe_webhook_secret = args
+             .stripe_webhook_secret
+@@ -215,6 +228,7 @@ impl Config {
+             stripe_webhook_secret,
+             vendor_root,
+             portal_dir,
++            site_origin,
+         })
+     }
+ }
+@@ -268,6 +282,7 @@ impl fmt::Debug for Config {
+                 "portal_dir",
+                 &self.portal_dir.as_ref().map(|p| p.display().to_string()),
+             )
++            .field("site_origin", &self.site_origin)
+             .finish()
+     }
+ }
+@@ -327,6 +342,37 @@ pub fn parse_base_url(value: &str) -> Result<Url, ConfigError> {
+     Ok(url)
+ }
+ 
++/// `--site-origin` as the string a browser sends in `Origin`: an http(s) URL
++/// with a host and nothing after it but an optional `/` (no other path, no
++/// query, fragment or userinfo). The default port is dropped and the host
++/// lowercased, as browsers do, so the CORS check can compare strings.
++pub fn parse_site_origin(value: &str) -> Result<String, ConfigError> {
++    let bad = |reason: &str| ConfigError::BadSiteOrigin {
++        value: value.to_string(),
++        reason: reason.to_string(),
++    };
++    let url = Url::parse(value.trim()).map_err(|e| bad(&e.to_string()))?;
++    if !matches!(url.scheme(), "http" | "https") {
++        return Err(bad("the scheme must be http or https"));
++    }
++    if url.host_str().map_or(true, str::is_empty) {
++        return Err(bad("there is no host"));
++    }
++    if !url.username().is_empty() || url.password().is_some() {
++        return Err(bad("an origin has no user name or password"));
++    }
++    if url.path() != "/" {
++        return Err(bad("an origin has no path"));
++    }
++    if url.query().is_some() {
++        return Err(bad("an origin has no query"));
++    }
++    if url.fragment().is_some() {
++        return Err(bad("an origin has no fragment"));
++    }
++    Ok(url.origin().ascii_serialization())
++}
++
+ fn load_seed(path: &Path) -> Result<SigningKey, ConfigError> {
+     let bytes = fs::read(path).map_err(|error| ConfigError::SeedUnreadable {
+         path: path.to_path_buf(),
+@@ -359,6 +405,7 @@ mod tests {
+             stripe_webhook_secret: None,
+             vendor_root_seed: None,
+             portal_dir: None,
++            site_origin: DEFAULT_SITE_ORIGIN.into(),
+         }
+     }
+ 
+@@ -483,6 +530,55 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn site_origin_is_serialized_as_browsers_send_it() {
++        let c = Config::from_args(args()).unwrap();
++        assert_eq!(c.site_origin, DEFAULT_SITE_ORIGIN);
++        for (value, origin) in [
++            ("http://localhost:4321", "http://localhost:4321"),
++            ("http://localhost:4321/", "http://localhost:4321"),
++            ("https://WWW.Example.com", "https://www.example.com"),
++            ("https://www.example.com:443/", "https://www.example.com"),
++            ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
++            ("http://[::1]:4321", "http://[::1]:4321"),
++        ] {
++            let mut a = args();
++            a.site_origin = value.into();
++            let c = Config::from_args(a).unwrap();
++            assert_eq!(c.site_origin, origin, "{value}");
++            assert!(format!("{c:?}").contains(origin));
++        }
++    }
++
++    #[test]
++    fn bad_site_origin_is_rejected_naming_the_value() {
++        for bad in [
++            "https://x.example/path",
++            "https://x.example/path/",
++            "https://x.example/?q=1",
++            "https://x.example/?",
++            "https://x.example/#top",
++            "https://user@x.example",
++            "https://user:pw@x.example",
++            "ftp://x.example",
++            "file:///tmp",
++            "x.example",
++            "",
++            "http://",
++        ] {
++            let mut a = args();
++            a.site_origin = bad.into();
++            let err = Config::from_args(a).unwrap_err();
++            assert!(
++                matches!(err, ConfigError::BadSiteOrigin { .. }),
++                "{bad}: {err}"
++            );
++            let msg = err.to_string();
++            assert!(msg.contains("--site-origin"), "{msg}");
++            assert!(msg.contains(&format!("{bad:?}")), "{msg}");
++        }
++    }
++
+     #[test]
+     fn mail_from_accepts_mailboxes() {
+         for (value, address) in [
+@@ -530,7 +626,7 @@ mod tests {
+     fn clap_defaults_match_the_constants() {
+         use clap::CommandFactory;
+         let smtp_port = DEFAULT_SMTP_PORT.to_string();
+-        let expected: [(&str, Option<&str>); 10] = [
++        let expected: [(&str, Option<&str>); 11] = [
+             ("addr", Some(DEFAULT_ADDR)),
+             ("database_url", Some(DEFAULT_DATABASE_URL)),
+             ("smtp_host", Some(DEFAULT_SMTP_HOST)),
+@@ -541,6 +637,7 @@ mod tests {
+             ("stripe_webhook_secret", None),
+             ("vendor_root_seed", None),
+             ("portal_dir", None),
++            ("site_origin", Some(DEFAULT_SITE_ORIGIN)),
+         ];
+         let cmd = Args::command();
+         let mut seen = 0;
+diff --git a/crates/wipe-hub/src/cors.rs b/crates/wipe-hub/src/cors.rs
+new file mode 100644
+index 0000000..f015c22
+--- /dev/null
++++ b/crates/wipe-hub/src/cors.rs
+@@ -0,0 +1,114 @@
++//! Credentialed CORS for the marketing site (lead-capture story 1).
++//!
++//! The site is a static page on another origin. To post a sales lead through
++//! the double-submit CSRF check (ADR-0007 §3, no exemption) it fetches
++//! `GET /api/auth/csrf` and then `POST /api/leads`, both with
++//! `credentials: "include"`. Only those two paths, and their `OPTIONS`
++//! preflights, get CORS headers, and only when `Origin` equals the
++//! configured `--site-origin` exactly. Any other origin gets no
++//! `Access-Control-*` header at all, so the browser keeps the response from
++//! it.
++//!
++//! This layer wraps [`crate::csrf::require`], so a 403 for a missing token
++//! (and every 400 and 429) carries the headers and the site can read it.
++//! The cookie is `SameSite=Lax`, so the site and the hub must be the same
++//! *site* (registrable domain) for the browser to send it (CONTEXT §10).
++
++use axum::extract::{Request, State};
++use axum::http::header::{
++    ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
++    ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE, ORIGIN,
++    VARY,
++};
++use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
++use axum::middleware::Next;
++use axum::response::{IntoResponse, Response};
++
++use crate::AppState;
++
++/// The only paths the marketing site calls.
++pub const SITE_PATHS: [&str; 2] = ["/api/auth/csrf", "/api/leads"];
++
++/// The request's single `Origin`, if it equals `site_origin` exactly.
++fn site_origin_of(headers: &HeaderMap, site_origin: &str) -> Option<HeaderValue> {
++    let mut values = headers.get_all(ORIGIN).iter();
++    match (values.next(), values.next()) {
++        (Some(v), None) if v.as_bytes() == site_origin.as_bytes() => Some(v.clone()),
++        _ => None,
++    }
++}
++
++fn add_headers(headers: &mut HeaderMap, origin: HeaderValue) {
++    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
++    headers.insert(
++        ACCESS_CONTROL_ALLOW_CREDENTIALS,
++        HeaderValue::from_static("true"),
++    );
++    headers.append(VARY, HeaderValue::from_static("Origin"));
++    headers.insert(
++        ACCESS_CONTROL_EXPOSE_HEADERS,
++        HeaderValue::from_static("Retry-After"),
++    );
++}
++
++/// Middleware: answer the site's preflights and add CORS headers to its
++/// requests; anything else passes through untouched.
++pub async fn site_cors(State(state): State<AppState>, req: Request, next: Next) -> Response {
++    let origin = if SITE_PATHS.contains(&req.uri().path()) {
++        site_origin_of(req.headers(), &state.config.site_origin)
++    } else {
++        None
++    };
++    let Some(origin) = origin else {
++        return next.run(req).await;
++    };
++    if req.method() == Method::OPTIONS {
++        let mut resp = StatusCode::NO_CONTENT.into_response();
++        let h = resp.headers_mut();
++        add_headers(h, origin);
++        h.insert(
++            ACCESS_CONTROL_ALLOW_METHODS,
++            HeaderValue::from_static("GET, POST"),
++        );
++        h.insert(
++            ACCESS_CONTROL_ALLOW_HEADERS,
++            HeaderValue::from_static("content-type, x-csrf-token"),
++        );
++        h.insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
++        return resp;
++    }
++    let mut resp = next.run(req).await;
++    add_headers(resp.headers_mut(), origin);
++    resp
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn only_one_exactly_equal_origin_matches() {
++        let site = "http://localhost:4321";
++        let with = |values: &[&str]| {
++            let mut h = HeaderMap::new();
++            for v in values {
++                h.append(ORIGIN, HeaderValue::from_str(v).unwrap());
++            }
++            site_origin_of(&h, site)
++        };
++        assert_eq!(with(&[site]).unwrap(), site);
++        for other in [
++            "http://localhost:4322",
++            "http://localhost:4321/",
++            "https://localhost:4321",
++            "http://LOCALHOST:4321",
++            "http://127.0.0.1:4321",
++            "null",
++            "",
++        ] {
++            assert!(with(&[other]).is_none(), "{other}");
++        }
++        assert!(with(&[]).is_none());
++        assert!(with(&[site, site]).is_none());
++    }
++}
+diff --git a/crates/wipe-hub/src/csrf.rs b/crates/wipe-hub/src/csrf.rs
+index 8c4fc7d..5812b45 100644
+--- a/crates/wipe-hub/src/csrf.rs
++++ b/crates/wipe-hub/src/csrf.rs
+@@ -8,8 +8,11 @@
+ //!
+ //! One rule covers anonymous and signed-in routes alike, so sign-in and
+ //! sign-up (login CSRF) are protected too. A cross-site page cannot set the
+-//! custom header: the hub sends no CORS headers. Subdomain cookie-tossing is
+-//! the known weakness, accepted until hosting is decided (CONTEXT §10).
++//! custom header: the hub sends CORS headers only to the marketing site's
++//! configured origin, and only on this token endpoint and `POST /api/leads`
++//! ([`crate::cors`]); that origin can read a token and post a sales lead, but
++//! it is the vendor's own site. Subdomain cookie-tossing is the known
++//! weakness, accepted until hosting is decided (CONTEXT §10).
+ //!
+ //! `GET /api/auth/csrf` hands the token to the portal; it is the only place a
+ //! raw CSRF token is ever returned, and none is ever logged.
+diff --git a/crates/wipe-hub/src/lead_routes.rs b/crates/wipe-hub/src/lead_routes.rs
+new file mode 100644
+index 0000000..a12fb05
+--- /dev/null
++++ b/crates/wipe-hub/src/lead_routes.rs
+@@ -0,0 +1,166 @@
++//! The sales-lead routes (lead-capture story 1):
++//!
++//! - `POST /api/leads` — the marketing site's early-access and contact
++//!   forms, cross-origin through [`crate::cors`] and the usual CSRF check.
++//!   In order: validate (400); charge `lead:ip:<peer>` (429
++//!   [`leads::MSG_SUBMIT_LOCKED`] with `Retry-After`); a filled honeypot
++//!   answers 202 `{}` and does nothing else; charge the email-send throttle
++//!   ([`auth::charge_mail`], its own 429); store the lead, the submission
++//!   and the audit row in one transaction; answer 202 `{}`; send the
++//!   confirmation from a spawned task. The answer is the same whether the
++//!   address was known or not, and a send failure is only logged.
++//! - `POST /api/leads/unsubscribe` — the emailed link's portal page. Any of a
++//!   lead's tokens unsubscribes it: 200 `{"unsubscribed": true}`, also when
++//!   it already was; a malformed or unknown token is 404
++//!   [`leads::MSG_BAD_UNSUBSCRIBE`].
++//!
++//! The peer is axum's `ConnectInfo` (IPv6 by /64); proxy headers are never
++//! trusted. Error bodies are `{"error": "<message>"}`.
++
++use std::net::SocketAddr;
++
++use axum::extract::{ConnectInfo, State};
++use axum::http::StatusCode;
++use axum::response::{IntoResponse, Response};
++use axum::routing::post;
++use axum::{Json, Router};
++use serde::Deserialize;
++use serde_json::json;
++
++use crate::accounts;
++use crate::audit::{self, AuditEntry};
++use crate::auth::{self, ApiError, JsonBody};
++use crate::leads::{self, LeadRequest, LeadStoreError};
++use crate::throttle;
++use crate::AppState;
++
++pub fn routes() -> Router<AppState> {
++    Router::new()
++        .route("/api/leads", post(submit))
++        .route("/api/leads/unsubscribe", post(unsubscribe))
++}
++
++impl From<LeadStoreError> for ApiError {
++    fn from(e: LeadStoreError) -> Self {
++        ApiError::internal(e)
++    }
++}
++
++fn accepted() -> Response {
++    (StatusCode::ACCEPTED, Json(json!({}))).into_response()
++}
++
++async fn submit(
++    State(state): State<AppState>,
++    peer: Option<ConnectInfo<SocketAddr>>,
++    JsonBody(req): JsonBody<LeadRequest>,
++) -> Result<Response, ApiError> {
++    let new = leads::validate(&req).map_err(|m| ApiError::new(StatusCode::BAD_REQUEST, m))?;
++    let peer = auth::ip_key(peer.map(|ConnectInfo(addr)| addr));
++    if let Err(refused) = charge_submission(&state, peer.as_deref()).await? {
++        return Ok(refused);
++    }
++    if req.is_honeypot() {
++        return Ok(accepted());
++    }
++    if let Err(refused) = auth::charge_mail(&state, &new.email, peer.as_deref(), None).await? {
++        return Ok(refused);
++    }
++    let mut tx = state.pool.begin().await?;
++    let submitted = leads::submit(&mut tx, &new).await?;
++    tx.commit().await?;
++
++    let kind = new.kind;
++    let to = new.email;
++    tokio::spawn(async move {
++        let link = auth::portal_link(
++            &state.config.public_base_url,
++            "unsubscribe",
++            &submitted.unsubscribe_token,
++        );
++        if let Err(e) = state.mailer.send_lead_confirmation(&to, kind, &link).await {
++            // Never the token. Logged and never returned: the 202 is sent.
++            tracing::warn!(
++                error = %e,
++                lead = %submitted.lead_id,
++                "lead confirmation email not sent"
++            );
++        }
++    });
++    Ok(accepted())
++}
++
++/// Charge one submission against `lead:<peer key>`. The charge is final: the
++/// one reaching [`throttle::LEAD_IP_LIMIT`] locks the key for
++/// [`throttle::LEAD_LOCKOUT`], audited once as `lead.submit_locked`.
++/// `Err(response)` is the 429 for a refused submission. No peer, no charge.
++async fn charge_submission(
++    state: &AppState,
++    peer: Option<&str>,
++) -> Result<Result<(), Response>, ApiError> {
++    let Some(peer) = peer else {
++        return Ok(Ok(()));
++    };
++    let key = format!("{}{peer}", throttle::LEAD_KEY_PREFIX);
++    let mut tx = state.pool.begin().await?;
++    let charged = throttle::charge(
++        &mut tx,
++        &key,
++        throttle::LEAD_IP_LIMIT,
++        throttle::LEAD_WINDOW,
++    )
++    .await?;
++    let refused = match charged.outcome {
++        throttle::Charge::Refused { retry_after_secs } => Some(retry_after_secs),
++        throttle::Charge::Charged => {
++            let engaged = throttle::confirm_failure(
++                &mut *tx,
++                &key,
++                throttle::LEAD_IP_LIMIT,
++                throttle::LEAD_LOCKOUT,
++            )
++            .await?;
++            if let Some(until) = engaged {
++                audit::record(
++                    &mut *tx,
++                    &AuditEntry {
++                        actor: "anonymous",
++                        action: "lead.submit_locked",
++                        subject: &key,
++                        detail: json!({ "until": until }),
++                    },
++                )
++                .await?;
++            }
++            None
++        }
++    };
++    if let Some(s) = &charged.summary {
++        auth::audit_lock_summary(&mut tx, s, Some(peer)).await?;
++    }
++    tx.commit().await?;
++    Ok(match refused {
++        Some(secs) => Err(auth::locked_response(leads::MSG_SUBMIT_LOCKED, secs)),
++        None => Ok(()),
++    })
++}
++
++#[derive(Debug, Deserialize)]
++struct UnsubscribeRequest {
++    #[serde(default)]
++    token: String,
++}
++
++async fn unsubscribe(
++    State(state): State<AppState>,
++    JsonBody(req): JsonBody<UnsubscribeRequest>,
++) -> Result<Json<serde_json::Value>, ApiError> {
++    let not_valid = || ApiError::new(StatusCode::NOT_FOUND, leads::MSG_BAD_UNSUBSCRIBE);
++    let hash = accounts::hash_token(&req.token).ok_or_else(not_valid)?;
++    let mut tx = state.pool.begin().await?;
++    leads::unsubscribe(&mut tx, &hash)
++        .await?
++        .ok_or_else(not_valid)?;
++    tx.commit().await?;
++    Ok(Json(json!({ "unsubscribed": true })))
++}
+diff --git a/crates/wipe-hub/src/leads.rs b/crates/wipe-hub/src/leads.rs
+new file mode 100644
+index 0000000..8dfb820
+--- /dev/null
++++ b/crates/wipe-hub/src/leads.rs
+@@ -0,0 +1,530 @@
++//! Sales leads (lead-capture story 1, CAP-1, CAP-2, CAP-4): people who
++//! submitted the marketing site's early-access or contact form. A *sales
++//! lead* is never the elected Lead station (CONTEXT §14).
++//!
++//! - [`validate`] checks a submission. The consent text must equal the hub's
++//!   own text for the form ([`LeadKind::consent_text`]), which is pinned to
++//!   `sites/www/src/data/consent.ts`; the client's copy is never the
++//!   authority.
++//! - [`submit`] keeps one lead per `lower(email)`: a new address inserts a
++//!   lead with status `new`; a known one updates email (as typed), name and
++//!   company, updates role and segment only when given, clears
++//!   `unsubscribed_at` (fresh consent) and never touches `status`. Every
++//!   submission gets its own row with its consent text, time and the SHA-256
++//!   of a fresh unsubscribe token, and is audited as `lead.submitted`.
++//! - [`unsubscribe`] marks the lead of any of its submissions' tokens
++//!   unsubscribed, auditing `lead.unsubscribed` only when that changes.
++//!
++//! Lead audit rows carry ids and flags only, never a name, email, company,
++//! message or peer, so erasing a lead later leaves no personal data behind.
++
++use serde::Deserialize;
++use serde_json::json;
++use uuid::Uuid;
++
++use crate::accounts::{self, Token};
++use crate::audit::{self, AuditEntry, AuditError};
++
++/// The segments the early-access form offers.
++pub const SEGMENTS: [&str; 4] = ["itad", "enterprise-it", "government", "other"];
++/// Longest message accepted, in characters, after trimming.
++pub const MESSAGE_MAX_CHARS: usize = 5000;
++
++/// The early-access form's consent statement (`sites/www/src/data/consent.ts`).
++pub const EARLY_ACCESS_STATEMENT: &str =
++    "I agree that these details are used only to follow up on early access.";
++/// The contact form's consent statement (`sites/www/src/data/consent.ts`).
++pub const CONTACT_STATEMENT: &str =
++    "I agree that these details are used only to reply to this message.";
++/// The sentence that follows each statement in the label, linking the notice.
++pub const PRIVACY_SENTENCE: &str = "See the privacy notice.";
++/// The early-access consent label's whole text: the text stored as consent.
++pub const CONSENT_EARLY_ACCESS: &str =
++    "I agree that these details are used only to follow up on early access. \
++     See the privacy notice.";
++/// The contact consent label's whole text: the text stored as consent.
++pub const CONSENT_CONTACT: &str =
++    "I agree that these details are used only to reply to this message. \
++     See the privacy notice.";
++
++pub const MSG_CONSENT_REQUIRED: &str = "consent is required";
++pub const MSG_CONSENT_CHANGED: &str = "the consent text has changed; reload the page and try again";
++pub const MSG_SUBMIT_LOCKED: &str = "too many submissions; try again later";
++pub const MSG_BAD_UNSUBSCRIBE: &str = "this unsubscribe link is not valid";
++pub const MSG_BAD_SEGMENT: &str = "segment must be one of itad, enterprise-it, government, other";
++pub const MSG_CONTACT_ROLE: &str = "role is only asked on the early-access form";
++pub const MSG_CONTACT_SEGMENT: &str = "segment is only asked on the early-access form";
++
++/// Which form a submission came from.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
++#[serde(rename_all = "kebab-case")]
++pub enum LeadKind {
++    EarlyAccess,
++    Contact,
++}
++
++impl LeadKind {
++    /// The stored `kind` value, as in the request body.
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Self::EarlyAccess => "early-access",
++            Self::Contact => "contact",
++        }
++    }
++
++    /// The hub's consent text for this form: the only text accepted.
++    pub fn consent_text(self) -> &'static str {
++        match self {
++            Self::EarlyAccess => CONSENT_EARLY_ACCESS,
++            Self::Contact => CONSENT_CONTACT,
++        }
++    }
++}
++
++/// `POST /api/leads`'s body. Missing text fields read as blank, so the
++/// error names the field rather than the JSON shape.
++#[derive(Debug, Deserialize)]
++pub struct LeadRequest {
++    pub kind: LeadKind,
++    #[serde(default)]
++    pub name: String,
++    #[serde(default)]
++    pub email: String,
++    #[serde(default)]
++    pub company: String,
++    pub role: Option<String>,
++    pub segment: Option<String>,
++    pub message: Option<String>,
++    #[serde(default)]
++    pub consent: bool,
++    #[serde(default)]
++    pub consent_text: String,
++    /// The honeypot: hidden from people, filled in by naive bots.
++    pub website: Option<String>,
++}
++
++impl LeadRequest {
++    /// Whether the honeypot field was filled in.
++    pub fn is_honeypot(&self) -> bool {
++        self.website
++            .as_deref()
++            .is_some_and(|w| !w.trim().is_empty())
++    }
++}
++
++/// A validated submission.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct NewLead {
++    pub kind: LeadKind,
++    pub name: String,
++    pub email: String,
++    pub company: String,
++    /// Early access only.
++    pub role: Option<String>,
++    /// Early access only.
++    pub segment: Option<String>,
++    pub message: Option<String>,
++}
++
++fn non_blank(v: &Option<String>) -> Option<&str> {
++    v.as_deref().map(str::trim).filter(|s| !s.is_empty())
++}
++
++/// A trimmed message of at most [`MESSAGE_MAX_CHARS`] characters with no
++/// control characters other than `\n`, `\r` and `\t`; `None` when blank.
++pub fn validate_message(message: Option<&str>) -> Result<Option<String>, String> {
++    let Some(m) = message.map(str::trim).filter(|m| !m.is_empty()) else {
++        return Ok(None);
++    };
++    if m.chars().count() > MESSAGE_MAX_CHARS {
++        return Err(format!(
++            "message must be at most {MESSAGE_MAX_CHARS} characters"
++        ));
++    }
++    if m.chars()
++        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
++    {
++        return Err("message must not contain control characters".into());
++    }
++    Ok(Some(m.to_string()))
++}
++
++/// Validate a submission; the error is the 400 message.
++pub fn validate(req: &LeadRequest) -> Result<NewLead, String> {
++    let name = accounts::validate_name("name", &req.name)?;
++    let email = accounts::validate_email(&req.email)?;
++    let company = accounts::validate_name("company", &req.company)?;
++    let (role, segment) = match req.kind {
++        LeadKind::EarlyAccess => {
++            let role = accounts::validate_name("role", req.role.as_deref().unwrap_or(""))?;
++            let segment = non_blank(&req.segment)
++                .filter(|s| SEGMENTS.contains(s))
++                .ok_or(MSG_BAD_SEGMENT)?;
++            (Some(role), Some(segment.to_string()))
++        }
++        LeadKind::Contact => {
++            if non_blank(&req.role).is_some() {
++                return Err(MSG_CONTACT_ROLE.into());
++            }
++            if non_blank(&req.segment).is_some() {
++                return Err(MSG_CONTACT_SEGMENT.into());
++            }
++            (None, None)
++        }
++    };
++    let message = validate_message(req.message.as_deref())?;
++    if req.kind == LeadKind::Contact && message.is_none() {
++        return Err("message must not be blank".into());
++    }
++    if !req.consent {
++        return Err(MSG_CONSENT_REQUIRED.into());
++    }
++    if req.consent_text != req.kind.consent_text() {
++        return Err(MSG_CONSENT_CHANGED.into());
++    }
++    Ok(NewLead {
++        kind: req.kind,
++        name,
++        email,
++        company,
++        role,
++        segment,
++        message,
++    })
++}
++
++#[derive(Debug, thiserror::Error)]
++pub enum LeadStoreError {
++    #[error(transparent)]
++    Db(#[from] sqlx::Error),
++    #[error(transparent)]
++    Audit(#[from] AuditError),
++}
++
++/// What [`submit`] stored.
++#[derive(Debug)]
++pub struct Submitted {
++    pub lead_id: Uuid,
++    /// The address was new.
++    pub created: bool,
++    /// The lead had unsubscribed and this submission cleared it.
++    pub resubscribed: bool,
++    /// The raw unsubscribe token for this submission's email; only its
++    /// hash is stored.
++    pub unsubscribe_token: String,
++}
++
++/// The `subject` of a lead's audit rows.
++pub fn subject(lead_id: Uuid) -> String {
++    format!("lead:{lead_id}")
++}
++
++/// Upsert the lead, insert the submission and audit `lead.submitted`. Call
++/// inside a transaction.
++pub async fn submit(
++    conn: &mut sqlx::PgConnection,
++    new: &NewLead,
++) -> Result<Submitted, LeadStoreError> {
++    let (lead_id, created, resubscribed) = upsert(conn, new).await?;
++    let token = Token::generate();
++    sqlx::query(
++        "INSERT INTO lead_submissions \
++             (lead_id, kind, message, consent_text, unsubscribe_token_hash) \
++         VALUES ($1, $2, $3, $4, $5)",
++    )
++    .bind(lead_id)
++    .bind(new.kind.as_str())
++    .bind(new.message.as_deref())
++    .bind(new.kind.consent_text())
++    .bind(&token.hash[..])
++    .execute(&mut *conn)
++    .await?;
++    audit::record(
++        &mut *conn,
++        &AuditEntry {
++            actor: "anonymous",
++            action: "lead.submitted",
++            subject: &subject(lead_id),
++            detail: json!({
++                "kind": new.kind.as_str(),
++                "created": created,
++                "resubscribed": resubscribed,
++            }),
++        },
++    )
++    .await?;
++    Ok(Submitted {
++        lead_id,
++        created,
++        resubscribed,
++        unsubscribe_token: token.raw,
++    })
++}
++
++/// `(id, created, resubscribed)`. The existing row is locked before it is
++/// read, so `resubscribed` is exact under concurrent submissions; an insert
++/// that loses a race to a concurrent one retries as an update.
++async fn upsert(
++    conn: &mut sqlx::PgConnection,
++    new: &NewLead,
++) -> Result<(Uuid, bool, bool), sqlx::Error> {
++    for _ in 0..3 {
++        let existing: Option<(Uuid, bool)> = sqlx::query_as(
++            "SELECT id, unsubscribed_at IS NOT NULL FROM leads \
++             WHERE lower(email) = lower($1) FOR UPDATE",
++        )
++        .bind(&new.email)
++        .fetch_optional(&mut *conn)
++        .await?;
++        if let Some((id, unsubscribed)) = existing {
++            sqlx::query(
++                "UPDATE leads SET email = $2, name = $3, company = $4, \
++                     role = coalesce($5, role), segment = coalesce($6, segment), \
++                     updated_at = now(), unsubscribed_at = NULL \
++                 WHERE id = $1",
++            )
++            .bind(id)
++            .bind(&new.email)
++            .bind(&new.name)
++            .bind(&new.company)
++            .bind(new.role.as_deref())
++            .bind(new.segment.as_deref())
++            .execute(&mut *conn)
++            .await?;
++            return Ok((id, false, unsubscribed));
++        }
++        let inserted: Option<Uuid> = sqlx::query_scalar(
++            "INSERT INTO leads (email, name, company, role, segment) \
++             VALUES ($1, $2, $3, $4, $5) \
++             ON CONFLICT ((lower(email))) DO NOTHING RETURNING id",
++        )
++        .bind(&new.email)
++        .bind(&new.name)
++        .bind(&new.company)
++        .bind(new.role.as_deref())
++        .bind(new.segment.as_deref())
++        .fetch_optional(&mut *conn)
++        .await?;
++        if let Some(id) = inserted {
++            return Ok((id, true, false));
++        }
++    }
++    Err(sqlx::Error::Protocol(
++        "lead upsert kept racing; giving up after 3 tries".into(),
++    ))
++}
++
++/// Unsubscribe the lead whose submission carries `token_hash`. `None` when
++/// no submission does; otherwise the lead's id. Sets `unsubscribed_at` and
++/// audits `lead.unsubscribed` only if it was not already set. Call inside a
++/// transaction.
++pub async fn unsubscribe(
++    conn: &mut sqlx::PgConnection,
++    token_hash: &[u8; 32],
++) -> Result<Option<Uuid>, LeadStoreError> {
++    let lead_id: Option<Uuid> = sqlx::query_scalar(
++        "SELECT lead_id FROM lead_submissions WHERE unsubscribe_token_hash = $1",
++    )
++    .bind(&token_hash[..])
++    .fetch_optional(&mut *conn)
++    .await?;
++    let Some(lead_id) = lead_id else {
++        return Ok(None);
++    };
++    // Concurrent unsubscribes serialize on the row lock, and the loser
++    // re-checks `unsubscribed_at`, so the change is audited once.
++    let changed = sqlx::query(
++        "UPDATE leads SET unsubscribed_at = now() WHERE id = $1 AND unsubscribed_at IS NULL",
++    )
++    .bind(lead_id)
++    .execute(&mut *conn)
++    .await?
++    .rows_affected()
++        > 0;
++    if changed {
++        audit::record(
++            &mut *conn,
++            &AuditEntry {
++                actor: "anonymous",
++                action: "lead.unsubscribed",
++                subject: &subject(lead_id),
++                detail: json!({}),
++            },
++        )
++        .await?;
++    }
++    Ok(Some(lead_id))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// The marketing site's consent wording; the hub must accept exactly it.
++    const SITE_CONSENT: &str = include_str!("../../../sites/www/src/data/consent.ts");
++
++    #[test]
++    fn consent_text_is_pinned_to_the_site() {
++        assert_eq!(
++            CONSENT_EARLY_ACCESS,
++            format!("{EARLY_ACCESS_STATEMENT} {PRIVACY_SENTENCE}")
++        );
++        assert_eq!(
++            CONSENT_CONTACT,
++            format!("{CONTACT_STATEMENT} {PRIVACY_SENTENCE}")
++        );
++        for pinned in [
++            format!("\"early-access\": \"{EARLY_ACCESS_STATEMENT}\","),
++            format!("contact: \"{CONTACT_STATEMENT}\","),
++            format!("export const PRIVACY_SENTENCE = \"{PRIVACY_SENTENCE}\";"),
++            "return `${CONSENT_STATEMENTS[kind]} ${PRIVACY_SENTENCE}`;".to_string(),
++        ] {
++            assert!(
++                SITE_CONSENT.contains(&pinned),
++                "sites/www/src/data/consent.ts must contain {pinned}"
++            );
++        }
++    }
++
++    fn early_access() -> LeadRequest {
++        LeadRequest {
++            kind: LeadKind::EarlyAccess,
++            name: " Ada Lovelace ".into(),
++            email: " ada@example.com ".into(),
++            company: "Engines Ltd".into(),
++            role: Some("Ops lead".into()),
++            segment: Some("itad".into()),
++            message: None,
++            consent: true,
++            consent_text: CONSENT_EARLY_ACCESS.into(),
++            website: None,
++        }
++    }
++
++    fn contact() -> LeadRequest {
++        LeadRequest {
++            kind: LeadKind::Contact,
++            role: None,
++            segment: None,
++            message: Some("  Hello there.\n\tThanks  ".into()),
++            consent_text: CONSENT_CONTACT.into(),
++            ..early_access()
++        }
++    }
++
++    #[test]
++    fn valid_submissions_are_trimmed() {
++        let new = validate(&early_access()).unwrap();
++        assert_eq!(new.name, "Ada Lovelace");
++        assert_eq!(new.email, "ada@example.com");
++        assert_eq!(new.role.as_deref(), Some("Ops lead"));
++        assert_eq!(new.segment.as_deref(), Some("itad"));
++        assert_eq!(new.message, None);
++        let new = validate(&contact()).unwrap();
++        assert_eq!(new.message.as_deref(), Some("Hello there.\n\tThanks"));
++        assert_eq!((new.role, new.segment), (None, None));
++        // Blank role and segment on a contact form are fine.
++        let mut r = contact();
++        r.role = Some("  ".into());
++        r.segment = Some(String::new());
++        assert!(validate(&r).is_ok());
++    }
++
++    #[test]
++    fn every_rule_names_its_problem() {
++        type Base = fn() -> LeadRequest;
++        type Edit = fn(&mut LeadRequest);
++        let cases: [(Base, Edit, &str); 14] = [
++            (
++                early_access,
++                |r| r.name = " ".into(),
++                "name must not be blank",
++            ),
++            (
++                early_access,
++                |r| r.email = "nope".into(),
++                "email is not a valid",
++            ),
++            (
++                early_access,
++                |r| r.email = String::new(),
++                "email must not be blank",
++            ),
++            (
++                early_access,
++                |r| r.company = String::new(),
++                "company must not be blank",
++            ),
++            (early_access, |r| r.role = None, "role must not be blank"),
++            (early_access, |r| r.segment = None, MSG_BAD_SEGMENT),
++            (
++                early_access,
++                |r| r.segment = Some("ITAD".into()),
++                MSG_BAD_SEGMENT,
++            ),
++            (early_access, |r| r.consent = false, MSG_CONSENT_REQUIRED),
++            (
++                early_access,
++                |r| r.consent_text = CONSENT_CONTACT.into(),
++                MSG_CONSENT_CHANGED,
++            ),
++            (
++                early_access,
++                |r| r.consent_text = String::new(),
++                MSG_CONSENT_CHANGED,
++            ),
++            (contact, |r| r.message = None, "message must not be blank"),
++            (contact, |r| r.role = Some("CTO".into()), MSG_CONTACT_ROLE),
++            (
++                contact,
++                |r| r.segment = Some("itad".into()),
++                MSG_CONTACT_SEGMENT,
++            ),
++            (
++                contact,
++                |r| r.message = Some("a\u{7}b".into()),
++                "message must not contain control characters",
++            ),
++        ];
++        for (base, edit, want) in cases {
++            let mut r = base();
++            edit(&mut r);
++            let err = validate(&r).unwrap_err();
++            assert!(err.contains(want), "{err:?} should contain {want:?}");
++        }
++    }
++
++    #[test]
++    fn message_length_is_bounded_in_characters() {
++        let at = "é".repeat(MESSAGE_MAX_CHARS);
++        assert_eq!(validate_message(Some(&at)).unwrap(), Some(at.clone()));
++        let over = format!("{at}é");
++        assert!(validate_message(Some(&over))
++            .unwrap_err()
++            .contains("at most 5000"));
++        assert_eq!(validate_message(Some(" \n ")).unwrap(), None);
++        assert_eq!(validate_message(None).unwrap(), None);
++        assert!(validate_message(Some("a\u{0}b")).is_err());
++        assert!(validate_message(Some("a\u{1b}[31m")).is_err());
++        assert!(validate_message(Some("line\r\nline\tx")).is_ok());
++    }
++
++    #[test]
++    fn honeypot() {
++        let mut r = early_access();
++        assert!(!r.is_honeypot());
++        r.website = Some("  ".into());
++        assert!(!r.is_honeypot());
++        r.website = Some("https://spam.example".into());
++        assert!(r.is_honeypot());
++    }
++
++    #[test]
++    fn kinds_parse_from_the_form_names() {
++        let k: LeadKind = serde_json::from_str("\"early-access\"").unwrap();
++        assert_eq!(k, LeadKind::EarlyAccess);
++        let k: LeadKind = serde_json::from_str("\"contact\"").unwrap();
++        assert_eq!(k.as_str(), "contact");
++        assert!(serde_json::from_str::<LeadKind>("\"early_access\"").is_err());
++    }
++}
+diff --git a/crates/wipe-hub/src/lib.rs b/crates/wipe-hub/src/lib.rs
+index 0ebf8ea..988b101 100644
+--- a/crates/wipe-hub/src/lib.rs
++++ b/crates/wipe-hub/src/lib.rs
+@@ -15,9 +15,12 @@ pub mod admin_routes;
+ pub mod audit;
+ pub mod auth;
+ pub mod config;
++pub mod cors;
+ pub mod csrf;
+ pub mod db;
+ pub mod health;
++pub mod lead_routes;
++pub mod leads;
+ pub mod mail;
+ pub mod team;
+ pub mod team_routes;
+@@ -73,6 +76,7 @@ pub fn router(state: AppState) -> Router {
+         .merge(auth::routes())
+         .merge(team_routes::routes())
+         .merge(admin_routes::routes())
++        .merge(lead_routes::routes())
+         // Unknown API paths are JSON 404s, portal or not: a typo in a client
+         // must never get `index.html` back with a 200.
+         .route("/api", any(api_not_found))
+@@ -80,7 +84,13 @@ pub fn router(state: AppState) -> Router {
+         .route("/api/*rest", any(api_not_found))
+         // After the catch-alls, so unknown `/api` paths are covered too: every
+         // mutating `/api` request needs the double-submit CSRF token.
+-        .layer(axum::middleware::from_fn(csrf::require));
++        .layer(axum::middleware::from_fn(csrf::require))
++        // Outside the CSRF check, so the marketing site can read its 403s
++        // too; it touches only `cors::SITE_PATHS` from `--site-origin`.
++        .layer(axum::middleware::from_fn_with_state(
++            state.clone(),
++            cors::site_cors,
++        ));
+ 
+     let site = match &state.config.portal_dir {
+         Some(dir) => {
+@@ -140,6 +150,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
+         public_base_url = %state.config.public_base_url,
+         payment_provider = ?state.config.payment_provider,
+         portal_dir = ?state.config.portal_dir,
++        site_origin = %state.config.site_origin,
+         "wipe-hub listening"
+     );
+     serve_on(listener, state).await
+diff --git a/crates/wipe-hub/src/mail.rs b/crates/wipe-hub/src/mail.rs
+index 418b0fe..2c5117b 100644
+--- a/crates/wipe-hub/src/mail.rs
++++ b/crates/wipe-hub/src/mail.rs
+@@ -11,6 +11,8 @@ use lettre::message::Mailbox;
+ use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+ use url::Url;
+ 
++use crate::leads::LeadKind;
++
+ /// Upper bound on one SMTP exchange.
+ pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+ 
+@@ -18,6 +20,16 @@ pub const VERIFICATION_SUBJECT: &str = "Verify your Wipestation email address";
+ pub const MAGIC_LINK_SUBJECT: &str = "Your Wipestation sign-in link";
+ pub const PASSWORD_RESET_SUBJECT: &str = "Reset your Wipestation password";
+ pub const INVITATION_SUBJECT: &str = "You're invited to join a Wipestation organization";
++pub const LEAD_EARLY_ACCESS_SUBJECT: &str = "You're on the Wipestation early-access list";
++pub const LEAD_CONTACT_SUBJECT: &str = "We received your message to Wipestation";
++
++/// The confirmation subject for a sales-lead form.
++pub fn lead_subject(kind: LeadKind) -> &'static str {
++    match kind {
++        LeadKind::EarlyAccess => LEAD_EARLY_ACCESS_SUBJECT,
++        LeadKind::Contact => LEAD_CONTACT_SUBJECT,
++    }
++}
+ 
+ #[derive(Debug, thiserror::Error)]
+ pub enum MailError {
+@@ -101,6 +113,19 @@ impl Mailer {
+         .await
+     }
+ 
++    /// The sales-lead confirmation: plain text naming the form, containing
++    /// the unsubscribe `link`. It never echoes anything the visitor typed,
++    /// so the form cannot be used to send chosen text to any address.
++    pub async fn send_lead_confirmation(
++        &self,
++        to: &str,
++        kind: LeadKind,
++        link: &Url,
++    ) -> Result<(), MailError> {
++        self.send(to, lead_subject(kind), lead_confirmation_body(kind, link))
++            .await
++    }
++
+     async fn send(&self, to: &str, subject: &str, body: String) -> Result<(), MailError> {
+         let to: Mailbox = to
+             .parse()
+@@ -128,10 +153,54 @@ fn invitation_body(organization_name: &str, inviter_name: &str, link: &Url) -> S
+     )
+ }
+ 
++fn lead_confirmation_body(kind: LeadKind, link: &Url) -> String {
++    let what = match kind {
++        LeadKind::EarlyAccess => {
++            "Thank you for joining the Wipestation early-access list on our website."
++        }
++        LeadKind::Contact => {
++            "Thank you for sending a message through the Wipestation contact form."
++        }
++    };
++    format!(
++        "{what} We will reply by email to this address.\n\n\
++         To stop hearing from us, open the link below and press Unsubscribe:\n\n\
++         {link}\n\n\
++         Not you? Someone entered this address in our form. \
++         Use the link above and we will not contact you.\n"
++    )
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn lead_confirmation_names_the_form_links_and_echoes_nothing() {
++        let link = Url::parse("http://127.0.0.1:7900/unsubscribe?token=abc").unwrap();
++        for (kind, names) in [
++            (LeadKind::EarlyAccess, "early-access list"),
++            (LeadKind::Contact, "contact form"),
++        ] {
++            let body = lead_confirmation_body(kind, &link);
++            assert!(body.contains(names), "{body}");
++            assert!(body.contains("reply by email"), "{body}");
++            assert!(
++                body.contains("http://127.0.0.1:7900/unsubscribe?token=abc"),
++                "{body}"
++            );
++            assert!(body.contains("Not you?"), "{body}");
++            // The body is a fixed template around the link: no parameter
++            // carries submitted text.
++            let without_link = body.replace(link.as_str(), "");
++            assert!(!without_link.contains("token"), "{body}");
++        }
++        assert_ne!(
++            lead_subject(LeadKind::EarlyAccess),
++            lead_subject(LeadKind::Contact)
++        );
++    }
++
+     #[test]
+     fn invitation_body_names_both_and_links() {
+         let link = Url::parse("http://127.0.0.1:7900/accept-invite?token=abc").unwrap();
+diff --git a/crates/wipe-hub/src/throttle.rs b/crates/wipe-hub/src/throttle.rs
+index dd10f90..097809b 100644
+--- a/crates/wipe-hub/src/throttle.rs
++++ b/crates/wipe-hub/src/throttle.rs
+@@ -3,8 +3,11 @@
+ //! (portal-accounts story 2) uses `email:<address>` and `ip:<peer>`; the
+ //! email-send throttle on every route that sends mail (story 3) uses
+ //! `mail:to:<address>` and `mail:ip:<peer>` ([`MAIL_KEY_PREFIX`]), with its
+-//! own limits; invitations (story 4) also charge `mail:org:<organization id>`. Email sends are always final, so their charges are confirmed
+-//! in the same transaction instead of waiting for a check.
++//! own limits; invitations (story 4) also charge `mail:org:<organization id>`.
++//! Sales-lead form submissions (lead-capture story 1) charge `lead:ip:<peer>`
++//! ([`LEAD_KEY_PREFIX`]). Email sends and lead submissions are always final,
++//! so their charges are confirmed in the same transaction instead of waiting
++//! for a check.
+ //!
+ //! The protocol, per key, around one expensive check (e.g. Argon2):
+ //!
+@@ -57,6 +60,15 @@ pub const MAIL_LOCKOUT: Duration = Duration::from_secs(60 * 60);
+ /// Every email-send throttle key starts with this; no sign-in key does.
+ pub const MAIL_KEY_PREFIX: &str = "mail:";
+ 
++/// Sales-lead form submissions per client IP (or IPv6 /64) per window.
++pub const LEAD_IP_LIMIT: i32 = 10;
++/// The fixed window sales-lead submissions are counted in.
++pub const LEAD_WINDOW: Duration = Duration::from_secs(60 * 60);
++/// How long a sales-lead submission lock lasts once engaged.
++pub const LEAD_LOCKOUT: Duration = Duration::from_secs(60 * 60);
++/// Every sales-lead submission throttle key starts with this.
++pub const LEAD_KEY_PREFIX: &str = "lead:";
++
+ /// Rows whose window started longer ago than this, and whose lock (if any)
+ /// has elapsed, are deleted by [`purge_stale`]. Every window passed to
+ /// [`charge`] must be no longer than this (checked with `assert!`).
+@@ -319,6 +331,16 @@ mod tests {
+         assert!(!"email:a@b.co".starts_with(MAIL_KEY_PREFIX));
+     }
+ 
++    #[test]
++    fn lead_constants() {
++        assert_eq!(LEAD_IP_LIMIT, 10);
++        assert_eq!(LEAD_WINDOW.as_secs(), 3600);
++        assert_eq!(LEAD_LOCKOUT.as_secs(), 3600);
++        assert!(LEAD_WINDOW <= PURGE_AFTER);
++        assert_eq!(LEAD_KEY_PREFIX, "lead:");
++        assert!(!LEAD_KEY_PREFIX.starts_with(MAIL_KEY_PREFIX));
++    }
++
+     #[test]
+     fn summaries_only_for_refusals() {
+         assert_eq!(LockSummary::from_row("k".into(), 0, None), None);
+@@ -347,5 +369,6 @@ mod tests {
+         check_charge_args(MAIL_ADDRESS_LIMIT, MAIL_WINDOW);
+         check_charge_args(MAIL_IP_LIMIT, MAIL_WINDOW);
+         check_charge_args(MAIL_ORG_LIMIT, MAIL_WINDOW);
++        check_charge_args(LEAD_IP_LIMIT, LEAD_WINDOW);
+     }
+ }
+diff --git a/crates/wipe-hub/tests/auth.rs b/crates/wipe-hub/tests/auth.rs
+index 1de0f58..9caa5a1 100644
+--- a/crates/wipe-hub/tests/auth.rs
++++ b/crates/wipe-hub/tests/auth.rs
+@@ -53,6 +53,7 @@ fn hub_state(db: &TestDb, smtp_port: u16, public_base_url: &str, mail_from: &str
+         stripe_webhook_secret: None,
+         vendor_root_seed: None,
+         portal_dir: None,
++        site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
+     };
+     let mut config = Config::from_args(args).unwrap();
+     config.portal_dir = None;
+diff --git a/crates/wipe-hub/tests/cli.rs b/crates/wipe-hub/tests/cli.rs
+index 772eb50..963b9d7 100644
+--- a/crates/wipe-hub/tests/cli.rs
++++ b/crates/wipe-hub/tests/cli.rs
+@@ -234,3 +234,28 @@ fn admin_create_without_an_email_exits_non_zero() {
+     assert!(!out.status.success());
+     assert!(combined(&out).contains("--email"), "{}", combined(&out));
+ }
++
++#[test]
++fn a_site_origin_with_a_path_refuses_to_start() {
++    for (flag, env) in [(true, false), (false, true)] {
++        let mut cmd = hub();
++        cmd.args(["serve", "--addr", "127.0.0.1:0", "--database-url"])
++            .arg(format!(
++                "postgres://wipehub:wipehub@127.0.0.1:{}/wipehub",
++                closed_port()
++            ));
++        if flag {
++            cmd.args(["--site-origin", "https://x.example/path"]);
++        }
++        if env {
++            cmd.env("WIPE_HUB_SITE_ORIGIN", "https://x.example/path");
++        }
++        let out = cmd.output().unwrap();
++        assert!(!out.status.success(), "{}", combined(&out));
++        let stderr = String::from_utf8_lossy(&out.stderr);
++        assert!(
++            stderr.contains("--site-origin \"https://x.example/path\""),
++            "stderr does not name the value:\n{stderr}"
++        );
++    }
++}
+diff --git a/crates/wipe-hub/tests/health.rs b/crates/wipe-hub/tests/health.rs
+index d104eea..06f49dd 100644
+--- a/crates/wipe-hub/tests/health.rs
++++ b/crates/wipe-hub/tests/health.rs
+@@ -52,6 +52,7 @@ fn config(database_url: &str, smtp_port: u16) -> Config {
+         stripe_webhook_secret: None,
+         vendor_root_seed: None,
+         portal_dir: None,
++        site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
+     };
+     Config::from_args(args).unwrap()
+ }
+diff --git a/crates/wipe-hub/tests/isolation.rs b/crates/wipe-hub/tests/isolation.rs
+index ab60ddd..c548e2d 100644
+--- a/crates/wipe-hub/tests/isolation.rs
++++ b/crates/wipe-hub/tests/isolation.rs
+@@ -93,6 +93,16 @@ const ROUTES: &[(&str, &str, Class)] = &[
+         "/api/invitations/accept",
+         Anonymous("the emailed invitation token is the credential"),
+     ),
++    (
++        "POST",
++        "/api/leads",
++        Anonymous("stores a sales lead; answers 202 {} whether or not it is known"),
++    ),
++    (
++        "POST",
++        "/api/leads/unsubscribe",
++        Anonymous("the emailed unsubscribe token is the credential"),
++    ),
+     ("POST", "/api/auth/sign-out", Customer),
+     ("POST", "/api/auth/sign-out-everywhere", Customer),
+     ("GET", "/api/auth/me", Customer),
+diff --git a/crates/wipe-hub/tests/leads.rs b/crates/wipe-hub/tests/leads.rs
+new file mode 100644
+index 0000000..19e9642
+--- /dev/null
++++ b/crates/wipe-hub/tests/leads.rs
+@@ -0,0 +1,605 @@
++//! Sales leads (lead-capture story 1): `POST /api/leads`, its defences
++//! (CAP-2: per-IP throttle, honeypot, validation, one lead per address, the
++//! email-send throttle), the stored consent (CAP-4), the site-only CORS
++//! headers and `POST /api/leads/unsubscribe`. One test per row of the story's
++//! I/O matrix. Needs `docker compose up -d`; fails, never skips, when it is
++//! down.
++
++mod support;
++
++use std::time::Duration;
++
++use reqwest::header::{HeaderMap, RETRY_AFTER};
++use reqwest::{Method, StatusCode};
++use serde_json::{json, Value};
++use support::hub::{error_of, mail_count, mail_texts, spawn_hub, token_in, Hub, MAIL_LOCKED};
++use support::unique_address;
++use uuid::Uuid;
++use wipe_hub::config::DEFAULT_SITE_ORIGIN;
++use wipe_hub::leads::{self, CONSENT_CONTACT, CONSENT_EARLY_ACCESS};
++use wipe_hub::mail::{LEAD_CONTACT_SUBJECT, LEAD_EARLY_ACCESS_SUBJECT};
++use wipe_hub::throttle::LEAD_IP_LIMIT;
++
++const SITE: &str = DEFAULT_SITE_ORIGIN;
++const NAME: &str = "Ada Lovelace";
++const COMPANY: &str = "Analytical Engines Ltd";
++const ROLE: &str = "Head of operations";
++const MESSAGE: &str = "Please call me about the bench pilot.";
++
++fn early_access(email: &str) -> Value {
++    json!({
++        "kind": "early-access",
++        "name": NAME,
++        "email": email,
++        "company": COMPANY,
++        "role": ROLE,
++        "segment": "itad",
++        "message": "",
++        "consent": true,
++        "consent_text": CONSENT_EARLY_ACCESS,
++        "website": "",
++    })
++}
++
++fn contact(email: &str) -> Value {
++    json!({
++        "kind": "contact",
++        "name": "Ada King",
++        "email": email,
++        "company": "Countess Ltd",
++        "message": MESSAGE,
++        "consent": true,
++        "consent_text": CONSENT_CONTACT,
++    })
++}
++
++/// `POST /api/leads` from the site, with the CSRF cookie and header.
++async fn submit(hub: &Hub, body: Value) -> reqwest::Response {
++    hub.post_req("/api/leads", None)
++        .header("origin", SITE)
++        .json(&body)
++        .send()
++        .await
++        .unwrap()
++}
++
++async fn unsubscribe(hub: &Hub, token: &str) -> reqwest::Response {
++    hub.post("/api/leads/unsubscribe", json!({ "token": token }), None)
++        .await
++}
++
++async fn assert_accepted(resp: reqwest::Response) {
++    assert_eq!(resp.status(), StatusCode::ACCEPTED);
++    assert_site_cors(resp.headers());
++    assert_eq!(resp.json::<Value>().await.unwrap(), json!({}));
++}
++
++fn assert_site_cors(h: &HeaderMap) {
++    assert_eq!(h["access-control-allow-origin"], SITE);
++    assert_eq!(h["access-control-allow-credentials"], "true");
++    assert_eq!(h["access-control-expose-headers"], "Retry-After");
++    assert!(
++        h.get_all("vary").iter().any(|v| v == "Origin"),
++        "Vary: Origin in {h:?}"
++    );
++}
++
++fn assert_no_cors(h: &HeaderMap) {
++    let cors: Vec<_> = h
++        .keys()
++        .filter(|k| k.as_str().starts_with("access-control-"))
++        .collect();
++    assert!(cors.is_empty(), "unexpected {cors:?}");
++}
++
++#[derive(Debug, sqlx::FromRow)]
++struct Lead {
++    id: Uuid,
++    email: String,
++    name: String,
++    company: String,
++    role: Option<String>,
++    segment: Option<String>,
++    status: String,
++    unsubscribed: bool,
++}
++
++async fn leads_of(hub: &Hub) -> Vec<Lead> {
++    sqlx::query_as(
++        "SELECT id, email, name, company, role, segment, status, \
++                unsubscribed_at IS NOT NULL AS unsubscribed \
++         FROM leads ORDER BY created_at",
++    )
++    .fetch_all(&hub.db.pool)
++    .await
++    .unwrap()
++}
++
++/// `(kind, message, consent_text, consented_at is set)` of every submission.
++async fn submissions(hub: &Hub) -> Vec<(String, Option<String>, String, bool)> {
++    sqlx::query_as(
++        "SELECT kind, message, consent_text, consented_at IS NOT NULL \
++         FROM lead_submissions ORDER BY consented_at, id",
++    )
++    .fetch_all(&hub.db.pool)
++    .await
++    .unwrap()
++}
++
++/// Every `lead.*` audit action.
++async fn lead_actions(hub: &Hub) -> Vec<String> {
++    hub.actions()
++        .await
++        .into_iter()
++        .filter(|a| a.starts_with("lead."))
++        .collect()
++}
++
++/// The unsubscribe tokens of `n` confirmation emails to `addr`, newest first.
++async fn unsubscribe_tokens(addr: &str, subject: &str, n: usize) -> Vec<String> {
++    mail_texts(addr, subject, n)
++        .await
++        .iter()
++        .map(|t| token_in(t, "unsubscribe"))
++        .collect()
++}
++
++#[tokio::test]
++async fn a_new_early_access_lead_is_stored_with_its_consent_and_confirmed() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    assert_accepted(submit(&hub, early_access(&email)).await).await;
++
++    let leads = leads_of(&hub).await;
++    assert_eq!(leads.len(), 1);
++    let lead = &leads[0];
++    assert_eq!(lead.email, email);
++    assert_eq!(lead.name, NAME);
++    assert_eq!(lead.company, COMPANY);
++    assert_eq!(lead.role.as_deref(), Some(ROLE));
++    assert_eq!(lead.segment.as_deref(), Some("itad"));
++    assert_eq!(lead.status, "new");
++    assert!(!lead.unsubscribed);
++    assert_eq!(
++        submissions(&hub).await,
++        [(
++            "early-access".to_string(),
++            None,
++            CONSENT_EARLY_ACCESS.to_string(),
++            true
++        )]
++    );
++
++    let audited = hub.audited("lead.submitted").await;
++    assert_eq!(
++        audited,
++        [(
++            "anonymous".to_string(),
++            format!("lead:{}", lead.id),
++            json!({"kind": "early-access", "created": true, "resubscribed": false}),
++        )]
++    );
++    // No personal data in any audit row about the lead.
++    let all: Vec<String> =
++        sqlx::query_scalar("SELECT subject || ' ' || detail::text FROM audit_log")
++            .fetch_all(&hub.db.pool)
++            .await
++            .unwrap();
++    for row in all.iter().filter(|r| r.starts_with("lead:")) {
++        for personal in [email.as_str(), NAME, COMPANY, ROLE, "127.0.0.1"] {
++            assert!(!row.contains(personal), "{personal} in {row}");
++        }
++    }
++
++    let text = mail_texts(&email, LEAD_EARLY_ACCESS_SUBJECT, 1)
++        .await
++        .remove(0);
++    assert!(text.contains("early-access list"), "{text}");
++    assert!(text.contains("reply by email"), "{text}");
++    for echoed in [NAME, COMPANY, ROLE] {
++        assert!(!text.contains(echoed), "{echoed} echoed in {text}");
++    }
++    let token = token_in(&text, "unsubscribe");
++    assert_eq!(token.len(), 43);
++    // Only the hash is stored.
++    let raw: i64 = sqlx::query_scalar(
++        "SELECT count(*) FROM lead_submissions WHERE unsubscribe_token_hash = $1::bytea",
++    )
++    .bind(token.as_bytes())
++    .fetch_one(&hub.db.pool)
++    .await
++    .unwrap();
++    assert_eq!(raw, 0);
++}
++
++#[tokio::test]
++async fn a_known_address_updates_its_lead_and_keeps_every_submission() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    assert_accepted(submit(&hub, early_access(&email)).await).await;
++    sqlx::query("UPDATE leads SET status = 'qualified'")
++        .execute(&hub.db.pool)
++        .await
++        .unwrap();
++    let shouted = email.to_uppercase();
++    assert_accepted(submit(&hub, contact(&shouted)).await).await;
++
++    let leads = leads_of(&hub).await;
++    assert_eq!(leads.len(), 1, "{leads:?}");
++    let lead = &leads[0];
++    assert_eq!(lead.email, shouted, "the address as typed this time");
++    assert_eq!(lead.name, "Ada King");
++    assert_eq!(lead.company, "Countess Ltd");
++    assert_eq!(lead.role.as_deref(), Some(ROLE), "kept: contact has none");
++    assert_eq!(lead.segment.as_deref(), Some("itad"), "kept");
++    assert_eq!(lead.status, "qualified", "the vendor's status is kept");
++    assert_eq!(
++        submissions(&hub).await,
++        [
++            (
++                "early-access".to_string(),
++                None,
++                CONSENT_EARLY_ACCESS.to_string(),
++                true
++            ),
++            (
++                "contact".to_string(),
++                Some(MESSAGE.to_string()),
++                CONSENT_CONTACT.to_string(),
++                true
++            ),
++        ]
++    );
++    let details: Vec<Value> = hub
++        .audited("lead.submitted")
++        .await
++        .into_iter()
++        .map(|(_, _, d)| d)
++        .collect();
++    assert_eq!(
++        details,
++        [
++            json!({"kind": "early-access", "created": true, "resubscribed": false}),
++            json!({"kind": "contact", "created": false, "resubscribed": false}),
++        ]
++    );
++    // Mailpit matches recipients case-insensitively.
++    let text = mail_texts(&email, LEAD_CONTACT_SUBJECT, 1).await.remove(0);
++    assert!(
++        !text.contains(MESSAGE),
++        "the message is never echoed: {text}"
++    );
++}
++
++#[tokio::test]
++async fn resubmitting_after_unsubscribing_is_fresh_consent() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    assert_accepted(submit(&hub, early_access(&email)).await).await;
++    let token = unsubscribe_tokens(&email, LEAD_EARLY_ACCESS_SUBJECT, 1)
++        .await
++        .remove(0);
++    assert_eq!(unsubscribe(&hub, &token).await.status(), StatusCode::OK);
++    assert!(leads_of(&hub).await[0].unsubscribed);
++
++    assert_accepted(submit(&hub, early_access(&email)).await).await;
++    assert!(!leads_of(&hub).await[0].unsubscribed);
++    let last = hub.audited("lead.submitted").await.pop().unwrap().2;
++    assert_eq!(
++        last,
++        json!({"kind": "early-access", "created": false, "resubscribed": true})
++    );
++}
++
++#[tokio::test]
++async fn a_filled_honeypot_is_accepted_and_ignored() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    let mut body = early_access(&email);
++    body["website"] = json!("https://spam.example");
++    assert_accepted(submit(&hub, body).await).await;
++
++    assert_eq!(hub.count("leads").await, 0);
++    assert_eq!(hub.count("lead_submissions").await, 0);
++    assert!(lead_actions(&hub).await.is_empty());
++    // Not charged against the email-send throttle either.
++    let mail_keys: i64 =
++        sqlx::query_scalar("SELECT count(*) FROM auth_throttle WHERE key LIKE 'mail:%'")
++            .fetch_one(&hub.db.pool)
++            .await
++            .unwrap();
++    assert_eq!(mail_keys, 0);
++    tokio::time::sleep(Duration::from_millis(500)).await;
++    assert_eq!(mail_count(&email).await, 0);
++}
++
++#[tokio::test]
++async fn invalid_submissions_are_400_and_change_nothing() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    let cases: Vec<(Value, &str)> = vec![
++        (
++            {
++                let mut b = early_access(&email);
++                b["email"] = json!("not-an-address");
++                b
++            },
++            "email is not a valid email address",
++        ),
++        (
++            {
++                let mut b = early_access(&email);
++                b.as_object_mut().unwrap().remove("company");
++                b
++            },
++            "company must not be blank",
++        ),
++        (
++            {
++                let mut b = early_access(&email);
++                b.as_object_mut().unwrap().remove("segment");
++                b
++            },
++            leads::MSG_BAD_SEGMENT,
++        ),
++        (
++            {
++                let mut b = contact(&email);
++                b["message"] = json!("   ");
++                b
++            },
++            "message must not be blank",
++        ),
++        (
++            {
++                let mut b = early_access(&email);
++                b["consent"] = json!(false);
++                b
++            },
++            leads::MSG_CONSENT_REQUIRED,
++        ),
++        (
++            {
++                let mut b = early_access(&email);
++                b.as_object_mut().unwrap().remove("consent");
++                b
++            },
++            leads::MSG_CONSENT_REQUIRED,
++        ),
++        (
++            {
++                let mut b = early_access(&email);
++                b["consent_text"] = json!("I agree to anything.");
++                b
++            },
++            leads::MSG_CONSENT_CHANGED,
++        ),
++        (
++            {
++                let mut b = contact(&email);
++                b["consent_text"] = json!(CONSENT_EARLY_ACCESS);
++                b
++            },
++            leads::MSG_CONSENT_CHANGED,
++        ),
++    ];
++    let before = hub.counts().await;
++    for (body, want) in cases {
++        let resp = submit(&hub, body.clone()).await;
++        assert_site_cors(resp.headers());
++        assert_eq!(
++            error_of(resp).await,
++            (StatusCode::BAD_REQUEST, want.to_string()),
++            "{body}"
++        );
++    }
++    assert_eq!(
++        hub.counts().await,
++        before,
++        "nothing stored, charged or audited"
++    );
++    assert_eq!(hub.count("leads").await, 0);
++    assert_eq!(hub.count("lead_submissions").await, 0);
++}
++
++#[tokio::test]
++async fn the_eleventh_submission_from_one_ip_in_an_hour_is_refused() {
++    let hub = spawn_hub().await;
++    for _ in 0..LEAD_IP_LIMIT {
++        assert_accepted(submit(&hub, early_access(&unique_address())).await).await;
++    }
++    assert_eq!(hub.count("leads").await, i64::from(LEAD_IP_LIMIT));
++    let locked = hub.audited("lead.submit_locked").await;
++    assert_eq!(locked.len(), 1, "{locked:?}");
++    assert_eq!(locked[0].1, "lead:ip:127.0.0.1");
++
++    let email = unique_address();
++    let resp = submit(&hub, early_access(&email)).await;
++    assert_site_cors(resp.headers());
++    let retry: u64 = resp.headers()[RETRY_AFTER]
++        .to_str()
++        .unwrap()
++        .parse()
++        .unwrap();
++    assert!((3500..=3600).contains(&retry), "{retry}");
++    assert_eq!(
++        error_of(resp).await,
++        (
++            StatusCode::TOO_MANY_REQUESTS,
++            leads::MSG_SUBMIT_LOCKED.to_string()
++        )
++    );
++    // A refused honeypot submission is refused too: the charge comes first.
++    let mut bot = early_access(&unique_address());
++    bot["website"] = json!("x");
++    assert_eq!(
++        submit(&hub, bot).await.status(),
++        StatusCode::TOO_MANY_REQUESTS
++    );
++    assert_eq!(hub.count("leads").await, i64::from(LEAD_IP_LIMIT));
++    assert_eq!(
++        hub.count("lead_submissions").await,
++        i64::from(LEAD_IP_LIMIT)
++    );
++    assert_eq!(hub.audited("lead.submit_locked").await.len(), 1);
++}
++
++#[tokio::test]
++async fn the_email_send_throttle_refuses_a_sixth_confirmation_to_one_address() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    for _ in 0..5 {
++        assert_accepted(submit(&hub, early_access(&email)).await).await;
++    }
++    let resp = submit(&hub, early_access(&email)).await;
++    assert_site_cors(resp.headers());
++    assert!(resp.headers().contains_key(RETRY_AFTER));
++    assert_eq!(
++        error_of(resp).await,
++        (StatusCode::TOO_MANY_REQUESTS, MAIL_LOCKED.to_string())
++    );
++    assert_eq!(hub.count("leads").await, 1);
++    assert_eq!(hub.count("lead_submissions").await, 5);
++    assert_eq!(hub.audited("lead.submitted").await.len(), 5);
++}
++
++#[tokio::test]
++async fn preflights_get_cors_headers_only_from_the_site_origin() {
++    let hub = spawn_hub().await;
++    let preflight = |path: &'static str, origin: &'static str| {
++        hub.http
++            .request(Method::OPTIONS, hub.url(path))
++            .header("origin", origin)
++            .header("access-control-request-method", "POST")
++            .header(
++                "access-control-request-headers",
++                "content-type, x-csrf-token",
++            )
++            .send()
++    };
++    for path in ["/api/leads", "/api/auth/csrf"] {
++        let resp = preflight(path, SITE).await.unwrap();
++        assert!(resp.status().is_success(), "{path}: {}", resp.status());
++        let h = resp.headers();
++        assert_site_cors(h);
++        assert_eq!(h["access-control-allow-methods"], "GET, POST");
++        assert_eq!(
++            h["access-control-allow-headers"],
++            "content-type, x-csrf-token"
++        );
++        assert_eq!(h["access-control-max-age"], "600");
++
++        for other in [
++            "https://evil.example",
++            "http://localhost:4322",
++            "http://127.0.0.1:4321",
++        ] {
++            let resp = preflight(path, other).await.unwrap();
++            assert_no_cors(resp.headers());
++        }
++    }
++    // Other paths never get CORS headers, even from the site.
++    for path in ["/api/auth/sign-in", "/api/leads/unsubscribe", "/api/health"] {
++        let resp = preflight(path, SITE).await.unwrap();
++        assert_no_cors(resp.headers());
++    }
++
++    // The CSRF token itself: readable by the site, and only by it.
++    let get_csrf = |origin: &'static str| {
++        hub.http
++            .get(hub.url("/api/auth/csrf"))
++            .header("origin", origin)
++            .send()
++    };
++    let resp = get_csrf(SITE).await.unwrap();
++    assert_eq!(resp.status(), StatusCode::OK);
++    assert_site_cors(resp.headers());
++    let resp = get_csrf("https://evil.example").await.unwrap();
++    assert_eq!(resp.status(), StatusCode::OK);
++    assert_no_cors(resp.headers());
++    // A lead posted from another origin gets no CORS headers either.
++    let resp = hub
++        .post_req("/api/leads", None)
++        .header("origin", "https://evil.example")
++        .json(&early_access(&unique_address()))
++        .send()
++        .await
++        .unwrap();
++    assert_no_cors(resp.headers());
++}
++
++#[tokio::test]
++async fn a_lead_without_a_csrf_token_is_403_readable_by_the_site() {
++    let hub = spawn_hub().await;
++    let resp = hub
++        .http
++        .post(hub.url("/api/leads"))
++        .header("origin", SITE)
++        .json(&early_access(&unique_address()))
++        .send()
++        .await
++        .unwrap();
++    assert_site_cors(resp.headers());
++    assert_eq!(
++        error_of(resp).await,
++        (
++            StatusCode::FORBIDDEN,
++            "missing or invalid CSRF token".to_string()
++        )
++    );
++    assert_eq!(hub.count("auth_throttle").await, 0);
++    assert_eq!(hub.count("leads").await, 0);
++}
++
++#[tokio::test]
++async fn unsubscribing_is_idempotent_and_audited_once() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    assert_accepted(submit(&hub, early_access(&email)).await).await;
++    assert_accepted(submit(&hub, contact(&email)).await).await;
++    let first = unsubscribe_tokens(&email, LEAD_EARLY_ACCESS_SUBJECT, 1)
++        .await
++        .remove(0);
++    let second = unsubscribe_tokens(&email, LEAD_CONTACT_SUBJECT, 1)
++        .await
++        .remove(0);
++    assert_ne!(first, second);
++
++    for token in [&first, &first, &second] {
++        let resp = unsubscribe(&hub, token).await;
++        assert_eq!(resp.status(), StatusCode::OK);
++        assert_no_cors(resp.headers());
++        assert_eq!(
++            resp.json::<Value>().await.unwrap(),
++            json!({"unsubscribed": true})
++        );
++    }
++    let lead = &leads_of(&hub).await[0];
++    assert!(lead.unsubscribed);
++    assert_eq!(
++        hub.audited("lead.unsubscribed").await,
++        [(
++            "anonymous".to_string(),
++            format!("lead:{}", lead.id),
++            json!({})
++        )]
++    );
++
++    let audit_rows = hub.count("audit_log").await;
++    for bad in [
++        "".to_string(),
++        "not-a-token".to_string(),
++        "A".repeat(43),
++        format!("{first}x"),
++    ] {
++        assert_eq!(
++            error_of(unsubscribe(&hub, &bad).await).await,
++            (
++                StatusCode::NOT_FOUND,
++                leads::MSG_BAD_UNSUBSCRIBE.to_string()
++            ),
++            "{bad:?}"
++        );
++    }
++    assert_eq!(hub.count("audit_log").await, audit_rows);
++}
+diff --git a/crates/wipe-hub/tests/migrations.rs b/crates/wipe-hub/tests/migrations.rs
+index 62489bb..11ab23e 100644
+--- a/crates/wipe-hub/tests/migrations.rs
++++ b/crates/wipe-hub/tests/migrations.rs
+@@ -243,3 +243,115 @@ async fn at_most_one_organization_is_the_vendor_organization() {
+         .unwrap();
+     assert_eq!(vendors, 1);
+ }
++
++#[tokio::test]
++async fn leads_are_unique_by_lowercased_email_and_constrained() {
++    let t = TestDb::migrated().await;
++    let lead = |email: &str, segment: Option<&'static str>, status: &'static str| {
++        let email = email.to_string();
++        let pool = t.pool.clone();
++        async move {
++            sqlx::query_scalar::<_, uuid::Uuid>(
++                "INSERT INTO leads (email, name, company, segment, status) \
++                 VALUES ($1, 'Ada', 'Engines', $2, $3) RETURNING id",
++            )
++            .bind(email)
++            .bind(segment)
++            .bind(status)
++            .fetch_one(&pool)
++            .await
++        }
++    };
++    let constraint = |e: sqlx::Error| match e {
++        sqlx::Error::Database(d) => d.constraint().map(str::to_string),
++        other => panic!("expected a constraint violation, got {other:?}"),
++    };
++    let id = lead("ada@example.com", Some("itad"), "new").await.unwrap();
++    for status in ["contacted", "qualified", "closed"] {
++        lead(&format!("{status}@example.com"), None, status)
++            .await
++            .unwrap();
++    }
++    assert_eq!(
++        constraint(lead("ADA@example.com", None, "new").await.unwrap_err()).as_deref(),
++        Some("leads_email_key")
++    );
++    assert_eq!(
++        constraint(
++            lead("b@example.com", Some("ITAD"), "new")
++                .await
++                .unwrap_err()
++        )
++        .as_deref(),
++        Some("leads_segment_check")
++    );
++    assert_eq!(
++        constraint(lead("c@example.com", None, "won").await.unwrap_err()).as_deref(),
++        Some("leads_status_check")
++    );
++
++    let submission = |kind: &'static str, consent: &'static str, hash: Vec<u8>| {
++        let pool = t.pool.clone();
++        async move {
++            sqlx::query(
++                "INSERT INTO lead_submissions \
++                     (lead_id, kind, consent_text, unsubscribe_token_hash) \
++                 VALUES ($1, $2, $3, $4)",
++            )
++            .bind(id)
++            .bind(kind)
++            .bind(consent)
++            .bind(hash)
++            .execute(&pool)
++            .await
++        }
++    };
++    submission("early-access", "I agree.", vec![1; 32])
++        .await
++        .unwrap();
++    submission("contact", "I agree.", vec![2; 32])
++        .await
++        .unwrap();
++    for (kind, consent, hash, want) in [
++        (
++            "newsletter",
++            "I agree.",
++            vec![3; 32],
++            "lead_submissions_kind_check",
++        ),
++        (
++            "contact",
++            " ",
++            vec![4; 32],
++            "lead_submissions_consent_text_check",
++        ),
++        (
++            "contact",
++            "I agree.",
++            vec![5; 16],
++            "lead_submissions_unsubscribe_token_hash_check",
++        ),
++        (
++            "contact",
++            "I agree.",
++            vec![1; 32],
++            "lead_submissions_unsubscribe_token_hash_key",
++        ),
++    ] {
++        assert_eq!(
++            constraint(submission(kind, consent, hash).await.unwrap_err()).as_deref(),
++            Some(want)
++        );
++    }
++    // Deleting a lead deletes its submissions.
++    sqlx::query("DELETE FROM leads WHERE id = $1")
++        .bind(id)
++        .execute(&t.pool)
++        .await
++        .unwrap();
++    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM lead_submissions")
++        .fetch_one(&t.pool)
++        .await
++        .unwrap();
++    assert_eq!(left, 0);
++}
+diff --git a/crates/wipe-hub/tests/portal.rs b/crates/wipe-hub/tests/portal.rs
+index 5194067..cae7056 100644
+--- a/crates/wipe-hub/tests/portal.rs
++++ b/crates/wipe-hub/tests/portal.rs
+@@ -41,6 +41,7 @@ async fn spawn_hub(portal_dir: Option<PathBuf>) -> SocketAddr {
+         stripe_webhook_secret: None,
+         vendor_root_seed: None,
+         portal_dir: portal_dir.clone(),
++        site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
+     };
+     let mut config = Config::from_args(args).unwrap();
+     // `from_args` may pick up a built `apps/portal/dist` under the cwd when
+diff --git a/crates/wipe-hub/tests/support/hub.rs b/crates/wipe-hub/tests/support/hub.rs
+index 0966ec8..17adbef 100644
+--- a/crates/wipe-hub/tests/support/hub.rs
++++ b/crates/wipe-hub/tests/support/hub.rs
+@@ -51,6 +51,7 @@ pub async fn spawn_hub_with(smtp_port: u16) -> Hub {
+         stripe_webhook_secret: None,
+         vendor_root_seed: None,
+         portal_dir: None,
++        site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
+     };
+     let mut config = Config::from_args(args).unwrap();
+     config.portal_dir = None;
+diff --git a/crates/wipe-hub/tests/team.rs b/crates/wipe-hub/tests/team.rs
+index 53649f1..771028a 100644
+--- a/crates/wipe-hub/tests/team.rs
++++ b/crates/wipe-hub/tests/team.rs
+@@ -51,6 +51,7 @@ async fn spawn_hub_with(smtp_port: u16) -> Hub {
+         stripe_webhook_secret: None,
+         vendor_root_seed: None,
+         portal_dir: None,
++        site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
+     };
+     let mut config = Config::from_args(args).unwrap();
+     config.portal_dir = None;
+diff --git a/sites/www/README.md b/sites/www/README.md
+index 6174dd3..50ff330 100644
+--- a/sites/www/README.md
++++ b/sites/www/README.md
+@@ -1,7 +1,8 @@
+ # sites/www — marketing site
+ 
+ Static [Astro](https://astro.build) + Tailwind 4 site (ADR-0006). No server runtime, zero
+-client JS, readable with JavaScript disabled. Pre-launch: brand "Wipestation" and origin
++client JS by default, readable with JavaScript disabled; only a build given `PUBLIC_HUB_ORIGIN`
++ships the lead-form script on the two form pages. Pre-launch: brand "Wipestation" and origin
+ `https://wipestation.example` are placeholders; set `SITE_URL` to override the origin.
+ 
+ ```bash
+@@ -31,13 +32,36 @@ pnpm --filter www lighthouse    # build + preview + Lighthouse in local headless
+ - `/pricing/`: "Early-access pricing on request", no amounts or currency; licensing principles
+   only as wrapped capabilities. Prices arrive with `offerings-and-payments`.
+ - `/early-access/` and `/contact/`: copy plus `src/components/LeadForm.astro`, one form for both
+-  with the `lead-capture` CAP-1 field names. It posts nowhere: no `action` and a `disabled`
+-  submit button (an enabled button would submit to the page URL), and it says sign-up is not
+-  open yet. Development builds (`import.meta.env.DEV`) add a notice that it posts nowhere until
+-  `lead-capture` adds `POST /api/leads`; that story adds `action`/`method` and enables the
+-  button. No email, phone or postal address is published.
++  with the field names of the hub's `POST /api/leads` (lead-capture story 1). No email, phone or
++  postal address is published. The form has two modes, chosen at build time:
++  - **Closed** (default, `PUBLIC_HUB_ORIGIN` unset): it posts nowhere. No `action`, a `disabled`
++    submit button (an enabled button would submit to the page URL), "not open yet" text and no
++    script, so the site still ships zero JavaScript.
++  - **Open** (`PUBLIC_HUB_ORIGIN=http://localhost:7900`, the hub's origin): the form carries
++    `data-hub-origin`; its button is disabled in the HTML and enabled by a small script
++    (`src/lib/lead-submit.ts`) that fetches the hub's CSRF token and posts the form with
++    `credentials: "include"`, retrying once on a stale token, and shows the outcome in an
++    `aria-live` region (success, the hub's 400 message, "Try again in N minutes" from a 429's
++    `Retry-After`, or a network error). A `<noscript>` note says nothing is sent without
++    JavaScript, and an off-screen, `aria-hidden`, `tabindex=-1` honeypot field `website` catches
++    naive bots. The page copy and meta no longer say the form is closed. The hub must list this
++    site's origin in `--site-origin` (default `http://localhost:4321`, Astro's dev port), and the
++    two must be the same site (`localhost:4321` with `localhost:7900` works; `localhost` with
++    `127.0.0.1` does not, because the CSRF cookie is `SameSite=Lax`).
++  - `astro build` (not `astro dev`) fails when `PUBLIC_HUB_ORIGIN` is set (in the environment or
++    a `.env` file) while `site.privacyNoticePublished` in `src/config.ts` is `false`: the
++    placeholder privacy page promises the forms will not open before the full notice is
++    published. Setting that flag is a vendor sign-off that ships with the real notice.
++  - The consent wording lives once, in `src/data/consent.ts`. The label is
++    `"<statement> See the privacy notice."`, and that whole text is what the hub stores as
++    consent; the hub accepts only its own copy, pinned to this file by a Rust unit test, so
++    change both together.
++
++  Development builds (`import.meta.env.DEV`) add a notice saying where the form posts, or how to
++  open it.
+ - `/privacy/`, `/terms/`: placeholders, to be published before launch. Privacy states only what
+-  is true today: no cookies, no analytics, no third-party resources, forms send nothing.
++  is true of a default build: no cookies, no analytics, no third-party resources, forms send
++  nothing.
+ 
+ The header nav links product, standards, segments, pricing and capabilities; the footer links
+ early access, contact, privacy and terms. Shared class strings live in `src/lib/ui.ts`.
+diff --git a/sites/www/src/components/LeadForm.astro b/sites/www/src/components/LeadForm.astro
+index 85c7aa3..a1f25a6 100644
+--- a/sites/www/src/components/LeadForm.astro
++++ b/sites/www/src/components/LeadForm.astro
+@@ -1,22 +1,42 @@
+ ---
+ /**
+- * The early-access and contact form (marketing-site story 3). One component
+- * for both pages, with field names matching `lead-capture` CAP-1, so that
+- * story only has to add `action`/`method` and enable the button.
++ * The early-access and contact form (marketing-site story 3, lead-capture
++ * story 1). One component for both pages, with the field names of
++ * `POST /api/leads` (`crates/wipe-hub/src/leads.rs`).
+  *
+- * Until then it posts nowhere: no `action`, and the submit button is
+- * `disabled`. A form with no `action` and an enabled button would submit to
+- * the page URL and leak the visitor's details into a query string or a POST to
+- * the static host; with the default button disabled, implicit submission
+- * (Enter in a field) does nothing either.
++ * Closed (the default: no `PUBLIC_HUB_ORIGIN`): it posts nowhere. There is no
++ * `action`, the submit button is `disabled` and no script ships. A form with
++ * no `action` and an enabled button would submit to the page URL and leak the
++ * visitor's details into a query string or a POST to the static host; with
++ * the default button disabled, implicit submission (Enter in a field) does
++ * nothing either.
++ *
++ * Open (`PUBLIC_HUB_ORIGIN` set): the form carries `data-hub-origin`, still
++ * has no `action`, and its button is disabled in the HTML; the script
++ * (`src/lib/lead-submit.ts`) enables it and posts with `fetch`, so without
++ * JavaScript nothing is sent and a `<noscript>` note says so. A labelled,
++ * off-screen, `aria-hidden` honeypot field (`website`) catches naive bots.
++ * `astro build` refuses an open form while the privacy notice is a
++ * placeholder (`src/integrations/site-check.ts`).
++ *
++ * The consent label is `src/data/consent.ts`, the text the hub stores.
+  */
++import { CONSENT_STATEMENTS, PRIVACY_LINK_TEXT, PRIVACY_SENTENCE } from "../data/consent";
++import { hubOrigin as configuredHubOrigin } from "../config";
++import { parseHubOrigin } from "../lib/lead-submit";
++
+ interface Props {
+   kind: "early-access" | "contact";
+   /** Show the developer notice; defaults to development builds only. */
+   devNotice?: boolean;
++  /** The hub to post to; defaults to `PUBLIC_HUB_ORIGIN`. `""` keeps the form closed. */
++  hubOrigin?: string;
+ }
+ 
+ const { kind, devNotice = import.meta.env.DEV } = Astro.props;
++const hubOrigin =
++  Astro.props.hubOrigin === undefined ? configuredHubOrigin() : parseHubOrigin(Astro.props.hubOrigin);
++const open = hubOrigin !== "";
+ const id = (field: string) => `${kind}-${field}`;
+ const segments = [
+   { value: "itad", label: "ITAD operator" },
+@@ -24,29 +44,51 @@ const segments = [
+   { value: "government", label: "Government or defense" },
+   { value: "other", label: "Other" },
+ ];
++const [privacyBefore, privacyAfter] = PRIVACY_SENTENCE.split(PRIVACY_LINK_TEXT);
+ const label = "block text-sm font-semibold text-slate-900";
+ const control =
+   "mt-1 block w-full rounded border border-slate-400 px-3 py-2 text-slate-900 focus:outline-2 focus:outline-offset-2 focus:outline-slate-900";
+ const optional = "font-normal text-slate-700";
++const submitLabel = kind === "early-access" ? "Join early access" : "Send message";
+ ---
+ 
+ <form
+   aria-labelledby={id("title")}
+   data-lead-form={kind}
++  data-hub-origin={open ? hubOrigin : undefined}
+   class="mt-6 max-w-prose space-y-4 rounded border border-slate-200 p-4"
+ >
+   <h2 id={id("title")} class="text-xl font-semibold">
+     {kind === "early-access" ? "Join the early-access list" : "Send a message"}
+   </h2>
+-  <p class="font-semibold text-slate-900" data-not-open>
+-    {kind === "early-access" ? "Sign-up is not open yet." : "This form is not open yet."}
+-    It is shown so you can see what we will ask; nothing you type here is sent or stored.
+-  </p>
++  {
++    open ? (
++      <noscript>
++        <p class="font-semibold text-slate-900" data-noscript>
++          This form needs JavaScript to send. With JavaScript off, nothing you type here is sent.
++        </p>
++      </noscript>
++    ) : (
++      <p class="font-semibold text-slate-900" data-not-open>
++        {kind === "early-access" ? "Sign-up is not open yet." : "This form is not open yet."}
++        It is shown so you can see what we will ask; nothing you type here is sent or stored.
++      </p>
++    )
++  }
+   {
+     devNotice && (
+       <p data-dev-notice class="rounded bg-sky-100 px-3 py-2 text-sm text-sky-950">
+-        Development build: this form posts nowhere until <code>lead-capture</code> adds
+-        <code>POST /api/leads</code>.
++        {open ? (
++          <>
++            Development build: this form posts to <code>{hubOrigin}/api/leads</code>.
++          </>
++        ) : (
++          <>
++            Development build: this form is closed. Set <code>PUBLIC_HUB_ORIGIN</code> to the hub's
++            origin (for example <code>http://localhost:7900</code>) to post to
++            <code>POST /api/leads</code>.
++          </>
++        )}
+       </p>
+     )
+   }
+@@ -110,8 +152,17 @@ const optional = "font-normal text-slate-700";
+       name="message"
+       rows="4"
+       required={kind === "contact"}
++      maxlength="5000"
+       class={control}></textarea>
+   </div>
++  {
++    open && (
++      <div class="absolute -left-[10000px] top-auto h-px w-px overflow-hidden" aria-hidden="true">
++        <label for={id("website")}>Website (leave this empty)</label>
++        <input id={id("website")} name="website" type="text" tabindex="-1" autocomplete="off" />
++      </div>
++    )
++  }
+   <div class="flex items-start gap-3">
+     <input
+       id={id("consent")}
+@@ -120,20 +171,25 @@ const optional = "font-normal text-slate-700";
+       required
+       class="mt-1 size-5 shrink-0 accent-slate-900"
+     />
+-    <label for={id("consent")} class="text-sm text-slate-700">
+-      {
+-        kind === "early-access"
+-          ? "I agree that these details are used only to follow up on early access."
+-          : "I agree that these details are used only to reply to this message."
+-      }
+-      See the <a href="/privacy/" class="underline underline-offset-2">privacy notice</a>.
++    <label for={id("consent")} class="text-sm text-slate-700" data-consent-label>
++      {`${CONSENT_STATEMENTS[kind]} ${privacyBefore}`}<a href="/privacy/" class="underline underline-offset-2">{PRIVACY_LINK_TEXT}</a
++      >{privacyAfter}
+     </label>
+   </div>
+   <button
+     type="submit"
+     disabled
+-    class="rounded bg-slate-300 px-5 py-2.5 font-semibold text-slate-700 disabled:cursor-not-allowed"
++    class="rounded bg-slate-900 px-5 py-2.5 font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-700"
+   >
+-    {kind === "early-access" ? "Join early access" : "Send message"} (not open yet)
++    {open ? submitLabel : `${submitLabel} (not open yet)`}
+   </button>
++  {open && <p data-lead-status role="status" aria-live="polite" class="text-sm font-semibold text-slate-900"></p>}
+ </form>
++{
++  open && (
++    <script>
++      import { initLeadForms } from "../lib/lead-submit";
++      initLeadForms();
++    </script>
++  )
++}
+diff --git a/sites/www/src/config.ts b/sites/www/src/config.ts
+index adc6239..21cbd37 100644
+--- a/sites/www/src/config.ts
++++ b/sites/www/src/config.ts
+@@ -2,6 +2,8 @@
+  * Site-wide settings. Brand and origin are placeholders until the vendor
+  * decides (SPEC open question); `SITE_URL` overrides the origin at build time.
+  */
++import { parseHubOrigin } from "./lib/lead-submit";
++
+ export const PLACEHOLDER_ORIGIN = "https://wipestation.example";
+ 
+ export const site = {
+@@ -16,4 +18,21 @@ export const site = {
+     enabled: false,
+     scriptSrc: "",
+   },
++  /**
++   * Whether `/privacy/` is the full privacy notice rather than the placeholder.
++   * The placeholder promises the forms will not open before the notice is
++   * published, so `astro build` refuses `PUBLIC_HUB_ORIGIN` while this is
++   * `false` (`src/integrations/site-check.ts`). Publishing the notice is legal
++   * copy and a vendor decision: set it with the new page, never on its own.
++   */
++  privacyNoticePublished: false,
+ } as const;
++
++/**
++ * The hub the early-access and contact forms post to, from
++ * `PUBLIC_HUB_ORIGIN` (lead-capture story 1). `""` when unset: the forms stay
++ * closed and ship no script. Read at build time.
++ */
++export function hubOrigin(): string {
++  return parseHubOrigin(import.meta.env.PUBLIC_HUB_ORIGIN);
++}
+diff --git a/sites/www/src/data/consent.ts b/sites/www/src/data/consent.ts
+new file mode 100644
+index 0000000..fc13738
+--- /dev/null
++++ b/sites/www/src/data/consent.ts
+@@ -0,0 +1,28 @@
++/**
++ * The consent wording of the early-access and contact forms (lead-capture
++ * story 1). This file is the only copy on the site: `LeadForm.astro` renders
++ * the statement and the privacy sentence as the consent label, and the form
++ * script submits `consentText(kind)`, the label's whole text.
++ *
++ * The hub stores that text with each submission as proof of consent and
++ * accepts only its own copy of it (`crates/wipe-hub/src/leads.rs`, pinned to
++ * this file by a unit test). Changing a word here therefore needs the same
++ * change in the hub; until both ship, the hub answers "the consent text has
++ * changed".
++ */
++export type LeadKind = "early-access" | "contact";
++
++export const CONSENT_STATEMENTS = {
++  "early-access": "I agree that these details are used only to follow up on early access.",
++  contact: "I agree that these details are used only to reply to this message.",
++} as const satisfies Record<LeadKind, string>;
++
++/** Follows each statement; "privacy notice" links to `/privacy/`. */
++export const PRIVACY_SENTENCE = "See the privacy notice.";
++/** The linked words inside `PRIVACY_SENTENCE`. */
++export const PRIVACY_LINK_TEXT = "privacy notice";
++
++/** The consent label's whole text, exactly as the hub stores it. */
++export function consentText(kind: LeadKind): string {
++  return `${CONSENT_STATEMENTS[kind]} ${PRIVACY_SENTENCE}`;
++}
+diff --git a/sites/www/src/integrations/site-check.ts b/sites/www/src/integrations/site-check.ts
+index e46c356..115358b 100644
+--- a/sites/www/src/integrations/site-check.ts
++++ b/sites/www/src/integrations/site-check.ts
+@@ -3,12 +3,19 @@
+  * page-hygiene check (`src/lib/site-check.ts`) over every emitted `.html`
+  * file, scan every emitted `.css` file for third-party `url()`/`@import`, and fail the build on any violation (ADR-0006 §2, CAP-3/CAP-4).
+  *
++ * At build start (`astro build` only, never `astro dev`), it also refuses to
++ * open the lead forms (`PUBLIC_HUB_ORIGIN`, lead-capture story 1) while the
++ * privacy notice is a placeholder: the published placeholder promises the
++ * forms will not open before the notice exists. The check reads the variable
++ * from Vite's resolved env, so a value in a `.env` file counts too.
++ *
+  * Register it after `@astrojs/sitemap` so the sitemap already exists.
+  */
+ import { existsSync, readdirSync, readFileSync } from "node:fs";
+ import { join, relative, sep } from "node:path";
+ import { fileURLToPath } from "node:url";
+ import type { AstroIntegration } from "astro";
++import { site } from "../config";
+ import { capabilities } from "../data/capabilities";
+ import { checkCss, checkPage, type Violation } from "../lib/site-check";
+ 
+@@ -22,11 +29,49 @@ function filesWithExtension(dir: string, ext: string): string[] {
+   return out.sort();
+ }
+ 
+-export default function siteCheck(): AstroIntegration {
++/**
++ * Why a build may not open the lead forms, or `null` when it may: they open
++ * only when `hubOrigin` is set, and only once the privacy notice is published.
++ */
++export function leadFormsBuildError(
++  hubOrigin: string | undefined,
++  privacyNoticePublished: boolean,
++): string | null {
++  if (!hubOrigin?.trim() || privacyNoticePublished) return null;
++  return (
++    "lead forms: PUBLIC_HUB_ORIGIN is set, but the privacy notice is unpublished " +
++    "(site.privacyNoticePublished is false in src/config.ts). The privacy page promises the " +
++    "forms will not open before the full notice is published: publish it first, or build " +
++    "without PUBLIC_HUB_ORIGIN."
++  );
++}
++
++export default function siteCheck(
++  options: { privacyNoticePublished?: boolean } = {},
++): AstroIntegration {
++  const privacyNoticePublished = options.privacyNoticePublished ?? site.privacyNoticePublished;
+   let siteOrigin = "";
+   return {
+     name: "wipestation:site-check",
+     hooks: {
++      "astro:config:setup": ({ command, updateConfig }) => {
++        if (command !== "build") return;
++        updateConfig({
++          vite: {
++            plugins: [
++              {
++                name: "wipestation:lead-forms-guard",
++                configResolved(resolved: { env: Record<string, unknown> }) {
++                  const fromEnv = resolved.env.PUBLIC_HUB_ORIGIN;
++                  const value = typeof fromEnv === "string" ? fromEnv : process.env.PUBLIC_HUB_ORIGIN;
++                  const error = leadFormsBuildError(value, privacyNoticePublished);
++                  if (error) throw new Error(error);
++                },
++              },
++            ],
++          },
++        });
++      },
+       "astro:config:done": ({ config }) => {
+         if (!config.site) throw new Error("site-check: `site` must be set in astro.config.mjs");
+         siteOrigin = config.site;
+diff --git a/sites/www/src/lib/lead-submit.ts b/sites/www/src/lib/lead-submit.ts
+new file mode 100644
+index 0000000..0bee48e
+--- /dev/null
++++ b/sites/www/src/lib/lead-submit.ts
+@@ -0,0 +1,204 @@
++/**
++ * Posting the early-access and contact forms to the hub (lead-capture
++ * story 1). Only builds given `PUBLIC_HUB_ORIGIN` ship this as a script;
++ * without it the forms stay closed and the site ships no JavaScript.
++ *
++ * The hub is on another origin and keeps its double-submit CSRF check
++ * (ADR-0007 §3), so a submission fetches `GET /api/auth/csrf` and then posts
++ * `POST /api/leads`, both with `credentials: "include"`; the hub answers the
++ * site's origin with credentialed CORS. A stale token (403 with the hub's
++ * CSRF message) is refetched and the post retried once.
++ *
++ * Mirrors `wipe_hub::leads::LeadRequest` (crates/wipe-hub/src/leads.rs);
++ * change both together.
++ */
++import { consentText, type LeadKind } from "../data/consent";
++
++/** The hub's 403 text for a missing or mismatched CSRF token (crates/wipe-hub/src/csrf.rs). */
++export const CSRF_ERROR = "missing or invalid CSRF token";
++
++/**
++ * `PUBLIC_HUB_ORIGIN` as an origin (`scheme://host[:port]`), or `""` when it
++ * is unset or blank (the forms stay closed). Anything but a bare http(s)
++ * origin throws, so a typo fails the build instead of shipping a form that
++ * posts nowhere.
++ */
++export function parseHubOrigin(value: string | undefined | null): string {
++  const v = (value ?? "").trim();
++  if (v === "") return "";
++  let url: URL;
++  try {
++    url = new URL(v);
++  } catch {
++    throw new Error(`PUBLIC_HUB_ORIGIN ${JSON.stringify(v)} is not a URL`);
++  }
++  if (
++    !["http:", "https:"].includes(url.protocol) ||
++    url.username !== "" ||
++    url.password !== "" ||
++    url.pathname !== "/" ||
++    url.search !== "" ||
++    url.hash !== "" ||
++    v.endsWith("?") ||
++    v.endsWith("#")
++  ) {
++    throw new Error(
++      `PUBLIC_HUB_ORIGIN ${JSON.stringify(v)} must be an http(s) origin such as http://localhost:7900`,
++    );
++  }
++  return url.origin;
++}
++
++/** The JSON body of `POST /api/leads`. */
++export interface LeadBody {
++  kind: LeadKind;
++  name: string;
++  email: string;
++  company: string;
++  role?: string;
++  segment?: string;
++  message: string;
++  consent: boolean;
++  consent_text: string;
++  website: string;
++}
++
++function field(data: FormData, name: string): string {
++  const v = data.get(name);
++  return typeof v === "string" ? v : "";
++}
++
++/**
++ * The request body for a form's data. The consent text is the site's own
++ * copy (`src/data/consent.ts`), never read back from the page.
++ */
++export function leadBody(kind: LeadKind, data: FormData): LeadBody {
++  const body: LeadBody = {
++    kind,
++    name: field(data, "name"),
++    email: field(data, "email"),
++    company: field(data, "company"),
++    message: field(data, "message"),
++    consent: data.get("consent") !== null,
++    consent_text: consentText(kind),
++    website: field(data, "website"),
++  };
++  if (kind === "early-access") {
++    body.role = field(data, "role");
++    body.segment = field(data, "segment");
++  }
++  return body;
++}
++
++/** What the form shows after a submission. */
++export interface SubmitOutcome {
++  ok: boolean;
++  message: string;
++}
++
++export const SUCCESS: Record<LeadKind, string> = {
++  "early-access":
++    "Thank you, you are on the early-access list. We have sent a confirmation to your email address.",
++  contact: "Thank you, your message is sent. We have sent a confirmation to your email address.",
++};
++export const NETWORK_ERROR =
++  "The form could not reach our server. Check your connection and try again.";
++
++/** A 429's `Retry-After` as "Try again in N minute(s).", rounded up. */
++export function tryAgainIn(retryAfter: string | null): string {
++  const v = retryAfter?.trim();
++  if (!v || !/^\d+$/.test(v)) return "Try again later.";
++  const minutes = Math.max(1, Math.ceil(Number(v) / 60));
++  return `Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`;
++}
++
++async function errorText(res: Response): Promise<string | null> {
++  try {
++    const body: unknown = await res.clone().json();
++    if (typeof body === "object" && body !== null && "error" in body) {
++      const e = (body as { error: unknown }).error;
++      if (typeof e === "string") return e;
++    }
++  } catch {
++    // Not JSON.
++  }
++  return null;
++}
++
++async function fetchCsrf(hubOrigin: string, fetchImpl: typeof fetch): Promise<string> {
++  const res = await fetchImpl(`${hubOrigin}/api/auth/csrf`, {
++    method: "GET",
++    credentials: "include",
++    headers: { Accept: "application/json" },
++  });
++  if (!res.ok) throw new Error(`csrf: HTTP ${res.status}`);
++  const body: unknown = await res.json();
++  const token = (body as { csrf_token?: unknown } | null)?.csrf_token;
++  if (typeof token !== "string") throw new Error("csrf: unexpected body");
++  return token;
++}
++
++/** Post one submission and say what happened, in words for the visitor. */
++export async function submitLead(
++  hubOrigin: string,
++  body: LeadBody,
++  fetchImpl: typeof fetch = fetch,
++): Promise<SubmitOutcome> {
++  const post = async (): Promise<Response> => {
++    const token = await fetchCsrf(hubOrigin, fetchImpl);
++    return fetchImpl(`${hubOrigin}/api/leads`, {
++      method: "POST",
++      credentials: "include",
++      headers: {
++        Accept: "application/json",
++        "Content-Type": "application/json",
++        "X-CSRF-Token": token,
++      },
++      body: JSON.stringify(body),
++    });
++  };
++  let res: Response;
++  try {
++    res = await post();
++    if (res.status === 403 && (await errorText(res)) === CSRF_ERROR) res = await post();
++  } catch {
++    return { ok: false, message: NETWORK_ERROR };
++  }
++  if (res.status === 202) return { ok: true, message: SUCCESS[body.kind] };
++  if (res.status === 400) {
++    const e = await errorText(res);
++    return { ok: false, message: e ? `Please check the form: ${e}.` : "Please check the form." };
++  }
++  if (res.status === 429) {
++    return {
++      ok: false,
++      message: `Too many submissions from here. ${tryAgainIn(res.headers.get("Retry-After"))}`,
++    };
++  }
++  return { ok: false, message: `Something went wrong (HTTP ${res.status}). Try again later.` };
++}
++
++/** Wire every open lead form on the page: enable it and post on submit. */
++export function initLeadForms(root: ParentNode = document): void {
++  for (const form of root.querySelectorAll<HTMLFormElement>("form[data-lead-form][data-hub-origin]")) {
++    const kind = form.dataset.leadForm as LeadKind;
++    const hubOrigin = form.dataset.hubOrigin ?? "";
++    const button = form.querySelector<HTMLButtonElement>('button[type="submit"]');
++    const status = form.querySelector<HTMLElement>("[data-lead-status]");
++    if (!button || !status || !hubOrigin) continue;
++    button.disabled = false;
++    form.addEventListener("submit", (event) => {
++      event.preventDefault();
++      button.disabled = true;
++      status.textContent = "Sending…";
++      void submitLead(hubOrigin, leadBody(kind, new FormData(form)))
++        .then((outcome) => {
++          status.textContent = outcome.message;
++          if (outcome.ok) form.reset();
++        })
++        .finally(() => {
++          button.disabled = false;
++        });
++    });
++  }
++}
+diff --git a/sites/www/src/pages/contact.astro b/sites/www/src/pages/contact.astro
+index 36b2da2..37e639e 100644
+--- a/sites/www/src/pages/contact.astro
++++ b/sites/www/src/pages/contact.astro
+@@ -1,23 +1,30 @@
+ ---
+ /**
+  * Contact (marketing-site story 3). No email, phone or postal address: the
+- * brand and domain are undecided. The form posts nowhere until `lead-capture`.
++ * brand and domain are undecided. The form is open only in builds given
++ * `PUBLIC_HUB_ORIGIN` (lead-capture story 1); otherwise it posts nowhere, and
++ * the copy says so.
+  */
+ import Base from "../layouts/Base.astro";
+ import LeadForm from "../components/LeadForm.astro";
++import { hubOrigin } from "../config";
+ import { h1, link, prose } from "../lib/ui";
++
++const open = hubOrigin() !== "";
+ ---
+ 
+ <Base
+   title="Contact"
+-  description="How to reach the Wipestation team before launch. The contact form is not open yet and sends nothing."
++  description={open
++    ? "How to reach the Wipestation team before launch: the contact form."
++    : "How to reach the Wipestation team before launch. The contact form is not open yet and sends nothing."}
+ >
+   <h1 class={h1}>Contact</h1>
+   <div class={prose}>
+     <p>
+       Wipestation is pre-launch, and we do not publish an email address, phone number or postal
+-      address yet. When the contact form opens, it will be the way to ask about the product, the
+-      standards posture or early access.
++      address yet. {open ? "The contact form below is" : "When the contact form opens, it will be"}
++      the way to ask about the product, the standards posture or early access.
+     </p>
+     <p>
+       In the meantime, the <a href="/product/" class={link}>product</a>,
+diff --git a/sites/www/src/pages/early-access.astro b/sites/www/src/pages/early-access.astro
+index b0e1103..fb90878 100644
+--- a/sites/www/src/pages/early-access.astro
++++ b/sites/www/src/pages/early-access.astro
+@@ -1,16 +1,22 @@
+ ---
+ /**
+  * Early access (marketing-site story 3): what it means, and the sign-up form.
+- * The form posts nowhere until `lead-capture` wires `POST /api/leads`.
++ * The form is open only in builds given `PUBLIC_HUB_ORIGIN` (lead-capture
++ * story 1); otherwise it posts nowhere, and the copy says so.
+  */
+ import Base from "../layouts/Base.astro";
+ import LeadForm from "../components/LeadForm.astro";
++import { hubOrigin } from "../config";
+ import { h1, link, prose } from "../lib/ui";
++
++const open = hubOrigin() !== "";
+ ---
+ 
+ <Base
+   title="Early access"
+-  description="What early access to Wipestation means, and the sign-up form. Sign-up is not open yet, and the form sends nothing."
++  description={open
++    ? "What early access to Wipestation means, and the form to join the early-access list."
++    : "What early access to Wipestation means, and the sign-up form. Sign-up is not open yet, and the form sends nothing."}
+ >
+   <h1 class={h1}>Early access</h1>
+   <div class={prose}>
+@@ -26,8 +32,9 @@ import { h1, link, prose } from "../lib/ui";
+       Early-access pricing is on request; see <a href="/pricing/" class={link}>pricing</a>.
+     </p>
+     <p>
+-      Until sign-up opens, the <a href="/capabilities/" class={link}>capabilities page</a> shows
+-      what is in development and what is planned.
++      {open ? "Meanwhile" : "Until sign-up opens"}, the
++      <a href="/capabilities/" class={link}>capabilities page</a> shows what is in development and
++      what is planned.
+     </p>
+   </div>
+   <LeadForm kind="early-access" />
+diff --git a/sites/www/test/lead-submit.test.ts b/sites/www/test/lead-submit.test.ts
+new file mode 100644
+index 0000000..8cdf080
+--- /dev/null
++++ b/sites/www/test/lead-submit.test.ts
+@@ -0,0 +1,206 @@
++// The form script's request and status logic (lead-capture story 1), against
++// a fake hub. No network, no browser.
++import { describe, expect, it } from "vitest";
++import { consentText } from "../src/data/consent";
++import {
++  CSRF_ERROR,
++  NETWORK_ERROR,
++  SUCCESS,
++  leadBody,
++  parseHubOrigin,
++  submitLead,
++  tryAgainIn,
++  type LeadBody,
++} from "../src/lib/lead-submit";
++
++const HUB = "http://localhost:7900";
++
++interface Call {
++  url: string;
++  method: string;
++  credentials: RequestCredentials | undefined;
++  csrf: string | null;
++  body: unknown;
++}
++
++type Answer = { status: number; body?: unknown; headers?: Record<string, string> };
++
++/**
++ * A fake hub: `GET /api/auth/csrf` answers `csrf-<n>`; each `POST /api/leads`
++ * is answered by `answer(index)`. Every call is recorded.
++ */
++function fakeHub(answer: (index: number) => Answer | "network-error") {
++  const calls: Call[] = [];
++  let csrf = 0;
++  let posts = 0;
++  const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
++    const headers = (init?.headers ?? {}) as Record<string, string>;
++    const call: Call = {
++      url: String(input),
++      method: init?.method ?? "GET",
++      credentials: init?.credentials,
++      csrf: headers["X-CSRF-Token"] ?? null,
++      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
++    };
++    calls.push(call);
++    if (call.url === `${HUB}/api/auth/csrf`) {
++      csrf += 1;
++      return new Response(JSON.stringify({ csrf_token: `csrf-${csrf}` }), { status: 200 });
++    }
++    const a = answer(posts++);
++    if (a === "network-error") throw new TypeError("Failed to fetch");
++    return new Response(a.body === undefined ? null : JSON.stringify(a.body), {
++      status: a.status,
++      headers: a.headers,
++    });
++  }) as typeof fetch;
++  return { impl, calls };
++}
++
++const body: LeadBody = {
++  kind: "early-access",
++  name: "Ada",
++  email: "ada@example.com",
++  company: "Engines",
++  role: "Ops",
++  segment: "itad",
++  message: "",
++  consent: true,
++  consent_text: consentText("early-access"),
++  website: "",
++};
++
++describe("parseHubOrigin", () => {
++  it("is empty when unset, so the forms stay closed", () => {
++    for (const v of [undefined, null, "", "   "]) expect(parseHubOrigin(v)).toBe("");
++  });
++
++  it("normalizes an http(s) origin", () => {
++    expect(parseHubOrigin("http://localhost:7900")).toBe("http://localhost:7900");
++    expect(parseHubOrigin(" http://localhost:7900/ ")).toBe("http://localhost:7900");
++    expect(parseHubOrigin("https://Hub.Example.com:443")).toBe("https://hub.example.com");
++  });
++
++  it("rejects anything that is not a bare origin", () => {
++    for (const bad of [
++      "localhost:7900",
++      "hub.example.com",
++      "ftp://hub.example.com",
++      "https://hub.example.com/api",
++      "https://hub.example.com/?x=1",
++      "https://hub.example.com/#x",
++      "https://user@hub.example.com",
++    ]) {
++      expect(() => parseHubOrigin(bad), bad).toThrow(/PUBLIC_HUB_ORIGIN/);
++    }
++  });
++});
++
++describe("leadBody", () => {
++  const data = (entries: [string, string][]) => {
++    const d = new FormData();
++    for (const [k, v] of entries) d.append(k, v);
++    return d;
++  };
++
++  it("builds an early-access body with the site's own consent text", () => {
++    const d = data([
++      ["name", "Ada"],
++      ["email", "ada@example.com"],
++      ["company", "Engines"],
++      ["role", "Ops"],
++      ["segment", "itad"],
++      ["message", ""],
++      ["website", ""],
++      ["consent", "on"],
++    ]);
++    expect(leadBody("early-access", d)).toEqual(body);
++  });
++
++  it("omits role and segment from a contact body, and reads an unticked box as no consent", () => {
++    const d = data([
++      ["name", "Ada"],
++      ["email", "ada@example.com"],
++      ["company", "Engines"],
++      ["role", "ignored"],
++      ["message", "Hello"],
++    ]);
++    expect(leadBody("contact", d)).toEqual({
++      kind: "contact",
++      name: "Ada",
++      email: "ada@example.com",
++      company: "Engines",
++      message: "Hello",
++      consent: false,
++      consent_text: consentText("contact"),
++      website: "",
++    });
++  });
++});
++
++describe("submitLead", () => {
++  it("fetches the CSRF token, then posts with it, both with credentials", async () => {
++    const hub = fakeHub(() => ({ status: 202, body: {} }));
++    expect(await submitLead(HUB, body, hub.impl)).toEqual({ ok: true, message: SUCCESS["early-access"] });
++    expect(hub.calls).toEqual([
++      { url: `${HUB}/api/auth/csrf`, method: "GET", credentials: "include", csrf: null, body: undefined },
++      { url: `${HUB}/api/leads`, method: "POST", credentials: "include", csrf: "csrf-1", body },
++    ]);
++  });
++
++  it("retries once with a fresh token after a CSRF 403", async () => {
++    const hub = fakeHub((i) => (i === 0 ? { status: 403, body: { error: CSRF_ERROR } } : { status: 202, body: {} }));
++    expect((await submitLead(HUB, body, hub.impl)).ok).toBe(true);
++    expect(hub.calls.filter((c) => c.method === "POST").map((c) => c.csrf)).toEqual(["csrf-1", "csrf-2"]);
++  });
++
++  it("does not retry a second CSRF 403", async () => {
++    const hub = fakeHub(() => ({ status: 403, body: { error: CSRF_ERROR } }));
++    const outcome = await submitLead(HUB, body, hub.impl);
++    expect(outcome.ok).toBe(false);
++    expect(outcome.message).toMatch(/HTTP 403/);
++    expect(hub.calls.filter((c) => c.method === "POST")).toHaveLength(2);
++  });
++
++  it("shows the hub's 400 message", async () => {
++    const hub = fakeHub(() => ({ status: 400, body: { error: "email is not a valid email address" } }));
++    expect(await submitLead(HUB, body, hub.impl)).toEqual({
++      ok: false,
++      message: "Please check the form: email is not a valid email address.",
++    });
++  });
++
++  it("turns a 429's Retry-After into minutes", async () => {
++    const hub = fakeHub(() => ({
++      status: 429,
++      body: { error: "too many submissions; try again later" },
++      headers: { "Retry-After": "3541" },
++    }));
++    expect(await submitLead(HUB, body, hub.impl)).toEqual({
++      ok: false,
++      message: "Too many submissions from here. Try again in 60 minutes.",
++    });
++  });
++
++  it("reports a network error", async () => {
++    const hub = fakeHub(() => "network-error");
++    expect(await submitLead(HUB, body, hub.impl)).toEqual({ ok: false, message: NETWORK_ERROR });
++  });
++
++  it("reports an unreachable hub when the CSRF fetch fails", async () => {
++    const impl = (async () => {
++      throw new TypeError("Failed to fetch");
++    }) as typeof fetch;
++    expect(await submitLead(HUB, body, impl)).toEqual({ ok: false, message: NETWORK_ERROR });
++  });
++});
++
++describe("tryAgainIn", () => {
++  it("rounds up to whole minutes", () => {
++    expect(tryAgainIn("1")).toBe("Try again in 1 minute.");
++    expect(tryAgainIn("60")).toBe("Try again in 1 minute.");
++    expect(tryAgainIn("61")).toBe("Try again in 2 minutes.");
++    expect(tryAgainIn(null)).toBe("Try again later.");
++    expect(tryAgainIn("Wed, 21 Oct 2026 07:28:00 GMT")).toBe("Try again later.");
++  });
++});
+diff --git a/sites/www/test/pages.test.ts b/sites/www/test/pages.test.ts
+index e3d6989..2585287 100644
+--- a/sites/www/test/pages.test.ts
++++ b/sites/www/test/pages.test.ts
+@@ -20,8 +20,10 @@ import Contact from "../src/pages/contact.astro";
+ import Privacy from "../src/pages/privacy.astro";
+ import Terms from "../src/pages/terms.astro";
+ import LeadForm from "../src/components/LeadForm.astro";
++import { consentText } from "../src/data/consent";
+ 
+ const ORIGIN = "https://wipestation.example";
++const HUB = "http://localhost:7900";
+ 
+ let container: AstroContainer;
+ beforeAll(async () => {
+@@ -71,13 +73,27 @@ const LEAD_FIELDS = {
+   contact: ["name", "email", "company", "message", "consent"],
+ } as const;
+ 
+-describe.each([
++/** The form's submit controls (an implicit-type button submits). */
++const submitsOf = (form: HTMLElement) =>
++  form
++    .querySelectorAll("button, input")
++    .filter((el) =>
++      el.tagName === "BUTTON"
++        ? (el.getAttribute("type") ?? "submit") === "submit"
++        : ["submit", "image"].includes(el.getAttribute("type") ?? ""),
++    );
++
++const formPages = [
+   ["/early-access/", EarlyAccess, "early-access"],
+   ["/contact/", Contact, "contact"],
+-] as const)("form on %s", (path, page, kind) => {
++] as const;
++
++describe.each(formPages)("closed form on %s (no PUBLIC_HUB_ORIGIN)", (path, page, kind) => {
++  let html: string;
+   let root: HTMLElement;
+   beforeAll(async () => {
+-    root = parse(await render(page, path));
++    html = await render(page, path);
++    root = parse(html);
+   });
+ 
+   it("posts nowhere: one form, no action, its only submit button disabled", () => {
+@@ -86,19 +102,20 @@ describe.each([
+     const form = forms[0];
+     expect(form.hasAttribute("action")).toBe(false);
+     expect(form.hasAttribute("method")).toBe(false);
+-    const submits = form
+-      .querySelectorAll("button, input")
+-      .filter((el) =>
+-        el.tagName === "BUTTON"
+-          ? (el.getAttribute("type") ?? "submit") === "submit"
+-          : ["submit", "image"].includes(el.getAttribute("type") ?? ""),
+-      );
++    expect(form.hasAttribute("data-hub-origin")).toBe(false);
++    const submits = submitsOf(form);
+     expect(submits).toHaveLength(1);
+     expect(submits[0].hasAttribute("disabled")).toBe(true);
+     expect(form.text).toMatch(/not open yet/i);
+     expect(form.text).toMatch(/nothing you type here is sent/i);
+   });
+ 
++  it("ships no script and no honeypot, and the page says the form is not open", () => {
++    expect(html).not.toMatch(/<script|<noscript/i);
++    expect(root.querySelector('[name="website"]')).toBeNull();
++    expect(root.querySelector('meta[name="description"]')!.getAttribute("content")).toMatch(/not open yet/);
++  });
++
+   it("has exactly the lead-capture field names, each with a visible label", () => {
+     const form = root.querySelector("form")!;
+     const controls = form.querySelectorAll("input, select, textarea");
+@@ -116,13 +133,75 @@ describe.each([
+     expect(consentLabel.querySelector('a[href="/privacy/"]')).not.toBeNull();
+   });
+ 
++  it("labels the consent box with exactly the text the hub stores", () => {
++    const consent = root.querySelector('input[name="consent"]')!;
++    const label = root.querySelector(`label[for="${consent.getAttribute("id")}"]`)!;
++    expect(label.text.replace(/\s+/g, " ").trim()).toBe(consentText(kind));
++  });
++
+   it("collects nothing by other means", () => {
+-    const html = root.toString();
+     expect(html).not.toMatch(/mailto:|tel:/i);
+     expect(html).not.toMatch(/\bfetch\(/);
+   });
+ });
+ 
++describe.each(formPages)("open form on %s (PUBLIC_HUB_ORIGIN set)", (path, page, kind) => {
++  let html: string;
++  let root: HTMLElement;
++  beforeAll(async () => {
++    vi.stubEnv("PUBLIC_HUB_ORIGIN", `${HUB}/`);
++    try {
++      html = await render(page, path);
++    } finally {
++      vi.unstubAllEnvs();
++    }
++    root = parse(html);
++  });
++
++  it("names the hub, has no action, and leaves its button for the script to enable", () => {
++    const forms = root.querySelectorAll("form");
++    expect(forms).toHaveLength(1);
++    const form = forms[0];
++    expect(form.getAttribute("data-hub-origin")).toBe(HUB);
++    expect(form.getAttribute("data-lead-form")).toBe(kind);
++    expect(form.hasAttribute("action")).toBe(false);
++    const submits = submitsOf(form);
++    expect(submits).toHaveLength(1);
++    expect(submits[0].hasAttribute("disabled")).toBe(true);
++    expect(form.text).not.toMatch(/not open yet/i);
++    expect(form.querySelector('[data-lead-status][aria-live="polite"]')).not.toBeNull();
++  });
++
++  it("ships the script and a noscript note", () => {
++    expect(html).toMatch(/<script/i);
++    const noscript = root.querySelector("form noscript");
++    expect(noscript?.text).toMatch(/needs JavaScript/);
++  });
++
++  it("adds a labelled, off-screen, aria-hidden, untabbable honeypot", () => {
++    const form = root.querySelector("form")!;
++    const controls = form.querySelectorAll("input, select, textarea");
++    const names = controls.map((c) => c.getAttribute("name"));
++    expect(names.filter((n) => n !== "website")).toEqual([...LEAD_FIELDS[kind]]);
++    const trap = form.querySelector('input[name="website"]')!;
++    expect(trap.getAttribute("tabindex")).toBe("-1");
++    expect(trap.getAttribute("autocomplete")).toBe("off");
++    expect(trap.hasAttribute("required")).toBe(false);
++    expect(form.querySelector(`label[for="${trap.getAttribute("id")}"]`)).not.toBeNull();
++    const wrapper = trap.parentNode as HTMLElement;
++    expect(wrapper.getAttribute("aria-hidden")).toBe("true");
++    expect(wrapper.getAttribute("class")).toMatch(/absolute -left-\[10000px\]/);
++  });
++
++  it("passes the site check and no longer says it sends nothing", () => {
++    expect(checkPage(html, path, capabilities, ORIGIN)).toEqual([]);
++    expect(root.querySelector('meta[name="description"]')!.getAttribute("content")).not.toMatch(
++      /not open|sends nothing/,
++    );
++    expect(root.querySelector("main")!.text).not.toMatch(/sends nothing|until sign-up opens|when the contact form opens/i);
++  });
++});
++
+ describe("early-access segments", () => {
+   it("offers exactly the four segment values behind an empty, disabled placeholder", async () => {
+     const root = parse(await render(EarlyAccess, "/early-access/"));
+@@ -139,13 +218,20 @@ describe("LeadForm dev notice", () => {
+   const renderForm = (devNotice: boolean) =>
+     container.renderToString(LeadForm, { props: { kind: "early-access", devNotice } });
+ 
+-  it("names lead-capture when dev is on", async () => {
++  it("says how to open the form when dev is on", async () => {
+     const root = parse(await renderForm(true));
+     const notice = root.querySelector("[data-dev-notice]");
+-    expect(notice?.text).toMatch(/lead-capture/);
++    expect(notice?.text).toMatch(/PUBLIC_HUB_ORIGIN/);
+     expect(notice?.text).toMatch(/POST \/api\/leads/);
+   });
+ 
++  it("names the hub it posts to when dev is on and the form is open", async () => {
++    const html = await container.renderToString(LeadForm, {
++      props: { kind: "contact", devNotice: true, hubOrigin: HUB },
++    });
++    expect(parse(html).querySelector("[data-dev-notice]")?.text).toContain(`${HUB}/api/leads`);
++  });
++
+   describe.each([
+     ["/early-access/", EarlyAccess],
+     ["/contact/", Contact],
+@@ -169,7 +255,7 @@ describe("LeadForm dev notice", () => {
+ 
+   it("is absent when dev is off, and the form still says it is not open", async () => {
+     const html = await renderForm(false);
+-    expect(html).not.toMatch(/data-dev-notice|lead-capture/);
++    expect(html).not.toMatch(/data-dev-notice|PUBLIC_HUB_ORIGIN/);
+     expect(parse(html).text).toMatch(/Sign-up is not open yet/);
+   });
+ });
+diff --git a/sites/www/test/site-check-integration.test.ts b/sites/www/test/site-check-integration.test.ts
+index 6f84a0d..032b8b1 100644
+--- a/sites/www/test/site-check-integration.test.ts
++++ b/sites/www/test/site-check-integration.test.ts
+@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { pathToFileURL } from "node:url";
+ import { afterEach, describe, expect, it } from "vitest";
+-import siteCheck from "../src/integrations/site-check";
++import siteCheck, { leadFormsBuildError } from "../src/integrations/site-check";
+ 
+ const SITE = "https://wipestation.example";
+ 
+@@ -92,3 +92,46 @@ describe("site-check integration (astro:build:done)", () => {
+     expect(errors.join("\n")).toMatch(/\[missing-artifact\].*sitemap-index\.xml/);
+   });
+ });
++
++describe("lead-forms guard (astro build only)", () => {
++  type Plugin = { name: string; configResolved: (c: { env: Record<string, unknown> }) => void };
++
++  /** The Vite plugins the integration adds for `command`. */
++  async function pluginsFor(command: string, privacyNoticePublished?: boolean): Promise<Plugin[]> {
++    const integration = siteCheck(privacyNoticePublished === undefined ? {} : { privacyNoticePublished });
++    const hooks = integration.hooks as Record<string, (opts: unknown) => unknown>;
++    const plugins: Plugin[] = [];
++    await hooks["astro:config:setup"]({
++      command,
++      updateConfig: (c: { vite?: { plugins?: Plugin[] } }) => plugins.push(...(c.vite?.plugins ?? [])),
++    });
++    return plugins;
++  }
++
++  it("names the unpublished privacy notice when PUBLIC_HUB_ORIGIN is set", () => {
++    const error = leadFormsBuildError("http://localhost:7900", false);
++    expect(error).toMatch(/PUBLIC_HUB_ORIGIN/);
++    expect(error).toMatch(/privacy notice is unpublished/);
++    expect(error).toMatch(/privacyNoticePublished/);
++  });
++
++  it("allows closed forms, and open ones once the notice is published", () => {
++    for (const unset of [undefined, "", "  "]) expect(leadFormsBuildError(unset, false)).toBeNull();
++    expect(leadFormsBuildError("http://localhost:7900", true)).toBeNull();
++  });
++
++  it("fails a build given a hub origin while the notice is a placeholder", async () => {
++    const [plugin] = await pluginsFor("build");
++    expect(plugin.name).toBe("wipestation:lead-forms-guard");
++    expect(() => plugin.configResolved({ env: { PUBLIC_HUB_ORIGIN: "http://localhost:7900" } })).toThrow(
++      /privacy notice is unpublished/,
++    );
++    expect(() => plugin.configResolved({ env: {} })).not.toThrow();
++    const [published] = await pluginsFor("build", true);
++    expect(() => published.configResolved({ env: { PUBLIC_HUB_ORIGIN: "http://localhost:7900" } })).not.toThrow();
++  });
++
++  it("leaves the dev server alone", async () => {
++    expect(await pluginsFor("dev")).toEqual([]);
++  });
++});

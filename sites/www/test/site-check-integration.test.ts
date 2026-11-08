@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import siteCheck from "../src/integrations/site-check";
+import siteCheck, { leadFormsBuildError } from "../src/integrations/site-check";
 
 const SITE = "https://wipestation.example";
 
@@ -90,5 +90,48 @@ describe("site-check integration (astro:build:done)", () => {
     const { errors, run } = await runHooks(dir);
     await expect(run).rejects.toThrow();
     expect(errors.join("\n")).toMatch(/\[missing-artifact\].*sitemap-index\.xml/);
+  });
+});
+
+describe("lead-forms guard (astro build only)", () => {
+  type Plugin = { name: string; configResolved: (c: { env: Record<string, unknown> }) => void };
+
+  /** The Vite plugins the integration adds for `command`. */
+  async function pluginsFor(command: string, privacyNoticePublished?: boolean): Promise<Plugin[]> {
+    const integration = siteCheck(privacyNoticePublished === undefined ? {} : { privacyNoticePublished });
+    const hooks = integration.hooks as Record<string, (opts: unknown) => unknown>;
+    const plugins: Plugin[] = [];
+    await hooks["astro:config:setup"]({
+      command,
+      updateConfig: (c: { vite?: { plugins?: Plugin[] } }) => plugins.push(...(c.vite?.plugins ?? [])),
+    });
+    return plugins;
+  }
+
+  it("names the unpublished privacy notice when PUBLIC_HUB_ORIGIN is set", () => {
+    const error = leadFormsBuildError("http://localhost:7900", false);
+    expect(error).toMatch(/PUBLIC_HUB_ORIGIN/);
+    expect(error).toMatch(/privacy notice is unpublished/);
+    expect(error).toMatch(/privacyNoticePublished/);
+  });
+
+  it("allows closed forms, and open ones once the notice is published", () => {
+    for (const unset of [undefined, "", "  "]) expect(leadFormsBuildError(unset, false)).toBeNull();
+    expect(leadFormsBuildError("http://localhost:7900", true)).toBeNull();
+  });
+
+  it("fails a build given a hub origin while the notice is a placeholder", async () => {
+    const [plugin] = await pluginsFor("build");
+    expect(plugin.name).toBe("wipestation:lead-forms-guard");
+    expect(() => plugin.configResolved({ env: { PUBLIC_HUB_ORIGIN: "http://localhost:7900" } })).toThrow(
+      /privacy notice is unpublished/,
+    );
+    expect(() => plugin.configResolved({ env: {} })).not.toThrow();
+    const [published] = await pluginsFor("build", true);
+    expect(() => published.configResolved({ env: { PUBLIC_HUB_ORIGIN: "http://localhost:7900" } })).not.toThrow();
+  });
+
+  it("leaves the dev server alone", async () => {
+    expect(await pluginsFor("dev")).toEqual([]);
   });
 });

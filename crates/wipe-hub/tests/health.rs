@@ -52,6 +52,7 @@ fn config(database_url: &str, smtp_port: u16) -> Config {
         stripe_webhook_secret: None,
         vendor_root_seed: None,
         portal_dir: None,
+        site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
     };
     Config::from_args(args).unwrap()
 }

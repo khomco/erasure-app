@@ -41,6 +41,7 @@ async fn spawn_hub(portal_dir: Option<PathBuf>) -> SocketAddr {
         stripe_webhook_secret: None,
         vendor_root_seed: None,
         portal_dir: portal_dir.clone(),
+        site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
     };
     let mut config = Config::from_args(args).unwrap();
     // `from_args` may pick up a built `apps/portal/dist` under the cwd when

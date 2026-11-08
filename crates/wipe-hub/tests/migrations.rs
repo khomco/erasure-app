@@ -243,3 +243,115 @@ async fn at_most_one_organization_is_the_vendor_organization() {
         .unwrap();
     assert_eq!(vendors, 1);
 }
+
+#[tokio::test]
+async fn leads_are_unique_by_lowercased_email_and_constrained() {
+    let t = TestDb::migrated().await;
+    let lead = |email: &str, segment: Option<&'static str>, status: &'static str| {
+        let email = email.to_string();
+        let pool = t.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, uuid::Uuid>(
+                "INSERT INTO leads (email, name, company, segment, status) \
+                 VALUES ($1, 'Ada', 'Engines', $2, $3) RETURNING id",
+            )
+            .bind(email)
+            .bind(segment)
+            .bind(status)
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    let constraint = |e: sqlx::Error| match e {
+        sqlx::Error::Database(d) => d.constraint().map(str::to_string),
+        other => panic!("expected a constraint violation, got {other:?}"),
+    };
+    let id = lead("ada@example.com", Some("itad"), "new").await.unwrap();
+    for status in ["contacted", "qualified", "closed"] {
+        lead(&format!("{status}@example.com"), None, status)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        constraint(lead("ADA@example.com", None, "new").await.unwrap_err()).as_deref(),
+        Some("leads_email_key")
+    );
+    assert_eq!(
+        constraint(
+            lead("b@example.com", Some("ITAD"), "new")
+                .await
+                .unwrap_err()
+        )
+        .as_deref(),
+        Some("leads_segment_check")
+    );
+    assert_eq!(
+        constraint(lead("c@example.com", None, "won").await.unwrap_err()).as_deref(),
+        Some("leads_status_check")
+    );
+
+    let submission = |kind: &'static str, consent: &'static str, hash: Vec<u8>| {
+        let pool = t.pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO lead_submissions \
+                     (lead_id, kind, consent_text, unsubscribe_token_hash) \
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(id)
+            .bind(kind)
+            .bind(consent)
+            .bind(hash)
+            .execute(&pool)
+            .await
+        }
+    };
+    submission("early-access", "I agree.", vec![1; 32])
+        .await
+        .unwrap();
+    submission("contact", "I agree.", vec![2; 32])
+        .await
+        .unwrap();
+    for (kind, consent, hash, want) in [
+        (
+            "newsletter",
+            "I agree.",
+            vec![3; 32],
+            "lead_submissions_kind_check",
+        ),
+        (
+            "contact",
+            " ",
+            vec![4; 32],
+            "lead_submissions_consent_text_check",
+        ),
+        (
+            "contact",
+            "I agree.",
+            vec![5; 16],
+            "lead_submissions_unsubscribe_token_hash_check",
+        ),
+        (
+            "contact",
+            "I agree.",
+            vec![1; 32],
+            "lead_submissions_unsubscribe_token_hash_key",
+        ),
+    ] {
+        assert_eq!(
+            constraint(submission(kind, consent, hash).await.unwrap_err()).as_deref(),
+            Some(want)
+        );
+    }
+    // Deleting a lead deletes its submissions.
+    sqlx::query("DELETE FROM leads WHERE id = $1")
+        .bind(id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM lead_submissions")
+        .fetch_one(&t.pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}

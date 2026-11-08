@@ -11,6 +11,8 @@ use lettre::message::Mailbox;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use url::Url;
 
+use crate::leads::LeadKind;
+
 /// Upper bound on one SMTP exchange.
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -18,6 +20,16 @@ pub const VERIFICATION_SUBJECT: &str = "Verify your Wipestation email address";
 pub const MAGIC_LINK_SUBJECT: &str = "Your Wipestation sign-in link";
 pub const PASSWORD_RESET_SUBJECT: &str = "Reset your Wipestation password";
 pub const INVITATION_SUBJECT: &str = "You're invited to join a Wipestation organization";
+pub const LEAD_EARLY_ACCESS_SUBJECT: &str = "You're on the Wipestation early-access list";
+pub const LEAD_CONTACT_SUBJECT: &str = "We received your message to Wipestation";
+
+/// The confirmation subject for a sales-lead form.
+pub fn lead_subject(kind: LeadKind) -> &'static str {
+    match kind {
+        LeadKind::EarlyAccess => LEAD_EARLY_ACCESS_SUBJECT,
+        LeadKind::Contact => LEAD_CONTACT_SUBJECT,
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum MailError {
@@ -101,6 +113,19 @@ impl Mailer {
         .await
     }
 
+    /// The sales-lead confirmation: plain text naming the form, containing
+    /// the unsubscribe `link`. It never echoes anything the visitor typed,
+    /// so the form cannot be used to send chosen text to any address.
+    pub async fn send_lead_confirmation(
+        &self,
+        to: &str,
+        kind: LeadKind,
+        link: &Url,
+    ) -> Result<(), MailError> {
+        self.send(to, lead_subject(kind), lead_confirmation_body(kind, link))
+            .await
+    }
+
     async fn send(&self, to: &str, subject: &str, body: String) -> Result<(), MailError> {
         let to: Mailbox = to
             .parse()
@@ -128,9 +153,53 @@ fn invitation_body(organization_name: &str, inviter_name: &str, link: &Url) -> S
     )
 }
 
+fn lead_confirmation_body(kind: LeadKind, link: &Url) -> String {
+    let what = match kind {
+        LeadKind::EarlyAccess => {
+            "Thank you for joining the Wipestation early-access list on our website."
+        }
+        LeadKind::Contact => {
+            "Thank you for sending a message through the Wipestation contact form."
+        }
+    };
+    format!(
+        "{what} We will reply by email to this address.\n\n\
+         To stop hearing from us, open the link below and press Unsubscribe:\n\n\
+         {link}\n\n\
+         Not you? Someone entered this address in our form. \
+         Use the link above and we will not contact you.\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lead_confirmation_names_the_form_links_and_echoes_nothing() {
+        let link = Url::parse("http://127.0.0.1:7900/unsubscribe?token=abc").unwrap();
+        for (kind, names) in [
+            (LeadKind::EarlyAccess, "early-access list"),
+            (LeadKind::Contact, "contact form"),
+        ] {
+            let body = lead_confirmation_body(kind, &link);
+            assert!(body.contains(names), "{body}");
+            assert!(body.contains("reply by email"), "{body}");
+            assert!(
+                body.contains("http://127.0.0.1:7900/unsubscribe?token=abc"),
+                "{body}"
+            );
+            assert!(body.contains("Not you?"), "{body}");
+            // The body is a fixed template around the link: no parameter
+            // carries submitted text.
+            let without_link = body.replace(link.as_str(), "");
+            assert!(!without_link.contains("token"), "{body}");
+        }
+        assert_ne!(
+            lead_subject(LeadKind::EarlyAccess),
+            lead_subject(LeadKind::Contact)
+        );
+    }
 
     #[test]
     fn invitation_body_names_both_and_links() {

@@ -93,6 +93,16 @@ const ROUTES: &[(&str, &str, Class)] = &[
         "/api/invitations/accept",
         Anonymous("the emailed invitation token is the credential"),
     ),
+    (
+        "POST",
+        "/api/leads",
+        Anonymous("stores a sales lead; answers 202 {} whether or not it is known"),
+    ),
+    (
+        "POST",
+        "/api/leads/unsubscribe",
+        Anonymous("the emailed unsubscribe token is the credential"),
+    ),
     ("POST", "/api/auth/sign-out", Customer),
     ("POST", "/api/auth/sign-out-everywhere", Customer),
     ("GET", "/api/auth/me", Customer),

@@ -23,6 +23,7 @@ import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SignInLinkPage } from "./pages/SignInLinkPage";
 import { SignInPage } from "./pages/SignInPage";
 import { SignUpPage } from "./pages/SignUpPage";
+import { UnsubscribePage } from "./pages/UnsubscribePage";
 import { VerifyEmailPage } from "./pages/VerifyEmailPage";
 
 const queryClient = new QueryClient({
@@ -130,6 +131,17 @@ const resetPasswordRoute = createRoute({
   },
 });
 
+// The hub emails `{public_base_url}/unsubscribe?token=…` to sales leads.
+const unsubscribeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/unsubscribe",
+  validateSearch: tokenSearch,
+  component: function UnsubscribeRoute() {
+    const { token } = unsubscribeRoute.useSearch();
+    return <UnsubscribePage token={token} />;
+  },
+});
+
 const accountRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/account",
@@ -178,6 +190,7 @@ const routeTree = rootRoute.addChildren([
   forgotPasswordRoute,
   magicLinkRoute,
   resetPasswordRoute,
+  unsubscribeRoute,
   accountRoute,
   organizationRoute,
   acceptInviteRoute,

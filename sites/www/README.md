@@ -1,7 +1,8 @@
 # sites/www — marketing site
 
 Static [Astro](https://astro.build) + Tailwind 4 site (ADR-0006). No server runtime, zero
-client JS, readable with JavaScript disabled. Pre-launch: brand "Wipestation" and origin
+client JS by default, readable with JavaScript disabled; only a build given `PUBLIC_HUB_ORIGIN`
+ships the lead-form script on the two form pages. Pre-launch: brand "Wipestation" and origin
 `https://wipestation.example` are placeholders; set `SITE_URL` to override the origin.
 
 ```bash
@@ -31,13 +32,36 @@ pnpm --filter www lighthouse    # build + preview + Lighthouse in local headless
 - `/pricing/`: "Early-access pricing on request", no amounts or currency; licensing principles
   only as wrapped capabilities. Prices arrive with `offerings-and-payments`.
 - `/early-access/` and `/contact/`: copy plus `src/components/LeadForm.astro`, one form for both
-  with the `lead-capture` CAP-1 field names. It posts nowhere: no `action` and a `disabled`
-  submit button (an enabled button would submit to the page URL), and it says sign-up is not
-  open yet. Development builds (`import.meta.env.DEV`) add a notice that it posts nowhere until
-  `lead-capture` adds `POST /api/leads`; that story adds `action`/`method` and enables the
-  button. No email, phone or postal address is published.
+  with the field names of the hub's `POST /api/leads` (lead-capture story 1). No email, phone or
+  postal address is published. The form has two modes, chosen at build time:
+  - **Closed** (default, `PUBLIC_HUB_ORIGIN` unset): it posts nowhere. No `action`, a `disabled`
+    submit button (an enabled button would submit to the page URL), "not open yet" text and no
+    script, so the site still ships zero JavaScript.
+  - **Open** (`PUBLIC_HUB_ORIGIN=http://localhost:7900`, the hub's origin): the form carries
+    `data-hub-origin`; its button is disabled in the HTML and enabled by a small script
+    (`src/lib/lead-submit.ts`) that fetches the hub's CSRF token and posts the form with
+    `credentials: "include"`, retrying once on a stale token, and shows the outcome in an
+    `aria-live` region (success, which never claims an email was sent; the hub's 400 message; a
+    429's own message plus "Try again in N minutes" from its `Retry-After`; or a network error). A `<noscript>` note says nothing is sent without
+    JavaScript, and an off-screen, `aria-hidden`, `tabindex=-1` honeypot field `website` catches
+    naive bots. The page copy and meta no longer say the form is closed. The hub must list this
+    site's origin in `--site-origin` (default `http://localhost:4321`, Astro's dev port), and the
+    two must be the same site (`localhost:4321` with `localhost:7900` works; `localhost` with
+    `127.0.0.1` does not, because the CSRF cookie is `SameSite=Lax`).
+  - `astro build` (not `astro dev`) fails when `PUBLIC_HUB_ORIGIN` is set (in the environment or
+    a `.env` file) while `site.privacyNoticePublished` in `src/config.ts` is `false`: the
+    placeholder privacy page promises the forms will not open before the full notice is
+    published. Setting that flag is a vendor sign-off that ships with the real notice.
+  - The consent wording lives once, in `src/data/consent.ts`. The label is
+    `"<statement> See the privacy notice."`, and that whole text is what the hub stores as
+    consent; the hub accepts only its own copy, pinned to this file by a Rust unit test, so
+    change both together.
+
+  Development builds (`import.meta.env.DEV`) add a notice saying where the form posts, or how to
+  open it.
 - `/privacy/`, `/terms/`: placeholders, to be published before launch. Privacy states only what
-  is true today: no cookies, no analytics, no third-party resources, forms send nothing.
+  is true of a default build: no cookies, no analytics, no third-party resources, forms send
+  nothing.
 
 The header nav links product, standards, segments, pricing and capabilities; the footer links
 early access, contact, privacy and terms. Shared class strings live in `src/lib/ui.ts`.

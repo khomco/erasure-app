@@ -28,7 +28,9 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 - Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and
   `curl 127.0.0.1:7900/api/health`. Flags have `WIPE_HUB_*` env twins whose defaults match the
   compose file; `--payment-provider stripe` refuses to start without
-  `WIPE_HUB_STRIPE_WEBHOOK_SECRET`. No `sqlx::query!` macros: there is no build-time database.
+  `WIPE_HUB_STRIPE_WEBHOOK_SECRET`. `--site-origin` / `WIPE_HUB_SITE_ORIGIN` (default
+  `http://localhost:4321`) is the one origin sent CORS headers, on `GET /api/auth/csrf` and
+  `POST /api/leads` only; anything but a bare http(s) origin refuses to start. No `sqlx::query!` macros: there is no build-time database.
 - Hub migrations are embedded (`sqlx::migrate!`) and applied by `wipe-hub serve` before it
   listens; it exits non-zero within ~5 s if Postgres is unreachable. Add a migration as
   `crates/wipe-hub/migrations/NNNN_name.sql`; never edit an applied one.
@@ -49,6 +51,10 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   overclaim — wrap the copy in `<Capability id>`, never weaken a guarded phrase), `pnpm --filter
   www typecheck`, `pnpm --filter www test`; `pnpm --filter www lighthouse` needs local Chrome.
   Capability statuses live in `sites/www/src/data/capabilities.ts` and are a vendor sign-off.
+  The lead forms stay closed (no script) unless built with `PUBLIC_HUB_ORIGIN=http://localhost:7900`
+  (`pnpm --filter www dev` for a local demo); `astro build` refuses that origin while
+  `site.privacyNoticePublished` is `false`. Consent wording lives in `src/data/consent.ts` and
+  is pinned to `crates/wipe-hub/src/leads.rs`: change both together.
 - `wipestation serve` with no built frontend silently serves an "API only" landing page, as
   does a `--static-dir` that does not exist; run `cd apps/desktop && pnpm build` first.
 - Format only the files you touched with `rustfmt --edition 2021 <files>`. Never `--all`, and

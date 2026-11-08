@@ -21,6 +21,8 @@ pub const DEFAULT_SMTP_HOST: &str = "127.0.0.1";
 pub const DEFAULT_SMTP_PORT: u16 = 1025;
 pub const DEFAULT_PUBLIC_BASE_URL: &str = "http://127.0.0.1:7900";
 pub const DEFAULT_MAIL_FROM: &str = "Wipestation <no-reply@wipestation.localhost>";
+/// The marketing site's origin in development (Astro's dev port).
+pub const DEFAULT_SITE_ORIGIN: &str = "http://localhost:4321";
 
 /// Where the portal is looked for when `--portal-dir` is absent, relative to
 /// the working directory.
@@ -81,6 +83,11 @@ pub struct Args {
     /// under the working directory if built, else the portal is not served.
     #[arg(long, env = "WIPE_HUB_PORTAL_DIR")]
     pub portal_dir: Option<PathBuf>,
+    /// Origin of the marketing site (`http(s)://host[:port]`) whose forms post
+    /// sales leads; the only origin sent CORS headers, on `GET /api/auth/csrf`
+    /// and `POST /api/leads`.
+    #[arg(long, env = "WIPE_HUB_SITE_ORIGIN", default_value = DEFAULT_SITE_ORIGIN)]
+    pub site_origin: String,
 }
 
 /// Raw `wipe-hub admin create` flags (portal-accounts story 5). The
@@ -147,6 +154,9 @@ pub struct Config {
     pub vendor_root: Option<FileVendorRoot>,
     /// Built portal to serve at `/`. `None` means the portal is not served.
     pub portal_dir: Option<PathBuf>,
+    /// The marketing site's origin, serialized as a browser sends it in
+    /// `Origin` (`scheme://host[:port]`, no default port, no trailing slash).
+    pub site_origin: String,
 }
 
 #[derive(Debug, Error)]
@@ -173,12 +183,15 @@ pub enum ConfigError {
         path.display()
     )]
     PortalDirInvalid { path: PathBuf },
+    #[error("--site-origin {value:?} is not a site origin (`http(s)://host[:port]`): {reason}")]
+    BadSiteOrigin { value: String, reason: String },
 }
 
 impl Config {
     pub fn from_args(args: Args) -> Result<Self, ConfigError> {
         let public_base_url = parse_base_url(&args.public_base_url)?;
         let mail_from = parse_mail_from(&args.mail_from)?;
+        let site_origin = parse_site_origin(&args.site_origin)?;
 
         let stripe_webhook_secret = args
             .stripe_webhook_secret
@@ -215,6 +228,7 @@ impl Config {
             stripe_webhook_secret,
             vendor_root,
             portal_dir,
+            site_origin,
         })
     }
 }
@@ -268,6 +282,7 @@ impl fmt::Debug for Config {
                 "portal_dir",
                 &self.portal_dir.as_ref().map(|p| p.display().to_string()),
             )
+            .field("site_origin", &self.site_origin)
             .finish()
     }
 }
@@ -327,6 +342,37 @@ pub fn parse_base_url(value: &str) -> Result<Url, ConfigError> {
     Ok(url)
 }
 
+/// `--site-origin` as the string a browser sends in `Origin`: an http(s) URL
+/// with a host and nothing after it but an optional `/` (no other path, no
+/// query, fragment or userinfo). The default port is dropped and the host
+/// lowercased, as browsers do, so the CORS check can compare strings.
+pub fn parse_site_origin(value: &str) -> Result<String, ConfigError> {
+    let bad = |reason: &str| ConfigError::BadSiteOrigin {
+        value: value.to_string(),
+        reason: reason.to_string(),
+    };
+    let url = Url::parse(value.trim()).map_err(|e| bad(&e.to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(bad("the scheme must be http or https"));
+    }
+    if url.host_str().map_or(true, str::is_empty) {
+        return Err(bad("there is no host"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(bad("an origin has no user name or password"));
+    }
+    if url.path() != "/" {
+        return Err(bad("an origin has no path"));
+    }
+    if url.query().is_some() {
+        return Err(bad("an origin has no query"));
+    }
+    if url.fragment().is_some() {
+        return Err(bad("an origin has no fragment"));
+    }
+    Ok(url.origin().ascii_serialization())
+}
+
 fn load_seed(path: &Path) -> Result<SigningKey, ConfigError> {
     let bytes = fs::read(path).map_err(|error| ConfigError::SeedUnreadable {
         path: path.to_path_buf(),
@@ -359,6 +405,7 @@ mod tests {
             stripe_webhook_secret: None,
             vendor_root_seed: None,
             portal_dir: None,
+            site_origin: DEFAULT_SITE_ORIGIN.into(),
         }
     }
 
@@ -484,6 +531,55 @@ mod tests {
     }
 
     #[test]
+    fn site_origin_is_serialized_as_browsers_send_it() {
+        let c = Config::from_args(args()).unwrap();
+        assert_eq!(c.site_origin, DEFAULT_SITE_ORIGIN);
+        for (value, origin) in [
+            ("http://localhost:4321", "http://localhost:4321"),
+            ("http://localhost:4321/", "http://localhost:4321"),
+            ("https://WWW.Example.com", "https://www.example.com"),
+            ("https://www.example.com:443/", "https://www.example.com"),
+            ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+            ("http://[::1]:4321", "http://[::1]:4321"),
+        ] {
+            let mut a = args();
+            a.site_origin = value.into();
+            let c = Config::from_args(a).unwrap();
+            assert_eq!(c.site_origin, origin, "{value}");
+            assert!(format!("{c:?}").contains(origin));
+        }
+    }
+
+    #[test]
+    fn bad_site_origin_is_rejected_naming_the_value() {
+        for bad in [
+            "https://x.example/path",
+            "https://x.example/path/",
+            "https://x.example/?q=1",
+            "https://x.example/?",
+            "https://x.example/#top",
+            "https://user@x.example",
+            "https://user:pw@x.example",
+            "ftp://x.example",
+            "file:///tmp",
+            "x.example",
+            "",
+            "http://",
+        ] {
+            let mut a = args();
+            a.site_origin = bad.into();
+            let err = Config::from_args(a).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::BadSiteOrigin { .. }),
+                "{bad}: {err}"
+            );
+            let msg = err.to_string();
+            assert!(msg.contains("--site-origin"), "{msg}");
+            assert!(msg.contains(&format!("{bad:?}")), "{msg}");
+        }
+    }
+
+    #[test]
     fn mail_from_accepts_mailboxes() {
         for (value, address) in [
             (DEFAULT_MAIL_FROM, "no-reply@wipestation.localhost"),
@@ -530,7 +626,7 @@ mod tests {
     fn clap_defaults_match_the_constants() {
         use clap::CommandFactory;
         let smtp_port = DEFAULT_SMTP_PORT.to_string();
-        let expected: [(&str, Option<&str>); 10] = [
+        let expected: [(&str, Option<&str>); 11] = [
             ("addr", Some(DEFAULT_ADDR)),
             ("database_url", Some(DEFAULT_DATABASE_URL)),
             ("smtp_host", Some(DEFAULT_SMTP_HOST)),
@@ -541,6 +637,7 @@ mod tests {
             ("stripe_webhook_secret", None),
             ("vendor_root_seed", None),
             ("portal_dir", None),
+            ("site_origin", Some(DEFAULT_SITE_ORIGIN)),
         ];
         let cmd = Args::command();
         let mut seen = 0;
