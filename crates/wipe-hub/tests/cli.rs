@@ -67,6 +67,42 @@ fn stripe_env_without_secret_refuses_to_start() {
 }
 
 #[test]
+fn stripe_with_only_a_webhook_secret_names_the_secret_key() {
+    let out = hub()
+        .args([
+            "serve",
+            "--addr",
+            "127.0.0.1:0",
+            "--payment-provider",
+            "stripe",
+        ])
+        .env("WIPE_HUB_STRIPE_WEBHOOK_SECRET", "whsec_cli_test")
+        .output()
+        .unwrap();
+    let all = combined(&out);
+    assert!(!out.status.success(), "{all}");
+    assert!(all.contains("WIPE_HUB_STRIPE_SECRET_KEY"), "{all}");
+    assert!(!all.contains("whsec_cli_test"), "{all}");
+}
+
+#[test]
+fn a_plain_http_stripe_api_base_refuses_to_start() {
+    let out = hub()
+        .args([
+            "serve",
+            "--addr",
+            "127.0.0.1:0",
+            "--stripe-api-base",
+            "http://api.example.com",
+        ])
+        .output()
+        .unwrap();
+    let all = combined(&out);
+    assert!(!out.status.success(), "{all}");
+    assert!(all.contains("--stripe-api-base"), "{all}");
+}
+
+#[test]
 fn unknown_payment_provider_exits_non_zero() {
     let out = hub()
         .args([

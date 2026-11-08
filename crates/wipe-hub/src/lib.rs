@@ -26,7 +26,9 @@ pub mod mail;
 pub mod offering_admin;
 pub mod order_routes;
 pub mod orders;
+pub mod payment_events;
 pub mod payments;
+pub mod stripe;
 pub mod team;
 pub mod team_routes;
 pub mod throttle;
@@ -69,7 +71,7 @@ impl AppState {
             config.smtp_port,
             config.mail_from.clone(),
         );
-        let payments = payments::provider_for(&config);
+        let payments = payments::provider_for(&config)?;
         Ok(Self {
             config: Arc::new(config),
             pool,

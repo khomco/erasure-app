@@ -16,6 +16,7 @@
 #![allow(dead_code)]
 
 pub mod hub;
+pub mod stripe_mock;
 
 use std::time::{Duration, Instant};
 

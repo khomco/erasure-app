@@ -51,6 +51,8 @@ fn hub_state(db: &TestDb, smtp_port: u16, public_base_url: &str, mail_from: &str
         public_base_url: public_base_url.into(),
         payment_provider: wipe_hub::PaymentProvider::Fake,
         stripe_webhook_secret: None,
+        stripe_secret_key: None,
+        stripe_api_base: wipe_hub::config::DEFAULT_STRIPE_API_BASE.into(),
         vendor_root_seed: None,
         portal_dir: None,
         site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),

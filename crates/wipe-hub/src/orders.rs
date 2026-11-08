@@ -1,5 +1,5 @@
-//! Orders and the customer catalog (offerings-and-payments story 2, CAP-2):
-//! the data layer behind [`crate::order_routes`].
+//! Orders and the customer catalog (offerings-and-payments stories 2 and 3,
+//! CAP-2 and CAP-3): the data layer behind [`crate::order_routes`].
 //!
 //! - **Catalog**: published offerings only, by lower-cased name, then id.
 //! - **An order snapshots** the offering's name, price, currency, interval
@@ -7,7 +7,14 @@
 //! - **Lifecycle** `pending → paid` or `pending → expired`; both terminal.
 //!   [`apply_event`], fed a [`VerifiedEvent`] that only a provider's
 //!   `verify_event` can make, is the only code that changes an order's
-//!   status.
+//!   status, and only [`crate::payment_events::receive`] calls it.
+//! - **A paid event is checked against the order's snapshot**: a different
+//!   amount, currency or order reference leaves the order pending
+//!   ([`ApplyOutcome::Mismatch`]) for a human to look at.
+//! - **Billing customers**: a paid event that names the buyer's customer at
+//!   the provider stores it in `billing_customers`, replacing a different
+//!   stored one (decision 10: the vendor may have deleted the old customer at
+//!   Stripe), and checkout and billing reuse it ([`billing_customer`]).
 //! - **Every state change writes one audit row** in its transaction:
 //!   `order.created` (actor `user:<id>`), then `order.paid` or
 //!   `order.expired` (actor `provider:<name>`, detail `{event_id}`); the
@@ -171,6 +178,35 @@ pub enum OrderError {
     Audit(#[from] AuditError),
 }
 
+/// What [`apply_event`] did with an event. The names are the
+/// `payment_events.outcome` values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    /// The order moved to `paid` or `expired`; the order after the change.
+    Applied(Order),
+    /// The order was not pending; it is unchanged.
+    Unchanged(Order),
+    /// An event type the hub does not act on.
+    Ignored,
+    /// No order has the event's checkout session.
+    Unmatched,
+    /// A paid event disagrees with the order's snapshot (amount, currency or
+    /// order reference); the order stays pending.
+    Mismatch(Order),
+}
+
+impl ApplyOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApplyOutcome::Applied(_) => "applied",
+            ApplyOutcome::Unchanged(_) => "unchanged",
+            ApplyOutcome::Ignored => "ignored",
+            ApplyOutcome::Unmatched => "unmatched",
+            ApplyOutcome::Mismatch(_) => "mismatch",
+        }
+    }
+}
+
 /// A failure applying an event.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
@@ -286,6 +322,21 @@ async fn lock_by_session(
     Ok(row.map(Order::from))
 }
 
+/// The organization's stored customer id at `provider`, if any.
+pub async fn billing_customer<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    organization_id: Uuid,
+    provider: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT customer_id FROM billing_customers WHERE organization_id = $1 AND provider = $2",
+    )
+    .bind(organization_id)
+    .bind(provider)
+    .fetch_optional(executor)
+    .await
+}
+
 async fn fetch(conn: &mut PgConnection, id: Uuid) -> Result<Order, sqlx::Error> {
     let row: OrderRow = sqlx::query_as(&format!("{} WHERE o.id = $1", select_orders()))
         .bind(id)
@@ -307,7 +358,8 @@ pub struct Checkout {
 /// Start a checkout of `offering_id` for `user_id`'s organization, in the
 /// caller's transaction: read the offering `FOR SHARE` (so a concurrent
 /// retire waits; anything but `published` is [`OrderError::NotForSale`]),
-/// ask `provider` for a hosted checkout, then insert the pending order with
+/// ask `provider` for a hosted checkout (with the organization's stored
+/// customer at that provider, if any), then insert the pending order with
 /// the session id and audit `order.created {offering_id, price_minor,
 /// currency, provider}`. A provider error writes nothing.
 pub async fn create(
@@ -326,6 +378,7 @@ pub async fn create(
     .await?;
     let offering = CatalogOffering::from(offering.ok_or(OrderError::NotForSale)?);
     let order_id = Uuid::new_v4();
+    let customer_id = billing_customer(&mut *conn, organization_id, provider.name()).await?;
     let session = provider
         .create_checkout(&CheckoutOrder {
             order_id,
@@ -335,6 +388,7 @@ pub async fn create(
             price_minor: offering.price_minor,
             currency: offering.currency.clone(),
             interval: offering.interval.clone(),
+            customer_id,
         })
         .await?;
     let g = &offering.grants;
@@ -385,18 +439,28 @@ pub async fn create(
 }
 
 /// Apply a verified provider event, in the caller's transaction: the only
-/// code that changes an order's status.
+/// code that changes an order's status. Only
+/// [`crate::payment_events::receive`] calls it, after storing the event.
 ///
-/// A completed or expired event locks its order by provider and session id
-/// and, only if the order is `pending`, moves it to `paid` or `expired`,
-/// stamps the time and audits `order.paid` / `order.expired {event_id}` as
-/// `provider:<name>`. An event for an unknown session is `None`; one for an
-/// order that is no longer pending returns it unchanged; an `Ignored` event
-/// is `None`. None of those writes anything.
+/// - An `Ignored` event is [`ApplyOutcome::Ignored`].
+/// - A completed or expired event locks its order by provider and session
+///   id; none is [`ApplyOutcome::Unmatched`], and an order that is no longer
+///   pending is [`ApplyOutcome::Unchanged`].
+/// - A completed event whose amount (minor units and currency) or order
+///   reference differs from the order is [`ApplyOutcome::Mismatch`], logged
+///   at error; the order stays pending.
+/// - Otherwise the order moves to `paid` or `expired`, the time is stamped
+///   and `order.paid` / `order.expired {event_id}` is audited as
+///   `provider:<name>` ([`ApplyOutcome::Applied`]). A paid event that names
+///   the buyer's customer stores it in `billing_customers` ([`store_customer`]):
+///   inserted, or replacing a different stored customer; the same customer
+///   writes nothing.
+///
+/// Only `Applied` writes anything.
 pub async fn apply_event(
     conn: &mut PgConnection,
     event: &VerifiedEvent,
-) -> Result<Option<Order>, ApplyError> {
+) -> Result<ApplyOutcome, ApplyError> {
     let (session_id, to, stamp, action) = match event.kind() {
         EventKind::CheckoutCompleted { session_id } => {
             (session_id, "paid", "paid_at", "order.paid")
@@ -404,13 +468,33 @@ pub async fn apply_event(
         EventKind::CheckoutExpired { session_id } => {
             (session_id, "expired", "expired_at", "order.expired")
         }
-        EventKind::Ignored { .. } => return Ok(None),
+        EventKind::Ignored { .. } => return Ok(ApplyOutcome::Ignored),
     };
     let Some(order) = lock_by_session(conn, event.provider(), session_id).await? else {
-        return Ok(None);
+        return Ok(ApplyOutcome::Unmatched);
     };
     if order.status != "pending" {
-        return Ok(Some(order));
+        return Ok(ApplyOutcome::Unchanged(order));
+    }
+    if to == "paid" {
+        let amount_differs = event.amount().is_some_and(|(minor, currency)| {
+            minor != order.price_minor || currency != order.currency
+        });
+        let ref_differs = event.order_ref().is_some_and(|r| r != order.id);
+        if amount_differs || ref_differs {
+            tracing::error!(
+                order_id = %order.id,
+                event_id = event.id(),
+                provider = event.provider(),
+                expected_amount = order.price_minor,
+                expected_currency = %order.currency,
+                event_amount = ?event.amount(),
+                event_order_ref = ?event.order_ref(),
+                "a paid payment event disagrees with its order; the order stays pending \
+                 for a human to check"
+            );
+            return Ok(ApplyOutcome::Mismatch(order));
+        }
     }
     sqlx::query(&format!(
         "UPDATE orders SET status = $2, {stamp} = now(), updated_at = now() \
@@ -430,5 +514,82 @@ pub async fn apply_event(
         },
     )
     .await?;
-    Ok(Some(fetch(conn, order.id).await?))
+    if to == "paid" {
+        if let Some(customer) = event.customer_id() {
+            store_customer(conn, order.id, event.provider(), customer).await?;
+        }
+    }
+    Ok(ApplyOutcome::Applied(fetch(conn, order.id).await?))
+}
+
+/// Store `customer` as the customer at `provider` of the organization that
+/// placed `order_id`, from a verified paid event for that order (decision
+/// 10): insert it, or
+/// replace a different stored customer (logged at info with both ids); the
+/// same customer writes nothing. A customer already stored for another
+/// organization is left alone and logged at error, rather than failing the
+/// event (which would make the provider retry it for days).
+async fn store_customer(
+    conn: &mut PgConnection,
+    order_id: Uuid,
+    provider: &str,
+    customer: &str,
+) -> Result<(), sqlx::Error> {
+    let organization_id: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM orders WHERE id = $1")
+            .bind(order_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        "SELECT organization_id FROM billing_customers WHERE provider = $1 AND customer_id = $2",
+    )
+    .bind(provider)
+    .bind(customer)
+    .fetch_optional(&mut *conn)
+    .await?;
+    match owner {
+        Some(owner) if owner == organization_id => return Ok(()),
+        Some(owner) => {
+            tracing::error!(
+                %organization_id,
+                other_organization_id = %owner,
+                provider,
+                customer_id = customer,
+                "a paid event names a customer stored for another organization; \
+                 the stored customers are left unchanged"
+            );
+            return Ok(());
+        }
+        None => {}
+    }
+    let previous: Option<String> = sqlx::query_scalar(
+        "SELECT customer_id FROM billing_customers \
+         WHERE organization_id = $1 AND provider = $2 FOR UPDATE",
+    )
+    .bind(organization_id)
+    .bind(provider)
+    .fetch_optional(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT INTO billing_customers (organization_id, provider, customer_id) \
+         VALUES ($1, $2, $3) \
+         ON CONFLICT (organization_id, provider) DO UPDATE \
+         SET customer_id = EXCLUDED.customer_id, updated_at = now() \
+         WHERE billing_customers.customer_id <> EXCLUDED.customer_id",
+    )
+    .bind(organization_id)
+    .bind(provider)
+    .bind(customer)
+    .execute(&mut *conn)
+    .await?;
+    if let Some(previous) = previous {
+        tracing::info!(
+            %organization_id,
+            provider,
+            old_customer_id = %previous,
+            new_customer_id = customer,
+            "replaced the organization's stored billing customer"
+        );
+    }
+    Ok(())
 }

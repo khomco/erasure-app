@@ -103,6 +103,11 @@ const ROUTES: &[(&str, &str, Class)] = &[
         "/api/leads/unsubscribe",
         Anonymous("the emailed unsubscribe token is the credential"),
     ),
+    (
+        "POST",
+        "/api/payments/webhook",
+        Anonymous("the provider's signature is the credential; answers only {received}"),
+    ),
     ("POST", "/api/auth/sign-out", Customer),
     ("POST", "/api/auth/sign-out-everywhere", Customer),
     ("GET", "/api/auth/me", Customer),
@@ -271,8 +276,9 @@ async fn tenant(hub: &Hub, org_name: &str, names: Option<(&str, &str)>, offering
 }
 
 /// Everything stored about organization `org`, as JSON text: the
-/// organization row, its users, its invitations, its orders, and its users'
-/// sessions and emailed tokens (hashes, expiries, `used_at`), each in full.
+/// organization row, its users, its invitations, its orders, its billing
+/// customers, and its users' sessions and emailed tokens (hashes, expiries,
+/// `used_at`), each in full.
 async fn rows_of(hub: &Hub, org: Uuid) -> Vec<String> {
     let mut out = Vec::new();
     for sql in [
@@ -280,6 +286,8 @@ async fn rows_of(hub: &Hub, org: Uuid) -> Vec<String> {
         "SELECT row_to_json(u)::text FROM users u WHERE organization_id = $1 ORDER BY id",
         "SELECT row_to_json(i)::text FROM invitations i WHERE organization_id = $1 ORDER BY id",
         "SELECT row_to_json(o)::text FROM orders o WHERE organization_id = $1 ORDER BY id",
+        "SELECT row_to_json(c)::text FROM billing_customers c WHERE organization_id = $1 \
+         ORDER BY provider",
         "SELECT row_to_json(s)::text FROM sessions s JOIN users u ON u.id = s.user_id \
          WHERE u.organization_id = $1 ORDER BY s.token_hash",
         "SELECT row_to_json(t)::text FROM auth_tokens t JOIN users u ON u.id = t.user_id \
@@ -318,7 +326,20 @@ async fn organization_a_never_sees_or_changes_organization_b() {
         &offering,
     )
     .await;
+    // B has paid through Stripe before: a stored billing customer.
+    sqlx::query(
+        "INSERT INTO billing_customers (organization_id, provider, customer_id) \
+         VALUES ($1, 'stripe', 'cus_bravo_secret')",
+    )
+    .bind(b.org)
+    .execute(&hub.db.pool)
+    .await
+    .unwrap();
     let b_before = rows_of(&hub, b.org).await;
+    assert!(
+        b_before.iter().any(|r| r.contains("cus_bravo_secret")),
+        "{b_before:?}"
+    );
 
     // Every identifier of B's that a response must not carry.
     let secrets: Vec<String> = vec![
@@ -334,6 +355,7 @@ async fn organization_a_never_sees_or_changes_organization_b() {
         b.invitation.clone(),
         b.order.clone(),
         b.session.clone(),
+        "cus_bravo_secret".into(),
     ];
 
     let mut swept = 0;

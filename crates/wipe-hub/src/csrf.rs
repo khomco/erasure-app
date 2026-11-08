@@ -14,6 +14,10 @@
 //! it is the vendor's own site. Subdomain cookie-tossing is the known
 //! weakness, accepted until hosting is decided (CONTEXT §10).
 //!
+//! One route is exempt: `POST /api/payments/webhook`, called by the payment
+//! provider, which has no cookie; the provider's signature over the raw body
+//! is its credential, and it answers only `{"received":true}`.
+//!
 //! `GET /api/auth/csrf` hands the token to the portal; it is the only place a
 //! raw CSRF token is ever returned, and none is ever logged.
 
@@ -31,6 +35,7 @@ use serde_json::json;
 
 use crate::accounts;
 use crate::auth::{self, ApiError};
+use crate::order_routes::PAYMENT_WEBHOOK_PATH;
 use crate::AppState;
 
 /// Name of the CSRF cookie.
@@ -75,9 +80,19 @@ fn is_safe(method: &Method) -> bool {
     matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
 }
 
-/// Middleware: reject a mutating `/api` request without a valid token.
+/// Whether a request needs no token: `POST /api/payments/webhook` only,
+/// whose credential is the payment provider's signature over the body.
+fn is_exempt(method: &Method, path: &str) -> bool {
+    *method == Method::POST && path == PAYMENT_WEBHOOK_PATH
+}
+
+/// Middleware: reject a mutating `/api` request without a valid token,
+/// except the payment provider's webhook ([`is_exempt`]).
 pub async fn require(req: Request, next: Next) -> Response {
-    if is_safe(req.method()) || !is_api_path(req.uri().path()) {
+    if is_safe(req.method())
+        || !is_api_path(req.uri().path())
+        || is_exempt(req.method(), req.uri().path())
+    {
         return next.run(req).await;
     }
     let headers = req.headers();
@@ -187,6 +202,30 @@ mod tests {
         }
         for m in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
             assert!(!is_safe(&m));
+        }
+    }
+
+    #[test]
+    fn only_the_payment_webhook_post_is_exempt() {
+        // Built from the constant: `tests/isolation.rs` treats every
+        // `"/api…"` literal in `src/` as a route.
+        let webhook = PAYMENT_WEBHOOK_PATH;
+        assert_eq!(webhook, concat!("/api", "/payments/webhook"));
+        assert!(is_exempt(&Method::POST, webhook));
+        for (m, p) in [
+            (Method::GET, webhook.to_string()),
+            (Method::PUT, webhook.to_string()),
+            (Method::DELETE, webhook.to_string()),
+            (Method::POST, format!("{webhook}/")),
+            (Method::POST, format!("{webhook}/x")),
+            (Method::POST, webhook.to_uppercase()),
+            (Method::POST, webhook.replace("webhook", "fake")),
+            (
+                Method::POST,
+                webhook.replace("/payments/webhook", "/checkout"),
+            ),
+        ] {
+            assert!(!is_exempt(&m, &p), "{m} {p}");
         }
     }
 

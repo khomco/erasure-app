@@ -1,0 +1,34 @@
+{
+  "id": "__EVENT_ID__",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": 1731024060,
+  "data": {
+    "object": {
+      "id": "pi_test_1",
+      "object": "payment_intent",
+      "amount": __AMOUNT__,
+      "amount_received": __AMOUNT__,
+      "capture_method": "automatic",
+      "created": 1731024050,
+      "currency": "__CURRENCY__",
+      "customer": "cus_test_1",
+      "description": null,
+      "latest_charge": "ch_test_1",
+      "livemode": false,
+      "metadata": {},
+      "payment_method": "pm_test_1",
+      "payment_method_types": [
+        "card"
+      ],
+      "status": "succeeded"
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "payment_intent.succeeded"
+}

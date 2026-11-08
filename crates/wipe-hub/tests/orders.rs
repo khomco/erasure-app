@@ -9,14 +9,15 @@ mod support;
 use reqwest::{Response, StatusCode};
 use serde_json::{json, Value};
 use support::hub::{assert_error, bootstrap_admin, spawn_hub, spawn_hub_args, Hub, Who};
+use support::stripe_mock::{spawn_stripe_hub, StripeMock};
 use uuid::Uuid;
 use wipe_hub::order_routes::{
     MSG_CHECKOUT_ENDED, MSG_NOT_FOR_SALE, MSG_NO_CHECKOUT, MSG_NO_ORDER, MSG_OWNER_ONLY_BILLING,
-    MSG_OWNER_ONLY_BUY, MSG_UNVERIFIED_BUYER,
+    MSG_OWNER_ONLY_BUY, MSG_PROVIDER_FAILED, MSG_UNVERIFIED_BUYER,
 };
+use wipe_hub::orders::ApplyOutcome;
 use wipe_hub::payments::{
-    Fake, PaymentProvider as _, FAKE_CHECKOUT_COMPLETED, FAKE_CHECKOUT_EXPIRED,
-    MSG_FAKE_LOCAL_ONLY, MSG_PAYMENTS_UNAVAILABLE,
+    Fake, PaymentProvider as _, FAKE_CHECKOUT_COMPLETED, FAKE_CHECKOUT_EXPIRED, MSG_FAKE_LOCAL_ONLY,
 };
 
 const NOT_SIGNED_IN: &str = "not signed in";
@@ -312,32 +313,20 @@ async fn refused_checkouts_write_nothing() {
 }
 
 #[tokio::test]
-async fn an_unavailable_provider_answers_503_and_writes_nothing() {
-    // Stripe is configured but not built yet (story 3).
-    let hub = spawn_hub_args(|a| {
-        a.payment_provider = wipe_hub::PaymentProvider::Stripe;
-        a.stripe_webhook_secret = Some("whsec_test".into());
-    })
-    .await;
-    let f = fixture_on(hub).await;
+async fn a_failing_provider_answers_502_and_writes_nothing() {
+    // Stripe, pointed at a local mock that answers 500 (story 3).
+    let mock = StripeMock::start().await;
+    let f = fixture_on(spawn_stripe_hub(&mock).await).await;
     let offering = f.hub.published_offering("Station").await;
     let before = f.audit_count().await;
+    mock.reply_next(500, json!({"error": {"type": "api_error"}}));
     assert_error(
         f.checkout(&f.owner, &offering).await,
-        StatusCode::SERVICE_UNAVAILABLE,
-        MSG_PAYMENTS_UNAVAILABLE,
+        StatusCode::BAD_GATEWAY,
+        MSG_PROVIDER_FAILED,
     )
     .await;
-    let resp = f
-        .hub
-        .post_empty("/api/billing/portal", Some(&f.owner.cookie))
-        .await;
-    assert_error(
-        resp,
-        StatusCode::SERVICE_UNAVAILABLE,
-        MSG_PAYMENTS_UNAVAILABLE,
-    )
-    .await;
+    assert_eq!(mock.requests().len(), 1);
     // The Fake page does not exist under another provider.
     for (method, path) in [
         ("GET", "/api/payments/fake/sessions/fake_cs_x"),
@@ -554,6 +543,23 @@ async fn paying_marks_the_order_paid_through_a_verified_event() {
         .as_str()
         .unwrap()
         .starts_with("fake_evt_"));
+    // The event went through the event store (story 3).
+    let stored: (String, String, String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT provider, event_id, event_type, session_id, outcome FROM payment_events",
+    )
+    .fetch_one(&f.hub.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        (
+            "fake".into(),
+            detail["event_id"].as_str().unwrap().to_string(),
+            FAKE_CHECKOUT_COMPLETED.into(),
+            Some(session.clone()),
+            Some("applied".into())
+        )
+    );
 
     // Owner and member both see it paid.
     for who in [&f.owner, &f.member] {
@@ -782,24 +788,28 @@ async fn events_that_do_not_apply_change_and_audit_nothing() {
     };
     let before = f.audit_count().await;
     let mut conn = f.hub.db.pool.acquire().await.unwrap();
-    let none = wipe_hub::payments::apply_event(
+    let unmatched = wipe_hub::payments::apply_event(
         &mut conn,
         &verified(FAKE_CHECKOUT_COMPLETED, "fake_cs_unknown"),
     )
     .await
     .unwrap();
-    assert!(none.is_none());
-    assert!(wipe_hub::payments::apply_event(&mut conn, &ignored)
-        .await
-        .unwrap()
-        .is_none());
+    assert_eq!(unmatched, ApplyOutcome::Unmatched);
+    assert_eq!(
+        wipe_hub::payments::apply_event(&mut conn, &ignored)
+            .await
+            .unwrap(),
+        ApplyOutcome::Ignored
+    );
     assert_eq!(f.audit_count().await, before);
 
-    let paid =
+    let ApplyOutcome::Applied(paid) =
         wipe_hub::payments::apply_event(&mut conn, &verified(FAKE_CHECKOUT_COMPLETED, &session))
             .await
             .unwrap()
-            .unwrap();
+    else {
+        panic!("not applied");
+    };
     assert_eq!(paid.status, "paid");
     assert_eq!(paid.id.to_string(), order["id"].as_str().unwrap());
     let after_pay = f.audit_count().await;
@@ -807,11 +817,14 @@ async fn events_that_do_not_apply_change_and_audit_nothing() {
     for kind in [FAKE_CHECKOUT_COMPLETED, FAKE_CHECKOUT_EXPIRED] {
         let again = wipe_hub::payments::apply_event(&mut conn, &verified(kind, &session))
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(again, paid);
+        assert_eq!(again, ApplyOutcome::Unchanged(paid.clone()));
     }
     assert_eq!(f.audit_count().await, after_pay);
+    // Applying directly stores no event (only `payment_events::receive`
+    // does) and, for Fake, no billing customer.
+    assert_eq!(f.hub.count("payment_events").await, 0);
+    assert_eq!(f.hub.count("billing_customers").await, 0);
 }
 
 /// The only write of `orders.status` is `orders::apply_event`.
@@ -838,6 +851,47 @@ fn only_apply_event_updates_an_orders_status() {
     let at = source.find("UPDATE orders SET status").unwrap();
     let apply = source.find("pub async fn apply_event").unwrap();
     assert!(at > apply, "the UPDATE is not inside apply_event");
+    // The next function after apply_event starts after the UPDATE.
+    let next_fn = source[apply + 1..]
+        .find("\nfn ")
+        .into_iter()
+        .chain(source[apply + 1..].find("\npub fn "))
+        .chain(source[apply + 1..].find("\nasync fn "))
+        .chain(source[apply + 1..].find("\npub async fn "))
+        .min()
+        .map_or(source.len(), |i| apply + 1 + i);
+    assert!(at < next_fn, "the UPDATE is not inside apply_event");
+}
+
+/// `apply_event` is called only from `payment_events::receive`, so every
+/// applied event is stored first.
+#[test]
+fn only_payment_events_receive_calls_apply_event() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let mut calls = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let source = std::fs::read_to_string(&path).unwrap();
+        for (i, line) in source.lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with("//") || code.contains("fn apply_event(") {
+                continue;
+            }
+            if code.contains("apply_event(") {
+                calls.push(format!(
+                    "{}:{}",
+                    path.file_name().unwrap().to_string_lossy(),
+                    i + 1
+                ));
+            }
+        }
+    }
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].starts_with("payment_events.rs:"), "{calls:?}");
+    let source = std::fs::read_to_string(format!("{dir}/payment_events.rs")).unwrap();
+    let receive = source.find("pub async fn receive").unwrap();
+    let call = source.find("apply_event(&mut").unwrap();
+    assert!(call > receive, "apply_event is not called inside receive");
 }
 
 // ---------------------------------------------------------------------------

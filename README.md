@@ -45,7 +45,7 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
 | `wipe-fleet` | mDNS service advertise / browse + deterministic lead election |
 | `wipe-server` | Axum REST API + WebSocket event stream; auto-signs certs when a Job reaches `Erased` or `PendingCoSign`; destruction-manifest assembly and co-sign |
 | `wipe-cli` | `wipestation serve / inspect / verify-cert` binary |
-| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, profile and password change, organization rename and team management (owners invite by emailed single-use link, change roles between `owner` and `member`, and remove members; an organization always keeps an owner), a per-address and per-IP limit on every email it sends (5 per address, 20 per IP per hour; invitations also 20 per organization per hour), every auth event audited, and `wipe-hub admin create --email <address>`, which creates a vendor admin in the one vendor organization and emails them a set-password link (never a password on the command line), for an admin area under `/api/admin/*` (search customer organizations and users, view one organization, and list, view, set the status of, annotate, export as CSV and erase sales leads, and create, edit, publish and retire offerings (price in integer minor units, one-off or annual, and grants: licence scope, seats, erasure quota, `wipe_license::Feature` entitlements, term), whose price and grants freeze once published; vendor admins with a verified email only, and every search, view, export and change audited, with ids only and never a sales lead's personal data), and sales leads from the marketing site's forms (`POST /api/leads` behind credentialed CORS for the one `--site-origin` and the usual CSRF token, with a per-IP limit of 10 an hour, a honeypot, one lead per address, the exact consent text stored with every submission, a confirmation email whose link unsubscribes via the portal's `/unsubscribe` page, and lead audit rows that hold no personal data). `tests/isolation.rs` checks that one organization's owner and member never see or change another organization's records through any customer route, and fails when a new `/api` route is left unclassified. Customers buy through a `PaymentProvider` seam (`--payment-provider fake|stripe`): a signed-in catalog of published offerings (`GET /api/offerings`), checkout by an organization owner with a verified email (`POST /api/checkout`, creating a `pending` order that snapshots the offering's terms), orders for every role (`GET /api/orders[/{id}]`) and billing for owners (`POST /api/billing/portal`); an order becomes `paid` or `expired` only by applying a provider event whose signature the provider verified, and every order state change is audited. The `fake` provider (the default) works only on a local `--public-base-url` and drives the portal's test checkout page; `stripe` starts but answers 503 until it is built. Webhooks, fulfilment and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
+| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, profile and password change, organization rename and team management (owners invite by emailed single-use link, change roles between `owner` and `member`, and remove members; an organization always keeps an owner), a per-address and per-IP limit on every email it sends (5 per address, 20 per IP per hour; invitations also 20 per organization per hour), every auth event audited, and `wipe-hub admin create --email <address>`, which creates a vendor admin in the one vendor organization and emails them a set-password link (never a password on the command line), for an admin area under `/api/admin/*` (search customer organizations and users, view one organization, and list, view, set the status of, annotate, export as CSV and erase sales leads, and create, edit, publish and retire offerings (price in integer minor units, one-off or annual, and grants: licence scope, seats, erasure quota, `wipe_license::Feature` entitlements, term), whose price and grants freeze once published; vendor admins with a verified email only, and every search, view, export and change audited, with ids only and never a sales lead's personal data), and sales leads from the marketing site's forms (`POST /api/leads` behind credentialed CORS for the one `--site-origin` and the usual CSRF token, with a per-IP limit of 10 an hour, a honeypot, one lead per address, the exact consent text stored with every submission, a confirmation email whose link unsubscribes via the portal's `/unsubscribe` page, and lead audit rows that hold no personal data). `tests/isolation.rs` checks that one organization's owner and member never see or change another organization's records through any customer route, and fails when a new `/api` route is left unclassified. Customers buy through a `PaymentProvider` seam (`--payment-provider fake|stripe`): a signed-in catalog of published offerings (`GET /api/offerings`), checkout by an organization owner with a verified email (`POST /api/checkout`, creating a `pending` order that snapshots the offering's terms), orders for every role (`GET /api/orders[/{id}]`) and billing for owners (`POST /api/billing/portal`); an order becomes `paid` or `expired` only by applying a provider event whose signature the provider verified, and every order state change is audited. The `fake` provider (the default) works only on a local `--public-base-url` and drives the portal's test checkout page; `stripe` (which needs `WIPE_HUB_STRIPE_SECRET_KEY` and `WIPE_HUB_STRIPE_WEBHOOK_SECRET`) creates Stripe Checkout Sessions (a single payment; no email or other personal data sent) and opens the Stripe billing portal once the organization's first payment has told the hub its billing customer (its Stripe customer; 409 before that). Provider events arrive at `POST /api/payments/webhook` (no CSRF token: the `Stripe-Signature`, or Fake's signature on a local hub, is the credential); each is stored once by provider and event id in an append-only `payment_events` table (metadata and the payload's SHA-256 only, never the payload) and applied in the same transaction, so a replayed event changes nothing, and a paid event that disagrees with its order's price, currency or order id leaves the order pending. See [Stripe test mode](#stripe-test-mode). Fulfilment and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
 | `apps/desktop` | Vite + React + TanStack Router + Tailwind frontend, plus Tauri 2 shell |
 | `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in, email-verification, sign-in-link (magic link), password-reset, accept-invitation and sales-lead unsubscribe (`/unsubscribe`, acting only on a button press) pages, an account page (name, password change), an organization page (rename, members, invitations, roles and removal for owners), an admin area for vendor admins (`/admin`: organization and user search, run only on submit since each is audited; `/admin/organizations/$id`: one organization and its users; `/admin/leads`: sales leads filtered by segment, status and submission date, with CSV export; `/admin/leads/$id`: one sales lead's submissions and consent text, status, notes and erasure; `/admin/offerings`: every offering and a new-draft form; `/admin/offerings/$id`: edit, publish and retire one offering), buying (`/buy`, the offerings for sale with a Buy button for verified owners; `/orders` with Billing for owners; `/orders/$id`, re-read every 3 s while pending; the test provider's `/checkout/fake`, labelled "Test payment: no money moves", and `/billing/fake`), and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere, and a link to the admin area for vendor admins); its API client sends the hub's CSRF token on every POST |
 | `sites/www` | Static Astro + Tailwind marketing site (pre-launch): landing, product, standards, segment (ITAD, enterprise IT, government), pricing, contact, privacy and terms pages, `/capabilities`, and early-access/contact forms that stay closed (no script, disabled button) unless the build is given `PUBLIC_HUB_ORIGIN`, when a small script posts them to the hub's `POST /api/leads` (`astro build` refuses that while the privacy notice is a placeholder); a build-time check fails `astro build` on any capability overclaim, missing meta/OG tag, missing sitemap, or resource loaded from another origin (ADR-0006 §2). See [`sites/www/README.md`](sites/www/README.md) |
@@ -80,6 +80,71 @@ pnpm install && pnpm --filter www build && pnpm --filter www test
 # Run the two-station demo end-to-end (mDNS discovery + erase + cert verify):
 ./scripts/demo.sh
 ```
+
+
+## Stripe test mode
+
+Nothing in the repo needs a Stripe account: every automated test runs the hub
+against a local mock of the Stripe API (`crates/wipe-hub/tests/support/stripe_mock.rs`)
+and Stripe-shaped event fixtures signed in the test. To try real Stripe test
+mode locally (optional):
+
+```bash
+# Test-mode keys only (sk_test_… from the Stripe Dashboard). Keep them in your
+# shell or an untracked env file, never in the repo.
+export WIPE_HUB_PAYMENT_PROVIDER=stripe
+export WIPE_HUB_STRIPE_SECRET_KEY=sk_test_...
+
+# The webhook signing secret of `stripe listen` (whsec_…), not a Dashboard
+# endpoint's, is the one the hub must verify with. It stays the same for your
+# account, so it can be captured before forwarding starts:
+export WIPE_HUB_STRIPE_WEBHOOK_SECRET=$(stripe listen --print-secret)
+
+cargo run -p wipe-hub -- serve
+```
+
+`stripe listen` stays in the foreground, so forward events from a second
+terminal:
+
+```bash
+stripe listen --forward-to localhost:7900/api/payments/webhook
+```
+
+Buy an offering from the portal's `/buy` as a verified owner, pay on Stripe's
+page with a test card (`4242 4242 4242 4242`), and the order turns `paid` when
+`checkout.session.completed` arrives, not when the browser returns.
+`--stripe-api-base` / `WIPE_HUB_STRIPE_API_BASE` (default
+`https://api.stripe.com`) accepts only https, or http on a local host.
+
+Several hubs (for example local development and staging) may share one Stripe
+test account: each checkout carries `metadata[wipehub_hub]`, the creating hub's
+`--public-base-url` origin, and a hub treats an event from another hub's
+checkout as not its own (stored as `unmatched` and acknowledged). Give each hub
+a distinct public origin.
+
+**Production webhook.** In the Stripe Dashboard, register
+`https://<hub>/api/payments/webhook` as an endpoint, enable only the four
+events the hub reads (`checkout.session.completed`,
+`checkout.session.async_payment_succeeded`,
+`checkout.session.async_payment_failed`, `checkout.session.expired`), set the
+endpoint's API version to `2024-06-20` (the version the hub pins and parses),
+and give the hub that endpoint's own `whsec_…` signing secret as
+`WIPE_HUB_STRIPE_WEBHOOK_SECRET`. Other event types are stored as `ignored` and
+acknowledged. Live keys (`sk_live_…`) should wait for the open sales-tax/VAT
+decision (`.scratch/DECISIONS.md` D14, ADR-0007 "Not decided here").
+
+**Billing portal.** Save the billing portal's default configuration in the
+Stripe Dashboard (Settings → Billing → Customer portal), once in test mode and
+once in live mode, before anyone presses Billing: until then Stripe refuses
+`POST /v1/billing_portal/sessions` and Billing answers 502.
+
+The fixtures in `crates/wipe-hub/tests/fixtures/stripe/` are hand-built from
+Stripe's documented event shapes (API version `2024-06-20`) with `__EVENT_ID__`,
+`__SESSION_ID__`, `__ORDER_ID__`, `__ORGANIZATION_ID__`, `__HUB__`, `__AMOUNT__`
+and `__CURRENCY__` placeholders. To re-record one, run `stripe listen --print-json`
+while completing a test checkout (or `stripe trigger checkout.session.completed`),
+copy the event, and replace those values with the placeholders. Remove anything
+else that identifies a real account.
 
 ## Operating modes (one binary, one origin)
 

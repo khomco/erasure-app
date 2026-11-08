@@ -1,0 +1,89 @@
+{
+  "id": "__EVENT_ID__",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": 1731024060,
+  "data": {
+    "object": {
+      "id": "__SESSION_ID__",
+      "object": "checkout.session",
+      "after_expiration": null,
+      "allow_promotion_codes": null,
+      "amount_subtotal": __AMOUNT__,
+      "amount_total": __AMOUNT__,
+      "automatic_tax": {
+        "enabled": false,
+        "liability": null,
+        "status": null
+      },
+      "billing_address_collection": null,
+      "cancel_url": "http://127.0.0.1:7900/orders/__ORDER_ID__",
+      "client_reference_id": "__ORDER_ID__",
+      "consent": null,
+      "created": 1731024000,
+      "currency": "__CURRENCY__",
+      "customer": "cus_test_1",
+      "customer_creation": "always",
+      "customer_details": {
+        "address": {
+          "city": "Springfield",
+          "country": "US",
+          "line1": "1 Example Street",
+          "line2": null,
+          "postal_code": "00000",
+          "state": "IL"
+        },
+        "email": "buyer@example.com",
+        "name": "Test Buyer",
+        "phone": null,
+        "tax_exempt": "none",
+        "tax_ids": []
+      },
+      "customer_email": null,
+      "expires_at": 1731110400,
+      "invoice": null,
+      "invoice_creation": {
+        "enabled": false,
+        "invoice_data": {
+          "account_tax_ids": null,
+          "custom_fields": null,
+          "description": null,
+          "footer": null,
+          "issuer": null,
+          "metadata": {},
+          "rendering_options": null
+        }
+      },
+      "livemode": false,
+      "locale": null,
+      "metadata": {
+        "wipehub_hub": "__HUB__",
+        "wipehub_order_id": "__ORDER_ID__",
+        "wipehub_organization_id": "__ORGANIZATION_ID__"
+      },
+      "mode": "payment",
+      "payment_intent": "pi_test_1",
+      "payment_method_types": [
+        "card",
+        "us_bank_account"
+      ],
+      "payment_status": "unpaid",
+      "status": "complete",
+      "success_url": "http://127.0.0.1:7900/orders/__ORDER_ID__",
+      "total_details": {
+        "amount_discount": 0,
+        "amount_shipping": 0,
+        "amount_tax": 0
+      },
+      "ui_mode": "hosted",
+      "url": null
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "checkout.session.completed"
+}

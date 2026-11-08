@@ -39,6 +39,8 @@ hex = { workspace = true }
 hmac = "0.12"
 base64 = { workspace = true }
 uuid = { workspace = true }
+# The Stripe provider's API calls (offerings-and-payments story 3).
+reqwest = { workspace = true }
 # argon2 0.6 needs a newer Rust than the 1.80 MSRV.
 argon2 = "0.5"
 # 0.11.19 is the last lettre release with rust-version <= 1.80. Plain SMTP
@@ -46,7 +48,6 @@ argon2 = "0.5"
 lettre = { version = "=0.11.19", default-features = false, features = ["builder", "smtp-transport", "tokio1", "hostname"] }
 
 [dev-dependencies]
-reqwest = { workspace = true }
 tempfile = { workspace = true }
 # In-process requests with a chosen peer address (IPv6 throttle test).
 tower = { workspace = true }

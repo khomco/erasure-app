@@ -1,5 +1,5 @@
-//! Customer catalog, checkout, orders and billing routes
-//! (offerings-and-payments story 2, CAP-2 and CAP-5):
+//! Customer catalog, checkout, orders, billing and payment-event routes
+//! (offerings-and-payments stories 2 and 3, CAP-2, CAP-3 and CAP-5):
 //!
 //! - `GET /api/offerings` — any signed-in user: published offerings.
 //! - `POST /api/checkout {offering_id}` — a verified owner starts a
@@ -7,12 +7,20 @@
 //! - `GET /api/orders`, `GET /api/orders/:id` — any role: the
 //!   organization's orders, newest first, or one.
 //! - `POST /api/billing/portal` — an owner: `{url}` of the provider's
-//!   billing page.
+//!   billing page for the organization's stored customer; 409
+//!   [`MSG_NO_BILLING_ACCOUNT`] before the first Stripe payment.
+//! - `POST /api/payments/webhook` — the provider's events. No session and
+//!   no CSRF token (the one route [`crate::csrf::require`] exempts): the
+//!   configured provider's signature over the raw body is the credential.
+//!   The event goes through [`payment_events::receive`] in one transaction
+//!   and the answer is 200 `{"received":true}`, or 503
+//!   [`MSG_EVENT_NOT_READY`] (rolled back, so the provider retries) for a
+//!   paid event whose order is not committed yet.
 //! - The Fake provider's hosted-page stand-in, owners only, 404 under any
 //!   other provider: `GET /api/payments/fake/sessions/:id` reads the
 //!   checkout's order; `POST …/:id/pay` and `POST …/:id/abandon` sign a
 //!   `checkout.completed` / `checkout.expired` event, run it through
-//!   `verify_event` and [`orders::apply_event`] in one transaction, and
+//!   `verify_event` and [`payment_events::receive`] in one transaction, and
 //!   answer the order. Pay and abandon refuse a hub whose public base URL is
 //!   not local (503).
 //!
@@ -20,10 +28,11 @@
 //! organization's order or session id is a 404 like an unknown one, and
 //! changes and audits nothing. Owner and verified-email checks run before
 //! the body is read. Nothing here marks an order paid except through
-//! `verify_event` → `apply_event`. Error bodies are `{"error": "<message>"}`.
+//! `verify_event` → `receive` → `apply_event`. Error bodies are `{"error": "<message>"}`.
 
+use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -33,7 +42,8 @@ use uuid::Uuid;
 
 use crate::accounts::{self, Role};
 use crate::auth::{is_local_host, ApiError, CurrentUser, JsonBody, MSG_NOT_SIGNED_IN};
-use crate::orders::{self, ApplyError, OrderError};
+use crate::orders::{self, ApplyError, ApplyOutcome, OrderError};
+use crate::payment_events::{self, Receipt};
 use crate::payments::{
     Fake, ProviderError, FAKE_CHECKOUT_COMPLETED, FAKE_CHECKOUT_EXPIRED, MSG_FAKE_LOCAL_ONLY,
 };
@@ -47,6 +57,11 @@ pub const MSG_NO_ORDER: &str = "no such order";
 pub const MSG_NO_CHECKOUT: &str = "no such checkout";
 pub const MSG_CHECKOUT_ENDED: &str = "this checkout has already ended";
 pub const MSG_PROVIDER_FAILED: &str = "the payment provider could not be reached; try again later";
+pub const MSG_NO_BILLING_ACCOUNT: &str = "billing opens after your first payment";
+pub const MSG_EVENT_NOT_READY: &str = "this payment event cannot be applied yet; retry later";
+
+/// The provider webhook: the one mutating `/api` route without a CSRF token.
+pub const PAYMENT_WEBHOOK_PATH: &str = "/api/payments/webhook";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -55,6 +70,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/orders", get(list_orders))
         .route("/api/orders/:id", get(order_detail))
         .route("/api/billing/portal", post(billing_portal))
+        .route(PAYMENT_WEBHOOK_PATH, post(webhook))
         .route("/api/payments/fake/sessions/:id", get(fake_session))
         .route("/api/payments/fake/sessions/:id/pay", post(fake_pay))
         .route(
@@ -88,6 +104,9 @@ impl From<ProviderError> for ApiError {
             ProviderError::Rejected(message) => {
                 tracing::warn!(reason = message, "payment event rejected");
                 ApiError::new(StatusCode::BAD_REQUEST, message)
+            }
+            ProviderError::NoBillingAccount => {
+                ApiError::new(StatusCode::CONFLICT, MSG_NO_BILLING_ACCOUNT)
             }
             other => {
                 tracing::error!(error = %other, "payment provider request failed");
@@ -195,8 +214,61 @@ async fn billing_portal(
     user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_owner(&user, MSG_OWNER_ONLY_BILLING)?;
-    let url = state.payments.billing_portal(user.organization_id).await?;
+    let customer =
+        orders::billing_customer(&state.pool, user.organization_id, state.payments.name()).await?;
+    let url = state
+        .payments
+        .billing_portal(user.organization_id, customer.as_deref())
+        .await?;
     Ok(Json(json!({ "url": url.as_str() })))
+}
+
+// ---------------------------------------------------------------------------
+// Provider events
+
+/// `POST /api/payments/webhook`: verify the raw body with the configured
+/// provider (a bad signature is 400, a Fake event on a non-local hub 503),
+/// then store and apply it in one transaction.
+async fn webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let event = state.payments.verify_event(&headers, &body)?;
+    let mut tx = state.pool.begin().await?;
+    let receipt = payment_events::receive(&mut tx, &event, &body).await?;
+    if receipt == Receipt::NotReady {
+        tx.rollback().await?;
+        tracing::error!(
+            provider = event.provider(),
+            event_id = event.id(),
+            session_id = event.session_id().unwrap_or("-"),
+            order_ref = ?event.order_ref(),
+            "a paid payment event names a hub order that has no such checkout session yet; \
+             answering 503 so the provider retries"
+        );
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            MSG_EVENT_NOT_READY,
+        ));
+    }
+    tx.commit().await?;
+    match &receipt {
+        Receipt::Duplicate => tracing::info!(
+            provider = event.provider(),
+            event_id = event.id(),
+            "payment event already received"
+        ),
+        Receipt::Recorded(outcome) => tracing::info!(
+            provider = event.provider(),
+            event_id = event.id(),
+            event_type = event.event_type(),
+            outcome = outcome.as_str(),
+            "payment event received"
+        ),
+        Receipt::NotReady => {}
+    }
+    Ok(Json(json!({ "received": true })))
 }
 
 // ---------------------------------------------------------------------------
@@ -225,8 +297,9 @@ async fn fake_session(
 }
 
 /// Sign a Fake `event_type` event for the organization's pending checkout
-/// `session_id`, verify it through the provider and apply it, all in one
-/// transaction holding the order's row lock.
+/// `session_id`, verify it through the provider, and store and apply it
+/// through [`payment_events::receive`], all in one transaction holding the
+/// order's row lock.
 async fn fake_finish(
     state: &AppState,
     user: &CurrentUser,
@@ -251,9 +324,18 @@ async fn fake_finish(
     let event = state
         .payments
         .verify_event(&Fake::signature_headers(&signature), &body)?;
-    let order = orders::apply_event(&mut tx, &event)
-        .await?
-        .ok_or_else(|| ApiError::internal("a locked pending order vanished"))?;
+    let order = match payment_events::receive(&mut tx, &event, &body).await? {
+        Receipt::Recorded(outcome) => match *outcome {
+            ApplyOutcome::Applied(order) => Ok(order),
+            other => Err(format!("{other:?}")),
+        },
+        other => Err(format!("{other:?}")),
+    }
+    .map_err(|got| {
+        ApiError::internal(format!(
+            "a fresh Fake event on a locked pending order was not applied: {got}"
+        ))
+    })?;
     tx.commit().await?;
     Ok(Json(json!({ "order": order })))
 }

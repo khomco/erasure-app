@@ -33,13 +33,20 @@ pub const PORTAL_BUILD_HINT: &str = "cd apps/portal && pnpm build";
 
 /// Env var that carries the Stripe webhook signing secret.
 pub const STRIPE_WEBHOOK_SECRET_ENV: &str = "WIPE_HUB_STRIPE_WEBHOOK_SECRET";
+/// Env var that carries the Stripe secret API key.
+pub const STRIPE_SECRET_KEY_ENV: &str = "WIPE_HUB_STRIPE_SECRET_KEY";
+/// Env var that overrides the Stripe API base URL (tests point it at a mock).
+pub const STRIPE_API_BASE_ENV: &str = "WIPE_HUB_STRIPE_API_BASE";
+/// The Stripe API.
+pub const DEFAULT_STRIPE_API_BASE: &str = "https://api.stripe.com";
 
 /// Which `PaymentProvider` implementation the hub uses (ADR-0007 §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum PaymentProvider {
     /// Deterministic, in-process; used by every automated test.
     Fake,
-    /// Stripe Checkout and webhooks; requires a webhook secret.
+    /// Stripe Checkout and webhooks; requires a secret key and a webhook
+    /// secret.
     Stripe,
 }
 
@@ -76,6 +83,13 @@ pub struct Args {
     /// Stripe webhook signing secret; required with `--payment-provider stripe`.
     #[arg(long, env = STRIPE_WEBHOOK_SECRET_ENV, hide_env_values = true)]
     pub stripe_webhook_secret: Option<String>,
+    /// Stripe secret API key (`sk_…` or a restricted `rk_…`); required with
+    /// `--payment-provider stripe`.
+    #[arg(long, env = STRIPE_SECRET_KEY_ENV, hide_env_values = true)]
+    pub stripe_secret_key: Option<String>,
+    /// Stripe API base URL: https, or http on a local host only.
+    #[arg(long, env = STRIPE_API_BASE_ENV, default_value = DEFAULT_STRIPE_API_BASE)]
+    pub stripe_api_base: String,
     /// Path to a 32-byte vendor root seed. Absent: licence issuance is unavailable.
     #[arg(long, env = "WIPE_HUB_VENDOR_ROOT_SEED")]
     pub vendor_root_seed: Option<PathBuf>,
@@ -150,6 +164,9 @@ pub struct Config {
     pub public_base_url: Url,
     pub payment_provider: PaymentProvider,
     pub stripe_webhook_secret: Option<String>,
+    pub stripe_secret_key: Option<String>,
+    /// Where the Stripe provider sends its API calls.
+    pub stripe_api_base: Url,
     /// `None` means licence issuance is unavailable.
     pub vendor_root: Option<FileVendorRoot>,
     /// Built portal to serve at `/`. `None` means the portal is not served.
@@ -166,6 +183,15 @@ pub enum ConfigError {
          or pass --stripe-webhook-secret"
     )]
     MissingStripeWebhookSecret,
+    #[error(
+        "--payment-provider stripe needs a secret API key: set {STRIPE_SECRET_KEY_ENV} \
+         or pass --stripe-secret-key"
+    )]
+    MissingStripeSecretKey,
+    #[error(
+        "--stripe-api-base {value:?} must be an https URL (or http on a local host): {reason}"
+    )]
+    BadStripeApiBase { value: String, reason: String },
     #[error("--public-base-url {value:?} is not an absolute http(s) URL: {reason}")]
     BadPublicBaseUrl { value: String, reason: String },
     #[error("--mail-from {value:?} is not a mailbox (`Name <address>` or `address`): {reason}")]
@@ -193,13 +219,18 @@ impl Config {
         let mail_from = parse_mail_from(&args.mail_from)?;
         let site_origin = parse_site_origin(&args.site_origin)?;
 
-        let stripe_webhook_secret = args
-            .stripe_webhook_secret
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        if args.payment_provider == PaymentProvider::Stripe && stripe_webhook_secret.is_none() {
-            return Err(ConfigError::MissingStripeWebhookSecret);
+        let secret = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let stripe_webhook_secret = secret(args.stripe_webhook_secret);
+        let stripe_secret_key = secret(args.stripe_secret_key);
+        if args.payment_provider == PaymentProvider::Stripe {
+            if stripe_webhook_secret.is_none() {
+                return Err(ConfigError::MissingStripeWebhookSecret);
+            }
+            if stripe_secret_key.is_none() {
+                return Err(ConfigError::MissingStripeSecretKey);
+            }
         }
+        let stripe_api_base = parse_stripe_api_base(&args.stripe_api_base)?;
 
         // A path that is given but invalid is an error: a typo must never
         // silently disable signing.
@@ -226,6 +257,8 @@ impl Config {
             public_base_url,
             payment_provider: args.payment_provider,
             stripe_webhook_secret,
+            stripe_secret_key,
+            stripe_api_base,
             vendor_root,
             portal_dir,
             site_origin,
@@ -255,7 +288,7 @@ pub fn resolve_portal_dir(
     }
 }
 
-// Hand-written so secrets (webhook secret, DB password, root seed) never
+// Hand-written so secrets (Stripe key, webhook secret, DB password, root seed) never
 // reach a log line through `{:?}`.
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -271,6 +304,11 @@ impl fmt::Debug for Config {
                 "stripe_webhook_secret",
                 &self.stripe_webhook_secret.as_ref().map(|_| "<redacted>"),
             )
+            .field(
+                "stripe_secret_key",
+                &self.stripe_secret_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("stripe_api_base", &self.stripe_api_base.as_str())
             .field(
                 "vendor_root",
                 &self
@@ -354,6 +392,33 @@ pub fn parse_base_url(value: &str) -> Result<Url, ConfigError> {
     Ok(url)
 }
 
+/// `--stripe-api-base`: https, or http only on a local host (so a typo can
+/// never send the secret key over plain http), with a host and no user
+/// name, password, query or fragment.
+pub fn parse_stripe_api_base(value: &str) -> Result<Url, ConfigError> {
+    let bad = |reason: &str| ConfigError::BadStripeApiBase {
+        value: value.to_string(),
+        reason: reason.to_string(),
+    };
+    let url = Url::parse(value.trim()).map_err(|e| bad(&e.to_string()))?;
+    if url.host_str().map_or(true, str::is_empty) {
+        return Err(bad("there is no host"));
+    }
+    match url.scheme() {
+        "https" => {}
+        "http" if crate::auth::is_local_host(&url) => {}
+        "http" => return Err(bad("plain http is allowed only on a local host")),
+        _ => return Err(bad("the scheme must be https")),
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(bad("it must not carry a user name or password"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(bad("it must not have a query or fragment"));
+    }
+    Ok(url)
+}
+
 /// `--site-origin` as the string a browser sends in `Origin`: an http(s) URL
 /// with a host and nothing after it but an optional `/` (no other path, no
 /// query, fragment or userinfo). The default port is dropped and the host
@@ -415,6 +480,8 @@ mod tests {
             public_base_url: DEFAULT_PUBLIC_BASE_URL.into(),
             payment_provider: PaymentProvider::Fake,
             stripe_webhook_secret: None,
+            stripe_secret_key: None,
+            stripe_api_base: DEFAULT_STRIPE_API_BASE.into(),
             vendor_root_seed: None,
             portal_dir: None,
             site_origin: DEFAULT_SITE_ORIGIN.into(),
@@ -441,14 +508,85 @@ mod tests {
     }
 
     #[test]
-    fn stripe_with_secret_starts() {
+    fn stripe_without_secret_key_names_the_env_var() {
+        for key in [None, Some(String::new()), Some(" \n".into())] {
+            let mut a = args();
+            a.payment_provider = PaymentProvider::Stripe;
+            a.stripe_webhook_secret = Some("whsec_test".into());
+            a.stripe_secret_key = key;
+            let err = Config::from_args(a).unwrap_err();
+            assert!(matches!(err, ConfigError::MissingStripeSecretKey), "{err}");
+            assert!(err.to_string().contains(STRIPE_SECRET_KEY_ENV), "{err}");
+        }
+    }
+
+    #[test]
+    fn stripe_with_secrets_starts_and_redacts_them() {
         let mut a = args();
         a.payment_provider = PaymentProvider::Stripe;
         a.stripe_webhook_secret = Some(" whsec_test\n".into());
+        a.stripe_secret_key = Some(" sk_test_secret\n".into());
         let c = Config::from_args(a).unwrap();
         assert_eq!(c.payment_provider, PaymentProvider::Stripe);
         assert_eq!(c.stripe_webhook_secret.as_deref(), Some("whsec_test"));
-        assert!(!format!("{c:?}").contains("whsec_test"));
+        assert_eq!(c.stripe_secret_key.as_deref(), Some("sk_test_secret"));
+        assert_eq!(c.stripe_api_base.as_str(), "https://api.stripe.com/");
+        let debug = format!("{c:?}");
+        assert!(!debug.contains("whsec_test"), "{debug}");
+        assert!(!debug.contains("sk_test_secret"), "{debug}");
+        assert!(debug.contains("https://api.stripe.com"), "{debug}");
+    }
+
+    #[test]
+    fn stripe_secrets_hide_their_env_values() {
+        use clap::CommandFactory;
+        let cmd = Args::command();
+        for id in ["stripe_secret_key", "stripe_webhook_secret", "database_url"] {
+            let arg = cmd
+                .get_arguments()
+                .find(|a| a.get_id().as_str() == id)
+                .unwrap();
+            assert!(arg.is_hide_env_values_set(), "--{id}");
+        }
+    }
+
+    #[test]
+    fn stripe_api_base_must_be_https_or_local_http() {
+        for good in [
+            "https://api.stripe.com",
+            "https://stripe-proxy.example.com/base/",
+            "http://127.0.0.1:12111",
+            "http://localhost:12111",
+            "http://[::1]:12111",
+        ] {
+            let mut a = args();
+            a.stripe_api_base = good.into();
+            let c = Config::from_args(a).unwrap_or_else(|e| panic!("{good}: {e}"));
+            assert!(c
+                .stripe_api_base
+                .as_str()
+                .starts_with(good.trim_end_matches('/')));
+        }
+        for bad in [
+            "http://api.example.com",
+            "http://api.stripe.com",
+            "ftp://api.stripe.com",
+            "file:///tmp/stripe",
+            "api.stripe.com",
+            "",
+            "https://",
+            "https://user:pw@api.stripe.com",
+            "https://api.stripe.com/?x=1",
+        ] {
+            let mut a = args();
+            a.stripe_api_base = bad.into();
+            let err = Config::from_args(a).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::BadStripeApiBase { .. }),
+                "{bad}: {err}"
+            );
+            assert!(err.to_string().contains("--stripe-api-base"), "{err}");
+        }
     }
 
     #[test]
@@ -638,7 +776,7 @@ mod tests {
     fn clap_defaults_match_the_constants() {
         use clap::CommandFactory;
         let smtp_port = DEFAULT_SMTP_PORT.to_string();
-        let expected: [(&str, Option<&str>); 11] = [
+        let expected: [(&str, Option<&str>); 13] = [
             ("addr", Some(DEFAULT_ADDR)),
             ("database_url", Some(DEFAULT_DATABASE_URL)),
             ("smtp_host", Some(DEFAULT_SMTP_HOST)),
@@ -647,6 +785,8 @@ mod tests {
             ("public_base_url", Some(DEFAULT_PUBLIC_BASE_URL)),
             ("payment_provider", Some("fake")),
             ("stripe_webhook_secret", None),
+            ("stripe_secret_key", None),
+            ("stripe_api_base", Some(DEFAULT_STRIPE_API_BASE)),
             ("vendor_root_seed", None),
             ("portal_dir", None),
             ("site_origin", Some(DEFAULT_SITE_ORIGIN)),
@@ -791,6 +931,7 @@ mod tests {
             a.public_base_url = base.into();
             a.payment_provider = provider;
             a.stripe_webhook_secret = Some("whsec_test".into());
+            a.stripe_secret_key = Some("sk_test_x".into());
             let c = Config::from_args(a).unwrap();
             startup_warnings(&c)
                 .into_iter()

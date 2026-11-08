@@ -27,8 +27,9 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   `wipe-hub`'s compose-backed tests fail, never skip, when they are down.
 - Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and
   `curl 127.0.0.1:7900/api/health`. Flags have `WIPE_HUB_*` env twins whose defaults match the
-  compose file; `--payment-provider stripe` refuses to start without
-  `WIPE_HUB_STRIPE_WEBHOOK_SECRET`. `--site-origin` / `WIPE_HUB_SITE_ORIGIN` (default
+  compose file; `--payment-provider stripe` refuses to start without both
+  `WIPE_HUB_STRIPE_SECRET_KEY` and `WIPE_HUB_STRIPE_WEBHOOK_SECRET`, and `--stripe-api-base`
+  accepts only https or http on a local host (tests point it at a local mock). `--site-origin` / `WIPE_HUB_SITE_ORIGIN` (default
   `http://localhost:4321`) is the one origin sent CORS headers, on `GET /api/auth/csrf` and
   `POST /api/leads` only; anything but a bare http(s) origin refuses to start. No `sqlx::query!` macros: there is no build-time database.
 - Hub migrations are embedded (`sqlx::migrate!`) and applied by `wipe-hub serve` before it

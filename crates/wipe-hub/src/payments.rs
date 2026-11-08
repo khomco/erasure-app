@@ -1,9 +1,9 @@
-//! Payment providers (ADR-0007 §4; offerings-and-payments story 2).
+//! Payment providers (ADR-0007 §4; offerings-and-payments stories 2 and 3).
 //!
 //! [`PaymentProvider`] is the hub's one seam to a payment service: it starts
 //! a hosted checkout for an order, opens the provider's billing page for an
 //! organization, and verifies a signed provider event. Two implementations
-//! exist today:
+//! exist:
 //!
 //! - [`Fake`]: deterministic and in-process, for every automated test and
 //!   local development. Its "hosted page" is the portal's `/checkout/fake`
@@ -11,13 +11,13 @@
 //!   [`FAKE_WEBHOOK_SECRET`]. Because that secret is public, it refuses to
 //!   start a checkout, open billing or verify an event on a hub whose
 //!   `--public-base-url` is not a local host ([`MSG_FAKE_LOCAL_ONLY`]).
-//! - [`Unavailable`]: what `--payment-provider stripe` gets until Stripe is
-//!   built (story 3). It answers [`MSG_PAYMENTS_UNAVAILABLE`] and verifies
-//!   nothing.
+//! - [`crate::stripe::Stripe`]: Stripe Checkout, the Stripe billing portal
+//!   and `Stripe-Signature` verification.
 //!
 //! An order changes status only by [`apply_event`] applying a
-//! [`VerifiedEvent`], and only [`PaymentProvider::verify_event`] can make
-//! one: its fields are private and it has no public constructor.
+//! [`VerifiedEvent`], called only from [`crate::payment_events::receive`],
+//! and only [`PaymentProvider::verify_event`] can make a `VerifiedEvent`: its
+//! fields are private and it has no public constructor.
 
 use std::sync::Arc;
 
@@ -33,8 +33,6 @@ use crate::config::{self, Config};
 
 pub use crate::orders::apply_event;
 
-/// The answer of a provider that is not built yet (`stripe`, until story 3).
-pub const MSG_PAYMENTS_UNAVAILABLE: &str = "payments are not available on this hub yet";
 /// The Fake provider's answer on a hub whose public base URL is not local.
 pub const MSG_FAKE_LOCAL_ONLY: &str = "the fake payment provider works only on a local hub";
 
@@ -67,6 +65,8 @@ pub struct CheckoutOrder {
     pub currency: String,
     /// `one_off` or `annual`.
     pub interval: String,
+    /// The organization's stored customer at this provider, if any.
+    pub customer_id: Option<String>,
 }
 
 /// A started hosted checkout: the provider's session id and where to send
@@ -88,6 +88,9 @@ pub enum ProviderError {
     /// An event's signature or payload is not acceptable.
     #[error("payment event rejected: {0}")]
     Rejected(&'static str),
+    /// The organization has no customer at the provider yet (a 409).
+    #[error("the organization has no billing account at the provider yet")]
+    NoBillingAccount,
 }
 
 /// What a verified event says happened.
@@ -108,10 +111,62 @@ pub enum EventKind {
 pub struct VerifiedEvent {
     id: String,
     provider: &'static str,
+    event_type: String,
     kind: EventKind,
+    customer_id: Option<String>,
+    amount: Option<(i64, String)>,
+    order_ref: Option<Uuid>,
 }
 
+/// The longest event id, event type or session id the hub stores.
+pub const MAX_EVENT_FIELD: usize = 255;
+
 impl VerifiedEvent {
+    /// For provider implementations in this crate only: checks the fields
+    /// every stored event needs (a non-blank id and type, and a non-blank
+    /// session id, each at most [`MAX_EVENT_FIELD`] characters). A customer
+    /// id that does not fit is dropped.
+    pub(crate) fn new(
+        id: String,
+        provider: &'static str,
+        event_type: String,
+        kind: EventKind,
+        customer_id: Option<String>,
+        amount: Option<(i64, String)>,
+        order_ref: Option<Uuid>,
+    ) -> Result<Self, ProviderError> {
+        let fits = |s: &str| !s.trim().is_empty() && s.chars().count() <= MAX_EVENT_FIELD;
+        if !fits(&id) {
+            return Err(ProviderError::Rejected(
+                "the event id is missing or too long",
+            ));
+        }
+        if !fits(&event_type) {
+            return Err(ProviderError::Rejected(
+                "the event type is missing or too long",
+            ));
+        }
+        if let EventKind::CheckoutCompleted { session_id }
+        | EventKind::CheckoutExpired { session_id } = &kind
+        {
+            if !fits(session_id) {
+                return Err(ProviderError::Rejected(
+                    "the checkout session id is missing or too long",
+                ));
+            }
+        }
+        let customer_id = customer_id.filter(|c| fits(c));
+        Ok(Self {
+            id,
+            provider,
+            event_type,
+            kind,
+            customer_id,
+            amount,
+            order_ref,
+        })
+    }
+
     /// The provider's event id.
     pub fn id(&self) -> &str {
         &self.id
@@ -124,6 +179,38 @@ impl VerifiedEvent {
 
     pub fn kind(&self) -> &EventKind {
         &self.kind
+    }
+
+    /// The checkout session the event is about, if any.
+    pub fn session_id(&self) -> Option<&str> {
+        match &self.kind {
+            EventKind::CheckoutCompleted { session_id }
+            | EventKind::CheckoutExpired { session_id } => Some(session_id),
+            EventKind::Ignored { .. } => None,
+        }
+    }
+
+    /// The provider's own name for the event's type.
+    pub fn event_type(&self) -> &str {
+        &self.event_type
+    }
+
+    /// The buyer's customer id at the provider (Stripe's `cus_…`), if sent.
+    pub fn customer_id(&self) -> Option<&str> {
+        self.customer_id.as_deref()
+    }
+
+    /// The amount paid before discounts and tax, in minor units, with the
+    /// upper-case currency, if sent.
+    pub fn amount(&self) -> Option<(i64, &str)> {
+        self.amount.as_ref().map(|(m, c)| (*m, c.as_str()))
+    }
+
+    /// The hub order the provider says this is for: Stripe's
+    /// `metadata[wipehub_order_id]`, and only when the session's
+    /// `metadata[wipehub_hub]` is this hub's origin (decisions 9 and 11).
+    pub fn order_ref(&self) -> Option<Uuid> {
+        self.order_ref
     }
 }
 
@@ -139,8 +226,13 @@ pub trait PaymentProvider: Send + Sync {
         order: &CheckoutOrder,
     ) -> Result<CheckoutSession, ProviderError>;
 
-    /// The provider's billing page (cards, invoices) for the organization.
-    async fn billing_portal(&self, organization_id: Uuid) -> Result<Url, ProviderError>;
+    /// The provider's billing page (cards and payment history) for the organization,
+    /// whose stored customer at this provider is `customer_id`.
+    async fn billing_portal(
+        &self,
+        organization_id: Uuid,
+        customer_id: Option<&str>,
+    ) -> Result<Url, ProviderError>;
 
     /// Verify a signed event's headers and raw body. Anything not signed by
     /// the provider is an error.
@@ -161,15 +253,28 @@ impl config::PaymentProvider {
 }
 
 /// The provider `config` selects.
-pub fn provider_for(config: &Config) -> Arc<dyn PaymentProvider> {
-    match config.payment_provider {
+pub fn provider_for(config: &Config) -> anyhow::Result<Arc<dyn PaymentProvider>> {
+    Ok(match config.payment_provider {
         config::PaymentProvider::Fake => Arc::new(Fake::new(config.public_base_url.clone())),
-        config::PaymentProvider::Stripe => Arc::new(Unavailable { name: "stripe" }),
-    }
+        config::PaymentProvider::Stripe => {
+            let (Some(secret_key), Some(webhook_secret)) = (
+                config.stripe_secret_key.clone(),
+                config.stripe_webhook_secret.clone(),
+            ) else {
+                anyhow::bail!("--payment-provider stripe needs both Stripe secrets");
+            };
+            Arc::new(crate::stripe::Stripe::new(
+                secret_key,
+                webhook_secret,
+                config.stripe_api_base.clone(),
+                config.public_base_url.clone(),
+            )?)
+        }
+    })
 }
 
 /// `{base}/{page}`, keeping any base path, with no query or fragment.
-fn page_url(base: &Url, page: &str) -> Url {
+pub(crate) fn page_url(base: &Url, page: &str) -> Url {
     let mut url = base.clone();
     let path = format!("{}/{}", base.path().trim_end_matches('/'), page);
     url.set_path(&path);
@@ -196,7 +301,7 @@ struct FakeEvent {
     session_id: Option<String>,
 }
 
-type HmacSha256 = Hmac<Sha256>;
+pub(crate) type HmacSha256 = Hmac<Sha256>;
 
 fn fake_mac() -> HmacSha256 {
     HmacSha256::new_from_slice(FAKE_WEBHOOK_SECRET.as_bytes()).expect("HMAC takes any key length")
@@ -265,7 +370,11 @@ impl PaymentProvider for Fake {
         Ok(CheckoutSession { session_id, url })
     }
 
-    async fn billing_portal(&self, _organization_id: Uuid) -> Result<Url, ProviderError> {
+    async fn billing_portal(
+        &self,
+        _organization_id: Uuid,
+        _customer_id: Option<&str>,
+    ) -> Result<Url, ProviderError> {
         self.require_local()?;
         Ok(page_url(&self.base, "billing/fake"))
     }
@@ -294,9 +403,6 @@ impl PaymentProvider for Fake {
             .map_err(|_| ProviderError::Rejected("the signature does not match"))?;
         let event: FakeEvent = serde_json::from_slice(body)
             .map_err(|_| ProviderError::Rejected("the event is not valid JSON"))?;
-        if event.id.trim().is_empty() {
-            return Err(ProviderError::Rejected("the event has no id"));
-        }
         let session = |s: Option<String>| {
             s.filter(|s| !s.trim().is_empty())
                 .ok_or(ProviderError::Rejected("the event has no session_id"))
@@ -309,49 +415,18 @@ impl PaymentProvider for Fake {
                 session_id: session(event.session_id)?,
             },
             _ => EventKind::Ignored {
-                event_type: event.event_type,
+                event_type: event.event_type.clone(),
             },
         };
-        Ok(VerifiedEvent {
-            id: event.id,
-            provider: self.name(),
+        VerifiedEvent::new(
+            event.id,
+            self.name(),
+            event.event_type,
             kind,
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Unavailable
-
-/// A configured provider that is not built yet: refuses everything.
-#[derive(Debug, Clone)]
-pub struct Unavailable {
-    name: &'static str,
-}
-
-#[async_trait]
-impl PaymentProvider for Unavailable {
-    fn name(&self) -> &'static str {
-        self.name
-    }
-
-    async fn create_checkout(
-        &self,
-        _order: &CheckoutOrder,
-    ) -> Result<CheckoutSession, ProviderError> {
-        Err(ProviderError::Unavailable(MSG_PAYMENTS_UNAVAILABLE))
-    }
-
-    async fn billing_portal(&self, _organization_id: Uuid) -> Result<Url, ProviderError> {
-        Err(ProviderError::Unavailable(MSG_PAYMENTS_UNAVAILABLE))
-    }
-
-    fn verify_event(
-        &self,
-        _headers: &HeaderMap,
-        _body: &[u8],
-    ) -> Result<VerifiedEvent, ProviderError> {
-        Err(ProviderError::Unavailable(MSG_PAYMENTS_UNAVAILABLE))
+            None,
+            None,
+            None,
+        )
     }
 }
 
@@ -373,6 +448,7 @@ mod tests {
             price_minor: 120000,
             currency: "USD".into(),
             interval: "annual".into(),
+            customer_id: None,
         }
     }
 
@@ -473,7 +549,10 @@ mod tests {
             )
         );
         assert_eq!(
-            fake.billing_portal(Uuid::nil()).await.unwrap().as_str(),
+            fake.billing_portal(Uuid::nil(), Some("cus_ignored"))
+                .await
+                .unwrap()
+                .as_str(),
             "http://localhost:5174/portal/billing/fake"
         );
         let other = fake.create_checkout(&order()).await.unwrap();
@@ -488,7 +567,7 @@ mod tests {
             fake.create_checkout(&order()).await.unwrap_err()
         ));
         assert!(unavailable(
-            fake.billing_portal(Uuid::nil()).await.unwrap_err()
+            fake.billing_portal(Uuid::nil(), None).await.unwrap_err()
         ));
         let (body, sig) = Fake::signed_event(FAKE_CHECKOUT_COMPLETED, "fake_cs_1");
         assert!(unavailable(
@@ -497,17 +576,35 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn unavailable_refuses_everything() {
-        let p = Unavailable { name: "stripe" };
+    #[test]
+    fn fake_events_carry_no_stripe_fields() {
         let (body, sig) = Fake::signed_event(FAKE_CHECKOUT_COMPLETED, "fake_cs_1");
-        assert!(matches!(
-            p.create_checkout(&order()).await,
-            Err(ProviderError::Unavailable(MSG_PAYMENTS_UNAVAILABLE))
-        ));
-        assert!(p.billing_portal(Uuid::nil()).await.is_err());
-        assert!(p
-            .verify_event(&Fake::signature_headers(&sig), &body)
-            .is_err());
+        let ev = verify(&body, Some(&sig)).unwrap();
+        assert_eq!(ev.customer_id(), None);
+        assert_eq!(ev.amount(), None);
+        assert_eq!(ev.order_ref(), None);
+        assert_eq!(ev.session_id(), Some("fake_cs_1"));
+        assert_eq!(ev.event_type(), FAKE_CHECKOUT_COMPLETED);
+    }
+
+    #[test]
+    fn oversized_or_blank_event_fields_are_refused() {
+        let long = "x".repeat(MAX_EVENT_FIELD + 1);
+        for body in [
+            json!({"id": long, "type": FAKE_CHECKOUT_COMPLETED, "session_id": "fake_cs_1"}),
+            json!({"id": " ", "type": FAKE_CHECKOUT_COMPLETED, "session_id": "fake_cs_1"}),
+            json!({"id": "fake_evt_1", "type": FAKE_CHECKOUT_COMPLETED, "session_id": long}),
+            json!({"id": "fake_evt_1", "type": long}),
+            json!({"id": "fake_evt_1", "type": ""}),
+        ] {
+            let body = body.to_string();
+            assert!(
+                matches!(
+                    verify(body.as_bytes(), Some(&Fake::sign(body.as_bytes()))),
+                    Err(ProviderError::Rejected(_))
+                ),
+                "{body}"
+            );
+        }
     }
 }
