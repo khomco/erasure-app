@@ -13,7 +13,8 @@ import { SignInPrompt } from "./AccountPage";
 import { Field, FormError, SubmitButton } from "./AuthForm";
 
 /**
- * `/admin`: vendor admins search customer organizations and users. Each
+ * `/admin`: vendor admins search customer organizations and users, and
+ * reach the sales leads (`/admin/leads`). Each
  * search is an audited view on the hub, so one runs only when its form is
  * submitted, never per keystroke or on page load. The hub decides who may
  * search; anyone else sees its 403 message.
@@ -35,6 +36,12 @@ export function AdminPage() {
         <>
           <p className="text-sm text-slate-400">
             Every search and every organization you open is recorded in the audit log.
+          </p>
+          <p className="text-sm">
+            <Link to="/admin/leads" className="text-indigo-400 hover:underline">
+              Sales leads
+            </Link>{" "}
+            <span className="text-slate-400">from the marketing site's forms</span>
           </p>
           <OrganizationSearchForm />
           <UserSearchForm />

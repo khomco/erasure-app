@@ -1,0 +1,3241 @@
+diff --git a/CONTEXT.md b/CONTEXT.md
+index 7cbddff..105cd7a 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -694,8 +694,9 @@ folder or in `.scratch/DECISIONS.md`.
+ | Hub sessions hardened: CSRF, sign-in throttles, rotation, sign out everywhere — double-submit CSRF token (`GET /api/auth/csrf` returns `{csrf_token}` with `Cache-Control: no-store`, reusing a well-formed `wipehub_csrf` cookie or minting 32 OS-RNG bytes; every non-GET/HEAD/OPTIONS `/api/*` request, unknown paths included, needs an `X-CSRF-Token` header equal to the cookie, compared in constant time, else 403 `missing or invalid CSRF token` before any handler or audit write; middleware `csrf::require`, no exemptions); migration `0004_auth_throttle` and `throttle::{charge, confirm_failure, refund, clear, purge_stale}` (reusable by story 3): every sign-in attempt, known or unknown email, is charged against `email:<address>` (trimmed, Postgres `lower()`, ≤254 chars) and `ip:<peer>` (IPv4 full address; IPv6 its /64) in one atomic statement per key before any lookup or Argon2 work, in a fixed 15-min window from the first charge; an attempt is refused while the key is locked or once charges in flight plus failures reach 5 per email or 20 per IP, so at most 5 (20) password checks run per window however many arrive at once; a refusal answers 429 `too many failed sign-in attempts; try again later` with `Retry-After` (time left on the lock, or 1 while only in-flight checks fill the window), even for the right password, and never extends a lock; a failure keeps its charge and the one that reaches the limit locks the key for 15 min; a success deletes the email key and refunds its IP charge, so the right password on the 5th try signs in unlocked; audit volume is bounded: `auth.sign_in_locked` once per lock (`{until}`), refusals counted in the row's `refused` and audited once as `auth.sign_in_lock_summary` (`{until, refused}`) when the row is cleared, restarted or purged, every sign-in audit row carrying `peer` except summaries of purged rows, which belong to other keys; the IP key is charged before the email key, so a locked IP never creates `email:` rows; the work after a charge runs in its own task, so a client disconnecting mid-check still has its outcome recorded; stale rows purged on failures with `SKIP LOCKED`; sign-in and sign-up delete the incoming session in the new session's transaction (`auth.sign_in` detail `{rotated}`); `POST /api/auth/sign-out-everywhere` ends every session of the signed-in user (`auth.sign_out_everywhere`, `{sessions: n}`); session and CSRF cookies are `Secure` unless `--public-base-url` is http on `localhost`, `*.localhost` or a loopback IP (http on any other host gets `Secure` and a start-up warning that browsers will drop the cookies); the portal client fetches and caches the token, sends it on every POST and refetches/retries once on a CSRF 403; the sign-in page turns a 429's `Retry-After` into "try again in N minutes"; "Sign out everywhere" on home | ADR-0007 §3 / SPEC portal-accounts CAP-2, CAP-3 | ✅ partial | The IP throttle keys on the TCP peer only (`X-Forwarded-For` is never trusted, ROADMAP §0.5), so behind a reverse proxy or a shared office NAT everyone shares one IP key and 20 failures among them lock all of them out (an IPv6 /64 is likewise one key); anyone who knows an email can lock that account out of password sign-in for 15 min at a time; because in-flight attempts count toward the limit, one failure while 19 other sign-ins from the same IP are mid-check can lock that IP; double-submit CSRF is open to cookie-tossing from a sibling subdomain until hosting is decided; no Origin/`Sec-Fetch-Site` checks; no idle timeout (sessions last 14 days unless signed out) |
+ | Hub magic links, password reset and the email-send throttle — migration `0005_auth_token_purposes` widens `auth_tokens.purpose` to `verify_email`\|`magic_link`\|`password_reset`; every emailed token is 32 OS-RNG bytes with only its SHA-256 stored, consumed by one atomic `UPDATE … WHERE used_at IS NULL AND expires_at > now()` (concurrent uses: exactly one wins), and issuing one deletes that user's expired tokens; `POST /api/auth/magic-link` and `POST /api/auth/password-reset` take `{email}` and answer 202 `{}` for known and unknown emails alike, SMTP down included: the handler only validates and charges the email-send throttle, and the account lookup, the token, the audit row (`auth.magic_link_requested`/`auth.password_reset_requested`) and the send of `{public_base_url}/magic-link?token=…` (15 min) or `/reset-password?token=…` (1 h) all run in a spawned task after the answer is decided, so neither the response nor its timing reveals whether the account exists (a failure there is logged at `warn`, never returned); an unknown email writes no token, mail or audit row; `POST /api/auth/magic-link/sign-in {token}` signs in like a password sign-in (rotating the incoming session), retires the user's other magic links, marks the email verified, clears that email's sign-in lock and is not subject to the sign-in throttle; if this sign-in is what verifies the email (a possibly pre-registered account, whose password was set by someone who never proved they own the mailbox), the same transaction also ends every other session of the user and replaces the password hash with the unusable marker `!unusable` until a reset (`auth.magic_link_sign_in` `{rotated, email_verified, sessions_ended, password_cleared}`); `POST /api/auth/password-reset/complete {token, password}` checks the password first (an invalid one never burns the token), peeks the token before Argon2, then in one transaction consumes it, sets the hash, retires outstanding reset and magic links, ends every session of the user and the browser's incoming session (whoever it belongs to), verifies the email and clears the sign-in lock, and answers `{"password_reset": true}` with the session cookie cleared, without signing in (`auth.password_reset` `{sessions, email_verified}`); a used or expired link is audited as `auth.magic_link_failed`/`auth.password_reset_failed` `{reason: "used"|"expired"}` once per token while the token is still stored (issuing a new link purges the user's expired ones), while an unknown or malformed token writes nothing, so these rows are bounded by the links issued (migration 0005 adds `auth_tokens.failure_audited_at` to mark them); every route that sends email (sign-up, resend verification, magic link, reset) is charged against `mail:to:<address>` (5 per hour) and `mail:ip:<peer>` (20 per hour) before any lookup, Argon2 or send, each charge final whether or not mail goes out, the one reaching a limit locking the key for 1 h (`auth.mail_locked` once; refusals summarised as `auth.mail_lock_summary`), a refusal being 429 `too many emails requested; try again later` with `Retry-After` and writing nothing but its throttle counters (stale throttle rows are purged only on a charged send); portal `/sign-in-link`, `/forgot-password` (same confirmation whether or not the account exists), `/magic-link` (signs in only on a button press, never on load, so a mail scanner cannot use the link) and `/reset-password`, linked from `/sign-in`; email-sending forms show "Too many emails requested. Try again in N minutes." | ADR-0007 §3 / SPEC portal-accounts CAP-2 | ✅ partial | Anyone who knows an address can lock its owner out of every route at once: 5 wrong passwords lock password sign-in for 15 min, and 5 link requests use up the address's emails for an hour, blocking magic link, reset, sign-up and resend (the limit counts unknown addresses too, so it reveals nothing; a sign-up that 409s still counts); when SMTP is down the two request routes still answer 202 and the user is never told the link did not go out; a user who signed up, never verified and then signs in by magic link loses their password and must reset it before password sign-in works again (the pre-registered-account mitigation); story 1's verification link still verifies a pre-registered account without ending its creator's session or password (deferred: on that path the clicker cannot be told apart from the person who just set the password); a send in flight is lost if the hub stops between answering and sending (the user asks again); no notice email when a password is reset or cleared; the per-IP mail limit has the same shared-NAT/proxy caveat as sign-in; expired tokens are only purged per user, with no global sweeper; the reset and magic-link token routes have no throttle of their own (a 256-bit token cannot be guessed); no MFA |
+ | Hub account and team management — `POST /api/account/profile {name}` (own name only; the email is read-only; `account.profile_updated` `{}`, the name kept out of the log); `POST /api/auth/password {current_password, new_password}`: the new password is validated first (nothing charged), then the attempt is charged against the sign-in throttle (`email:<the user's address>`, `ip:<peer>`) exactly like a sign-in, so a stolen session cannot guess the current password unthrottled; a wrong one is 400 `current password is incorrect` (`auth.password_change_failed`, and the 5th locks the email for password sign-in too), the right one sets the new hash, retires outstanding reset and magic links, ends every session of the user and starts a new one for this browser (`auth.password_changed` `{sessions_ended}`); `CurrentUser` carries the role, read in the session query, so a demotion or removal applies to the very next request; organization-scoped data layer `team` (every query takes the session's organization id first, so another organization's user or invitation id is a 404 that changes and audits nothing, and a `vendor_admin` is never a target); `GET /api/organization/members` (any role, ordered by name then email); owner-only routes answer a `member` or `vendor_admin` 403 `only an organization owner can manage the team` before reading the body, charging a throttle or writing: `POST /api/organization {name}` (`organization.renamed` `{from, to}`), `POST /api/organization/members/{id}/role {role}` (`owner`\|`member` only; same role is a no-op; `organization.member_role_changed`), `POST /api/organization/members/{id}/remove` (deletes the user, so sessions and tokens cascade and the address is free again; `organization.member_removed` `{organization_id, email, role, sessions_ended}`; removing yourself is 409); every owner write (rename, invite, revoke, role change, removal) locks the organization row (`SELECT … FOR UPDATE`) and re-checks that the actor is still an owner, so a just-demoted owner cannot act, and an organization always keeps an owner: owners are counted under that lock, so two owners demoting each other at once leave one (409 `an organization must keep at least one owner`); removing or demoting an owner revokes, in the same transaction, every pending invitation they sent, so a departing owner cannot rejoin through one; migration `0006_invitations` and `POST /api/organization/invitations {email, role}` (a verified owner only; charged against the email-send limit plus `mail:org:<organization id>`, 20 invitations per organization per hour, whose refusal gives back the request's IP and address charges; 409 for an address already in the organization, decided under the lock, the charge standing; revokes that address's other pending invitations, so at most one is pending even for concurrent invites, and purges expired ones; `organization.member_invited`; SMTP down still creates it with `invitation_email_sent:false`), `GET …/invitations` (pending only), `POST …/invitations/{id}/revoke`; every revocation is audited as `organization.invitation_revoked` `{invitation_id, email, reason}` with `reason` `revoked`, `replaced`, `sender_demoted` or `sender_removed`; the emailed `{public_base_url}/accept-invite?token=…` link is single-use and expires in 7 days; `POST /api/invitations/lookup {token}` previews it without consuming, `POST /api/invitations/accept {token, name, password}` validates first, peeks before Argon2, then atomically consumes the invitation and creates the user in the inviting organization with its role and a verified email, rotates the incoming session and signs in (`organization.invitation_accepted`); names reject control characters; portal `/account` (name, password change), `/organization` (rename, member list with role select and Remove for owners, both confirmed before acting on yourself; invite form, replaced by the verify-and-resend notice for an unverified owner; pending invitations with Revoke) and `/accept-invite` (looks up on load, joins only on submit, then drops every query cached for the browser's previous user), linked from home | ADR-0007 §3 / SPEC portal-accounts CAP-4 | ✅ partial | No email-address change (needs a confirmation link to the new address and a notice to the old one); one organization per person, so an invitation to an address that already has an account anywhere fails only at acceptance (409, told to the mailbox owner, never to the inviter); removal deletes the user row (the audit log keeps id, email and role; revisit when orders reference users); organization and inviter names appear in invitation emails sent to third parties; the inviter learns only `invitation_email_sent` (handed to SMTP), not delivery; no ownership-transfer flow beyond role changes, no leaving or deleting an organization, no organization fields beyond its name; no notice email when a password is changed or a member removed; invitee and removed-member email addresses, and organization names (`organization.renamed` `{from, to}`), stay in the append-only audit log for good (the log is the record of who was invited and removed; the user's display name is kept out), pending a data-retention decision; a locked email (5 wrong passwords by anyone who knows the address) also blocks the signed-in user's password change for 15 min, since both share the `email:` throttle key; an organization that genuinely invites more than 20 people in an hour waits for the window to pass |
+-| Hub vendor admin area and tenant isolation — migration `0007_vendor_organization` adds `organizations.is_vendor` with a partial unique index (`organizations_one_vendor`), so at most one organization is the **vendor organization** (`Vendor staff`), which sign-up and invitations never create or join; `wipe-hub admin create --email <address> [--name <name>]` (with `serve`'s `--database-url`, `--smtp-*`, `--mail-from`, `--public-base-url` and their `WIPE_HUB_*` twins) validates first, applies migrations, then in one transaction gets or creates the vendor organization (race-free: `INSERT … ON CONFLICT ((true)) WHERE is_vendor DO NOTHING`), inserts a `vendor_admin` with an unusable password and an unverified email, issues a 1-hour password-reset token and audits `admin.created` (actor `cli:admin-create`, `{email, organization_id, vendor_organization_created, os_user}`), then emails the existing reset link; it prints `created vendor admin <email> (<id>)`, exits 0 even when SMTP is down (warning that the admin should use Forgot password) and refuses, writing nothing, an address that is already a vendor admin or belongs to a customer (it never converts a customer user); a session is a vendor admin only when the user's role is `vendor_admin`, their organization is the vendor organization and their email is verified, read live per request, else every `/api/admin/*` route is 403 `only vendor admins can use the admin area` (401 without a session) before the query is read; the admin data layer `admin` is the only code that reads across organizations, excludes the vendor organization and every `vendor_admin` from results and counts, and takes a `VendorAdmin` (built only by the extractor) plus a transaction in which it writes its own audit row before returning data; `GET /api/admin/organizations?q=` (name, or any user's email or name; `{organizations: [{id, name, created_at, user_count}], truncated}`; `admin.organizations_searched` `{query, organization_ids}`), `GET /api/admin/users?q=` (email or name, with organization; `admin.users_searched` `{query, user_ids}`), `GET /api/admin/organizations/{id}` (organization and users; `admin.organization_viewed` `{user_ids}`; unknown, non-UUID or vendor id 404 `no such organization` with no audit row); `q` is trimmed, case-insensitive, LIKE wildcards literal, empty matches everything, over 200 characters or any control character 400; `tests/isolation.rs` calls every customer and admin route as one organization's owner and member with another organization's ids and addresses and asserts no response carries the other's identifiers and its records are byte-for-byte unchanged, and a guard fails on any `/api` path literal in `src/` missing from its classification table; portal `/admin` (organization and user search forms, run only on submit, results as tables linking to the organization) and `/admin/organizations/$id`, linked from home for `vendor_admin` | ADR-0007 §3, §6 / SPEC portal-accounts CAP-5, CAP-6 / ROADMAP A1.3 (customers part) | ✅ partial | Views only: no admin actions on customer accounts (sending a reset, resending verification, changing roles, disabling); no CLI to list or remove admins (deleting the user row by SQL ends their sessions by cascade); admins have the same 14-day session lifetime as customers and no MFA; search queries and the ids they returned stay in the append-only audit log for good; results are capped at 100 with no paging; substring search scans the tables (no trigram index); the set-password email is the password-reset email and reads as a reset; offerings, orders and licences are not in the admin area yet |
+-| Sales leads from the marketing site — migration `0008_leads`: `leads` (one per `lower(email)`, unique index; `segment` `itad`\|`enterprise-it`\|`government`\|`other`; `status` `new`\|`contacted`\|`qualified`\|`closed`; `unsubscribed_at`) and `lead_submissions` (kind, message, the exact consent text and `consented_at`, the SHA-256 of a 32-byte OS-RNG unsubscribe token; cascade on lead delete); `POST /api/leads {kind, name, email, company, role?, segment?, message?, consent, consent_text, website?}` keeps the double-submit CSRF check (no exemption) and validates (400; contact needs a message and takes no role or segment; `consent` must be true and `consent_text` must equal the hub's text for the form, pinned to `sites/www/src/data/consent.ts`), then charges `lead-form:ip:<peer>` (10 an hour, final; the 10th locks the key for an hour, `lead.submit_locked`, subject the throttle key; a later restart audits `lead.submit_lock_summary` with `peer`; refusal 429 `too many submissions; try again later` with `Retry-After`), answers a filled honeypot `website` 202 `{}` doing nothing else (it was charged, so it can engage that lock), charges the email-send throttle (`mail:` keys, shared with sign-in links), then in one transaction upserts the lead (a known address updates email as typed, name and company, role and segment only when given, and never changes `status` or clears `unsubscribed_at`: an unsubscribe is a suppression that only a future confirmed opt-in may lift), inserts the submission and audits `lead.submitted` `{kind, created, suppressed}`; 202 `{}` either way; the confirmation email (per-form subject, no submitted text echoed, a `{public_base_url}/unsubscribe?token=…` link and a "not you?" line) is sent from a spawned task, failures logged at `warn`, and is never sent to an unsubscribed (`suppressed`) lead, whose submission is still stored and still charged to the email-send throttle so neither the answer nor a 429 reveals the unsubscribe. `POST /api/leads/unsubscribe {token}`: any of the lead's tokens sets `unsubscribed_at` once (`lead.unsubscribed` `{}` only on change), 200 `{"unsubscribed": true}` also when already unsubscribed, 404 `this unsubscribe link is not valid` otherwise; the portal's `/unsubscribe` page acts only on a button press. Audit rows about a sales lead (`lead.submitted`, `lead.unsubscribed`, subject `lead:<id>`) hold ids and flags only (no name, email, company, message or IP); the per-IP throttle rows use the `lead-form:` prefix, never `lead:`, and are never linked to a lead id. Credentialed CORS (`cors::site_cors`, outside the CSRF middleware) answers only `--site-origin` / `WIPE_HUB_SITE_ORIGIN` (default `http://localhost:4321`; anything but a bare http(s) origin refuses to start), only on `GET /api/auth/csrf` and `POST /api/leads` and their preflights. The site's forms post with `src/lib/lead-submit.ts` only in builds given `PUBLIC_HUB_ORIGIN` | lead-capture story 1 (CAP-1, CAP-2, CAP-4 storage and unsubscribe) / ADR-0007 §3 | ✅ partial | No admin list, notes, export or erasure yet (story 2); the site and hub must be the same *site* (registrable domain) because the CSRF cookie is `SameSite=Lax`: `localhost:4321` with `localhost:7900` works, `localhost` with `127.0.0.1` does not, and production hosting must keep them same-site; no RFC 8058 one-click `List-Unsubscribe` header (it would need a CSRF exemption); no double opt-in, so anyone can put any address on the list and its owner gets a confirmation email (at most 5 an hour per address, shared with sign-in links) until they unsubscribe; re-subscribing after an unsubscribe needs a confirmed opt-in (an emailed confirm link), which is not built, so an unsubscribed sales lead stays suppressed whatever they submit; consent rows do not record which privacy-notice version was agreed to (add it before the notice is published); the email-send throttle's own audit rows (`auth.mail_locked`, `auth.mail_lock_summary`) name the address and peer in their subject, and the per-IP throttle lock rows keep the peer IP (`lead.submit_locked` in its subject `lead-form:ip:<peer>`, `lead.submit_lock_summary` in subject and `peer`), so erasing a sales lead (story 2) cannot remove those; the form script has been exercised in tests and against a running hub with a scripted client, not in a real browser; the privacy placeholder says the site "sets no cookies", but an open form makes the hub set the `wipehub_csrf` cookie and sends the visitor's details to the hub's origin, so the published notice must disclose both before `privacyNoticePublished` is set; only one `--site-origin` can be configured, so an apex domain and its `www.` host cannot both host the forms |
++| Hub vendor admin area and tenant isolation — migration `0007_vendor_organization` adds `organizations.is_vendor` with a partial unique index (`organizations_one_vendor`), so at most one organization is the **vendor organization** (`Vendor staff`), which sign-up and invitations never create or join; `wipe-hub admin create --email <address> [--name <name>]` (with `serve`'s `--database-url`, `--smtp-*`, `--mail-from`, `--public-base-url` and their `WIPE_HUB_*` twins) validates first, applies migrations, then in one transaction gets or creates the vendor organization (race-free: `INSERT … ON CONFLICT ((true)) WHERE is_vendor DO NOTHING`), inserts a `vendor_admin` with an unusable password and an unverified email, issues a 1-hour password-reset token and audits `admin.created` (actor `cli:admin-create`, `{email, organization_id, vendor_organization_created, os_user}`), then emails the existing reset link; it prints `created vendor admin <email> (<id>)`, exits 0 even when SMTP is down (warning that the admin should use Forgot password) and refuses, writing nothing, an address that is already a vendor admin or belongs to a customer (it never converts a customer user); a session is a vendor admin only when the user's role is `vendor_admin`, their organization is the vendor organization and their email is verified, read live per request, else every `/api/admin/*` route is 403 `only vendor admins can use the admin area` (401 without a session) before the query is read; the admin data layer `admin` is the only code that reads across organizations, excludes the vendor organization and every `vendor_admin` from results and counts, and takes a `VendorAdmin` (built only by the extractor) plus a transaction in which it writes its own audit row before returning data; `GET /api/admin/organizations?q=` (name, or any user's email or name; `{organizations: [{id, name, created_at, user_count}], truncated}`; `admin.organizations_searched` `{query, organization_ids}`), `GET /api/admin/users?q=` (email or name, with organization; `admin.users_searched` `{query, user_ids}`), `GET /api/admin/organizations/{id}` (organization and users; `admin.organization_viewed` `{user_ids}`; unknown, non-UUID or vendor id 404 `no such organization` with no audit row); `q` is trimmed, case-insensitive, LIKE wildcards literal, empty matches everything, over 200 characters or any control character 400; `tests/isolation.rs` calls every customer and admin route as one organization's owner and member with another organization's ids and addresses and asserts no response carries the other's identifiers and its records are byte-for-byte unchanged, and a guard fails on any `/api` path literal in `src/` missing from its classification table; portal `/admin` (organization and user search forms, run only on submit, results as tables linking to the organization) and `/admin/organizations/$id`, linked from home for `vendor_admin` | ADR-0007 §3, §6 / SPEC portal-accounts CAP-5, CAP-6 / ROADMAP A1.3 (customers part) | ✅ partial | Views only for customer accounts (sales leads can be worked: see the row below): no admin actions on customer accounts (sending a reset, resending verification, changing roles, disabling); no CLI to list or remove admins (deleting the user row by SQL ends their sessions by cascade); admins have the same 14-day session lifetime as customers and no MFA; search queries and the ids they returned stay in the append-only audit log for good; results are capped at 100 with no paging; substring search scans the tables (no trigram index); the set-password email is the password-reset email and reads as a reset; offerings, orders and licences are not in the admin area yet |
++| Sales leads from the marketing site — migration `0008_leads`: `leads` (one per `lower(email)`, unique index; `segment` `itad`\|`enterprise-it`\|`government`\|`other`; `status` `new`\|`contacted`\|`qualified`\|`closed`; `unsubscribed_at`) and `lead_submissions` (kind, message, the exact consent text and `consented_at`, the SHA-256 of a 32-byte OS-RNG unsubscribe token; cascade on lead delete); `POST /api/leads {kind, name, email, company, role?, segment?, message?, consent, consent_text, website?}` keeps the double-submit CSRF check (no exemption) and validates (400; contact needs a message and takes no role or segment; `consent` must be true and `consent_text` must equal the hub's text for the form, pinned to `sites/www/src/data/consent.ts`), then charges `lead-form:ip:<peer>` (10 an hour, final; the 10th locks the key for an hour, `lead.submit_locked`, subject the throttle key; a later restart audits `lead.submit_lock_summary` with `peer`; refusal 429 `too many submissions; try again later` with `Retry-After`), answers a filled honeypot `website` 202 `{}` doing nothing else (it was charged, so it can engage that lock), charges the email-send throttle (`mail:` keys, shared with sign-in links), then in one transaction upserts the lead (a known address updates email as typed, name and company, role and segment only when given, and never changes `status` or clears `unsubscribed_at`: an unsubscribe is a suppression that only a future confirmed opt-in may lift), inserts the submission and audits `lead.submitted` `{kind, created, suppressed}`; 202 `{}` either way; the confirmation email (per-form subject, no submitted text echoed, a `{public_base_url}/unsubscribe?token=…` link and a "not you?" line) is sent from a spawned task, failures logged at `warn`, and is never sent to an unsubscribed (`suppressed`) lead, whose submission is still stored and still charged to the email-send throttle so neither the answer nor a 429 reveals the unsubscribe. `POST /api/leads/unsubscribe {token}`: any of the lead's tokens sets `unsubscribed_at` once (`lead.unsubscribed` `{}` only on change), 200 `{"unsubscribed": true}` also when already unsubscribed, 404 `this unsubscribe link is not valid` otherwise; the portal's `/unsubscribe` page acts only on a button press. Audit rows about a sales lead (`lead.submitted`, `lead.unsubscribed`, subject `lead:<id>`) hold ids and flags only (no name, email, company, message or IP); the per-IP throttle rows use the `lead-form:` prefix, never `lead:`, and are never linked to a lead id. Credentialed CORS (`cors::site_cors`, outside the CSRF middleware) answers only `--site-origin` / `WIPE_HUB_SITE_ORIGIN` (default `http://localhost:4321`; anything but a bare http(s) origin refuses to start), only on `GET /api/auth/csrf` and `POST /api/leads` and their preflights. The site's forms post with `src/lib/lead-submit.ts` only in builds given `PUBLIC_HUB_ORIGIN` | lead-capture story 1 (CAP-1, CAP-2, CAP-4 storage and unsubscribe) / ADR-0007 §3 | ✅ partial | The admin list, notes, export and erasure are in the row below (story 2); the site and hub must be the same *site* (registrable domain) because the CSRF cookie is `SameSite=Lax`: `localhost:4321` with `localhost:7900` works, `localhost` with `127.0.0.1` does not, and production hosting must keep them same-site; no RFC 8058 one-click `List-Unsubscribe` header (it would need a CSRF exemption); no double opt-in, so anyone can put any address on the list and its owner gets a confirmation email (at most 5 an hour per address, shared with sign-in links) until they unsubscribe; re-subscribing after an unsubscribe needs a confirmed opt-in (an emailed confirm link), which is not built, so an unsubscribed sales lead stays suppressed whatever they submit; consent rows do not record which privacy-notice version was agreed to (add it before the notice is published); the email-send throttle's own audit rows (`auth.mail_locked`, `auth.mail_lock_summary`) name the address and peer in their subject, and the per-IP throttle lock rows keep the peer IP (`lead.submit_locked` in its subject `lead-form:ip:<peer>`, `lead.submit_lock_summary` in subject and `peer`), so erasing a sales lead (story 2) cannot remove those: they expire with their throttle window but stay in the append-only log; the form script has been exercised in tests and against a running hub with a scripted client, not in a real browser; the privacy placeholder says the site "sets no cookies", but an open form makes the hub set the `wipehub_csrf` cookie and sends the visitor's details to the hub's origin, so the published notice must disclose both before `privacyNoticePublished` is set; only one `--site-origin` can be configured, so an apex domain and its `www.` host cannot both host the forms |
++| Sales-lead admin: list, notes, CSV export and erasure — migration `0009_lead_notes` (`lead_notes`: append-only, `author_id` → users `ON DELETE SET NULL`, cascade on lead delete, non-blank body); the data layer `lead_admin` (every function takes a `VendorAdmin` and a transaction and writes its own audit row; each mutation first locks the lead `FOR UPDATE`, so one racing an erasure is a 404, never a 500) behind six vendor-admin routes whose `VendorAdmin` extractor runs before any path, query or body: `GET /api/admin/leads?segment=&status=&from=&to=` (`segment` one of the four segments or `none` for contact-only leads, `status` `new`\|`contacted`\|`qualified`\|`closed`, `from`/`to` inclusive UTC days `YYYY-MM-DD` matching a lead with **any** submission in the range; empty means any; a bad value 400 with no audit row; latest submission first, then id; at most 100 plus `truncated`; `admin.leads_listed`, subject `search:leads`, `{filter, lead_ids}`), `GET /api/admin/leads/{id}` (`{lead, submissions, notes}`, submissions with their exact consent text and notes with their author, newest first; `admin.lead_viewed` `{}`), `POST /api/admin/leads/{id}/status {status}` (`{lead}`; `admin.lead_status_changed {from, to}` and an `updated_at` bump only on a change), `POST /api/admin/leads/{id}/notes {body}` (201 `{note}`, trimmed, same rules as a lead message; `admin.lead_note_added {note_id}`), `POST /api/admin/leads/{id}/erase` (deletes the lead, its submissions and notes in one transaction; `admin.lead_erased {submissions, notes}`; no suppression record is kept, so the same address submitting again is a new lead), `POST /api/admin/leads/export {segment?, status?, from?, to?}` (a CSRF-protected POST so no other site can start a download; the list's filters and order with no row cap; RFC 4180 `text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="sales-leads-<UTC date>.csv"`, `Cache-Control: no-store`; cells starting `=`, `+`, `-`, `@`, TAB or CR prefixed with `'` against spreadsheet formula injection; the lead row only, never messages, consent text or notes; `admin.leads_exported` `{filter, lead_ids}` in the read's transaction); an unknown, non-UUID or erased lead id is 404 `no such sales lead` with no audit row. These audit rows hold ids, filter values, counts and status names only, never personal data, which is why there is no free-text search. Portal `/admin/leads` (segment, status and date filters run only on Show leads; Export CSV posts the last *submitted* filters and saves the file; unsubscribed leads marked with their date) and `/admin/leads/$id` (submissions with consent text, status, notes, erase behind a second confirming press, then back to the list; changes update the page from their answer, never by refetching, since a refetch is another audited view), linked from `/admin` | lead-capture story 2 (CAP-3, CAP-4 erasure) / ADR-0007 §3, §6 | ✅ partial | No guidance on whether sales may answer, by hand, a direct message from an unsubscribed sales lead (customer-visible policy, waiting on the owner); no editing or deleting single notes or submissions, no bulk status change or bulk erase, no paging past 100 in the list (the export is uncapped), no free-text search by design; the filter values and returned lead ids of every list and export stay in the append-only audit log for good (ids only, not personal data); an erasure cannot reach a CSV already downloaded, the email-send throttle's audit rows naming the address (`auth.mail_locked`, `auth.mail_lock_summary`), or backups; the portal pages were checked by typecheck, unit tests of the API client and a production build, not in a real browser |
+ 
+ ## 11. Deferred — known and committed
+ 
+@@ -1068,10 +1069,12 @@ and resolve. None of these have a decided answer.
+   (`Vendor staff`), holding our staff's `vendor_admin` users. Created by
+   the first `wipe-hub admin create`; never created or joined by sign-up
+   or invitation, and never shown in the admin area.
+-- **Admin area** — the portal's `/admin` pages and the hub's read-only
++- **Admin area** — the portal's `/admin` pages and the hub's
+   `/api/admin/*` routes, where vendor admins search customer organizations
+-  and users and view one organization. The only cross-organization reads in
+-  the hub; every search and view is audited with the ids it returned.
++  and users and view one organization (read-only), and list, view, work
++  (status, notes), export and erase **sales leads**. The only
++  cross-organization reads in the hub; every search, view, export and
++  change is audited with ids only.
+ - **Invitation** — an owner's emailed, single-use offer
+   (`{public_base_url}/accept-invite?token=…`, 7 days) for one address to
+   join their organization as `owner` or `member`. Accepting creates that
+diff --git a/README.md b/README.md
+index 54300a0..f9dbc1a 100644
+--- a/README.md
++++ b/README.md
+@@ -45,9 +45,9 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
+ | `wipe-fleet` | mDNS service advertise / browse + deterministic lead election |
+ | `wipe-server` | Axum REST API + WebSocket event stream; auto-signs certs when a Job reaches `Erased` or `PendingCoSign`; destruction-manifest assembly and co-sign |
+ | `wipe-cli` | `wipestation serve / inspect / verify-cert` binary |
+-| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, profile and password change, organization rename and team management (owners invite by emailed single-use link, change roles between `owner` and `member`, and remove members; an organization always keeps an owner), a per-address and per-IP limit on every email it sends (5 per address, 20 per IP per hour; invitations also 20 per organization per hour), every auth event audited, and `wipe-hub admin create --email <address>`, which creates a vendor admin in the one vendor organization and emails them a set-password link (never a password on the command line), for a read-only admin area under `/api/admin/*` (search customer organizations and users, view one organization; vendor admins with a verified email only, and every search and view audited with the ids it returned), and sales leads from the marketing site's forms (`POST /api/leads` behind credentialed CORS for the one `--site-origin` and the usual CSRF token, with a per-IP limit of 10 an hour, a honeypot, one lead per address, the exact consent text stored with every submission, a confirmation email whose link unsubscribes via the portal's `/unsubscribe` page, and lead audit rows that hold no personal data). `tests/isolation.rs` checks that one organization's owner and member never see or change another organization's records through any customer route, and fails when a new `/api` route is left unclassified. Payments and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
++| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, profile and password change, organization rename and team management (owners invite by emailed single-use link, change roles between `owner` and `member`, and remove members; an organization always keeps an owner), a per-address and per-IP limit on every email it sends (5 per address, 20 per IP per hour; invitations also 20 per organization per hour), every auth event audited, and `wipe-hub admin create --email <address>`, which creates a vendor admin in the one vendor organization and emails them a set-password link (never a password on the command line), for an admin area under `/api/admin/*` (search customer organizations and users, view one organization, and list, view, set the status of, annotate, export as CSV and erase sales leads; vendor admins with a verified email only, and every search, view, export and change audited with ids only, never a sales lead's personal data), and sales leads from the marketing site's forms (`POST /api/leads` behind credentialed CORS for the one `--site-origin` and the usual CSRF token, with a per-IP limit of 10 an hour, a honeypot, one lead per address, the exact consent text stored with every submission, a confirmation email whose link unsubscribes via the portal's `/unsubscribe` page, and lead audit rows that hold no personal data). `tests/isolation.rs` checks that one organization's owner and member never see or change another organization's records through any customer route, and fails when a new `/api` route is left unclassified. Payments and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
+ | `apps/desktop` | Vite + React + TanStack Router + Tailwind frontend, plus Tauri 2 shell |
+-| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in, email-verification, sign-in-link (magic link), password-reset, accept-invitation and sales-lead unsubscribe (`/unsubscribe`, acting only on a button press) pages, an account page (name, password change), an organization page (rename, members, invitations, roles and removal for owners), an admin area for vendor admins (`/admin`: organization and user search, run only on submit since each is audited; `/admin/organizations/$id`: one organization and its users), and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere, and a link to the admin area for vendor admins); its API client sends the hub's CSRF token on every POST |
++| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in, email-verification, sign-in-link (magic link), password-reset, accept-invitation and sales-lead unsubscribe (`/unsubscribe`, acting only on a button press) pages, an account page (name, password change), an organization page (rename, members, invitations, roles and removal for owners), an admin area for vendor admins (`/admin`: organization and user search, run only on submit since each is audited; `/admin/organizations/$id`: one organization and its users; `/admin/leads`: sales leads filtered by segment, status and submission date, with CSV export; `/admin/leads/$id`: one sales lead's submissions and consent text, status, notes and erasure), and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere, and a link to the admin area for vendor admins); its API client sends the hub's CSRF token on every POST |
+ | `sites/www` | Static Astro + Tailwind marketing site (pre-launch): landing, product, standards, segment (ITAD, enterprise IT, government), pricing, contact, privacy and terms pages, `/capabilities`, and early-access/contact forms that stay closed (no script, disabled button) unless the build is given `PUBLIC_HUB_ORIGIN`, when a small script posts them to the hub's `POST /api/leads` (`astro build` refuses that while the privacy notice is a placeholder); a build-time check fails `astro build` on any capability overclaim, missing meta/OG tag, missing sitemap, or resource loaded from another origin (ADR-0006 §2). See [`sites/www/README.md`](sites/www/README.md) |
+ 
+ ## Quick start
+diff --git a/apps/portal/src/api/adminLeads.test.ts b/apps/portal/src/api/adminLeads.test.ts
+new file mode 100644
+index 0000000..a1e5647
+--- /dev/null
++++ b/apps/portal/src/api/adminLeads.test.ts
+@@ -0,0 +1,210 @@
++import { beforeEach, describe, expect, it } from "vitest";
++import { HubError, resetCsrfCache } from "./auth";
++import {
++  NO_FILTERS,
++  addLeadNote,
++  attachmentName,
++  eraseLead,
++  exportLeads,
++  fetchLead,
++  listLeads,
++  setLeadStatus,
++  type AdminLead,
++  type LeadDetail,
++  type LeadNote,
++} from "./adminLeads";
++
++const lead: AdminLead = {
++  id: "0f8fad5b-d9cb-469f-a165-70867728950e",
++  email: "ada@example.com",
++  name: "Ada Lovelace",
++  company: "Engines Ltd",
++  role: "Head of operations",
++  segment: "itad",
++  status: "new",
++  created_at: "2026-11-08T10:00:00Z",
++  updated_at: "2026-11-08T10:00:00Z",
++  last_submitted_at: "2026-11-08T10:00:00Z",
++  submission_count: 1,
++  unsubscribed_at: null,
++};
++
++const note: LeadNote = {
++  id: "8a6e0804-2bd0-4672-b79d-d97027f9071a",
++  body: "called, follow up",
++  created_at: "2026-11-08T11:00:00Z",
++  author: { id: "5b3c4c43-6a4f-4b8e-9d0e-3c3f0a1d9b2e", name: "Vera", email: "vera@example.com" },
++};
++
++const detail: LeadDetail = {
++  lead,
++  submissions: [
++    {
++      id: "c2f1d7a4-6a2e-4f6e-9f7b-1d1b1e1f1a1b",
++      kind: "early-access",
++      message: null,
++      consent_text: "I agree.",
++      consented_at: "2026-11-08T10:00:00Z",
++    },
++  ],
++  notes: [note, { ...note, id: "x", author: null }],
++};
++
++interface Call {
++  url: string;
++  method: string;
++  body: unknown;
++  csrf: string | null;
++}
++
++/**
++ * A fake hub, as in `team.test.ts`: `GET /api/auth/csrf` answers `csrf-1`;
++ * every other call is recorded and answered with `status`, `body` (JSON
++ * unless a string) and `headers`.
++ */
++function respond(status: number, body?: unknown, headers: Record<string, string> = {}) {
++  const calls: Call[] = [];
++  const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
++    const url = String(input);
++    const method = init?.method ?? "GET";
++    if (url === "/api/auth/csrf" && method === "GET") {
++      return new Response(JSON.stringify({ csrf_token: "csrf-1" }), {
++        status: 200,
++        headers: { "Content-Type": "application/json" },
++      });
++    }
++    const sent = (init?.headers ?? {}) as Record<string, string>;
++    calls.push({
++      url,
++      method,
++      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
++      csrf: sent["X-CSRF-Token"] ?? null,
++    });
++    const text = body === undefined ? null : typeof body === "string" ? body : JSON.stringify(body);
++    return new Response(text, {
++      status,
++      headers: { ...(typeof body === "object" ? { "Content-Type": "application/json" } : {}), ...headers },
++    });
++  }) as typeof fetch;
++  return { impl, calls };
++}
++
++beforeEach(() => resetCsrfCache());
++
++async function rejection(p: Promise<unknown>): Promise<unknown> {
++  return p.then(
++    () => undefined,
++    (e: unknown) => e,
++  );
++}
++
++describe("lead list", () => {
++  it("sends only the filters that are set, as a GET without CSRF", async () => {
++    const f = respond(200, { leads: [lead], truncated: false });
++    const got = await listLeads({ ...NO_FILTERS, segment: "none", from: "2026-11-01" }, f.impl);
++    expect(got).toEqual({ leads: [lead], truncated: false });
++    expect(f.calls).toEqual([
++      {
++        url: "/api/admin/leads?segment=none&from=2026-11-01",
++        method: "GET",
++        body: undefined,
++        csrf: null,
++      },
++    ]);
++  });
++
++  it("no filters is the bare path", async () => {
++    const f = respond(200, { leads: [], truncated: true });
++    await listLeads(NO_FILTERS, f.impl);
++    expect(f.calls[0].url).toBe("/api/admin/leads");
++  });
++
++  it("accepts an unsubscribed contact-only lead and rejects an unknown status", async () => {
++    const contact = { ...lead, role: null, segment: null, unsubscribed_at: "2026-11-09T08:00:00Z" };
++    const ok = respond(200, { leads: [contact], truncated: false });
++    expect((await listLeads(NO_FILTERS, ok.impl)).leads).toEqual([contact]);
++    const bad = respond(200, { leads: [{ ...lead, status: "won" }], truncated: false });
++    const err = await rejection(listLeads(NO_FILTERS, bad.impl));
++    expect((err as Error).message).toBe("lead list returned an unexpected body (HTTP 200)");
++  });
++
++  it("a bad filter is a 400 HubError with the hub's message", async () => {
++    const f = respond(400, { error: "bad filter" });
++    const err = await rejection(listLeads({ ...NO_FILTERS, status: "open" }, f.impl));
++    expect(err).toBeInstanceOf(HubError);
++    expect((err as HubError).status).toBe(400);
++    expect((err as HubError).message).toBe("bad filter");
++  });
++});
++
++describe("one lead", () => {
++  it("fetchLead addresses the lead by encoded id", async () => {
++    const f = respond(200, detail);
++    expect(await fetchLead(lead.id, f.impl)).toEqual(detail);
++    const missing = respond(404, { error: "no such sales lead" });
++    const err = await rejection(fetchLead("x/y", missing.impl));
++    expect((err as HubError).status).toBe(404);
++    expect(missing.calls[0].url).toBe("/api/admin/leads/x%2Fy");
++  });
++
++  it("setLeadStatus posts the status with CSRF and returns the lead", async () => {
++    const updated = { ...lead, status: "contacted" as const };
++    const f = respond(200, { lead: updated });
++    expect(await setLeadStatus(lead.id, "contacted", f.impl)).toEqual(updated);
++    expect(f.calls).toEqual([
++      {
++        url: `/api/admin/leads/${lead.id}/status`,
++        method: "POST",
++        body: { status: "contacted" },
++        csrf: "csrf-1",
++      },
++    ]);
++  });
++
++  it("addLeadNote posts the body and returns the note", async () => {
++    const f = respond(201, { note });
++    expect(await addLeadNote(lead.id, "called, follow up", f.impl)).toEqual(note);
++    expect(f.calls[0]).toEqual({
++      url: `/api/admin/leads/${lead.id}/notes`,
++      method: "POST",
++      body: { body: "called, follow up" },
++      csrf: "csrf-1",
++    });
++  });
++
++  it("eraseLead posts with CSRF", async () => {
++    const f = respond(200, {});
++    await eraseLead(lead.id, f.impl);
++    expect(f.calls).toEqual([
++      { url: `/api/admin/leads/${lead.id}/erase`, method: "POST", body: {}, csrf: "csrf-1" },
++    ]);
++  });
++});
++
++describe("export", () => {
++  it("posts the set filters with CSRF and returns the CSV and the hub's file name", async () => {
++    const csv = "id,email\r\n";
++    const f = respond(200, csv, {
++      "Content-Type": "text/csv; charset=utf-8",
++      "Content-Disposition": 'attachment; filename="sales-leads-2026-11-08.csv"',
++    });
++    const out = await exportLeads({ ...NO_FILTERS, status: "new" }, f.impl);
++    expect(out.filename).toBe("sales-leads-2026-11-08.csv");
++    expect(await out.blob.text()).toBe(csv);
++    expect(f.calls).toEqual([
++      { url: "/api/admin/leads/export", method: "POST", body: { status: "new" }, csrf: "csrf-1" },
++    ]);
++  });
++
++  it("a refusal is a HubError", async () => {
++    const f = respond(403, { error: "only vendor admins can use the admin area" });
++    const err = await rejection(exportLeads(NO_FILTERS, f.impl));
++    expect((err as HubError).status).toBe(403);
++  });
++
++  it("attachmentName reads the quoted file name", () => {
++    expect(attachmentName('attachment; filename="a.csv"')).toBe("a.csv");
++    expect(attachmentName("attachment")).toBeNull();
++    expect(attachmentName(null)).toBeNull();
++  });
++});
+diff --git a/apps/portal/src/api/adminLeads.ts b/apps/portal/src/api/adminLeads.ts
+new file mode 100644
+index 0000000..da8df1f
+--- /dev/null
++++ b/apps/portal/src/api/adminLeads.ts
+@@ -0,0 +1,233 @@
++// Mirrors the sales-lead admin routes in crates/wipe-hub/src/admin_routes.rs
++// and `wipe_hub::lead_admin::{AdminLead, LeadList, LeadDetail, …}`
++// (crates/wipe-hub/src/lead_admin.rs). Change both together.
++//
++// Vendor admins only; everyone else gets a 403 `HubError`. Every call here
++// is audited on the hub (a list run, a view, an export, a change), so callers
++// run them on an explicit action, never per keystroke, on a timer, or to
++// refresh a page after a change: a change's response is the new state.
++
++import { ensureOk, isObject, json, request, type Fetch } from "./auth";
++
++/** The early-access form's segments (`wipe_hub::leads::SEGMENTS`). */
++export const SEGMENTS = ["itad", "enterprise-it", "government", "other"] as const;
++export type Segment = (typeof SEGMENTS)[number];
++
++/** A lead's statuses (`wipe_hub::lead_admin::STATUSES`). */
++export const STATUSES = ["new", "contacted", "qualified", "closed"] as const;
++export type LeadStatus = (typeof STATUSES)[number];
++
++/** The `segment` filter value for leads without a segment (contact form only). */
++export const SEGMENT_NONE = "none";
++
++/** A sales lead. Timestamps are RFC 3339 UTC; absent values are `null`. */
++export interface AdminLead {
++  id: string;
++  email: string;
++  name: string;
++  company: string;
++  role: string | null;
++  segment: Segment | null;
++  status: LeadStatus;
++  created_at: string;
++  updated_at: string;
++  /** The newest submission's consent time. */
++  last_submitted_at: string | null;
++  submission_count: number;
++  /** Set once the lead used an emailed unsubscribe link. */
++  unsubscribed_at: string | null;
++}
++
++export interface LeadList {
++  leads: AdminLead[];
++  /** More than the first 100 matched. */
++  truncated: boolean;
++}
++
++/** One form submission, with the exact consent text agreed to. */
++export interface LeadSubmission {
++  id: string;
++  kind: "early-access" | "contact";
++  message: string | null;
++  consent_text: string;
++  consented_at: string;
++}
++
++export interface LeadNote {
++  id: string;
++  body: string;
++  created_at: string;
++  /** `null` once the author's account is removed. */
++  author: { id: string; name: string; email: string } | null;
++}
++
++export interface LeadDetail {
++  lead: AdminLead;
++  /** Newest first. */
++  submissions: LeadSubmission[];
++  /** Newest first. */
++  notes: LeadNote[];
++}
++
++/**
++ * The list and export filters. An empty string means any. `segment` is a
++ * segment or `"none"`; `from` and `to` are inclusive UTC days, `YYYY-MM-DD`,
++ * matching leads with any submission in the range.
++ */
++export interface LeadFilters {
++  segment: string;
++  status: string;
++  from: string;
++  to: string;
++}
++
++export const NO_FILTERS: LeadFilters = { segment: "", status: "", from: "", to: "" };
++
++const isNullableString = (v: unknown): v is string | null => v === null || typeof v === "string";
++
++export function isAdminLead(v: unknown): v is AdminLead {
++  return (
++    isObject(v) &&
++    typeof v.id === "string" &&
++    typeof v.email === "string" &&
++    typeof v.name === "string" &&
++    typeof v.company === "string" &&
++    isNullableString(v.role) &&
++    (v.segment === null || (SEGMENTS as readonly unknown[]).includes(v.segment)) &&
++    (STATUSES as readonly unknown[]).includes(v.status) &&
++    typeof v.created_at === "string" &&
++    typeof v.updated_at === "string" &&
++    isNullableString(v.last_submitted_at) &&
++    typeof v.submission_count === "number" &&
++    isNullableString(v.unsubscribed_at)
++  );
++}
++
++function isLeadList(v: unknown): v is LeadList {
++  return (
++    isObject(v) &&
++    Array.isArray(v.leads) &&
++    v.leads.every(isAdminLead) &&
++    typeof v.truncated === "boolean"
++  );
++}
++
++function isSubmission(v: unknown): v is LeadSubmission {
++  return (
++    isObject(v) &&
++    typeof v.id === "string" &&
++    (v.kind === "early-access" || v.kind === "contact") &&
++    isNullableString(v.message) &&
++    typeof v.consent_text === "string" &&
++    typeof v.consented_at === "string"
++  );
++}
++
++export function isLeadNote(v: unknown): v is LeadNote {
++  return (
++    isObject(v) &&
++    typeof v.id === "string" &&
++    typeof v.body === "string" &&
++    typeof v.created_at === "string" &&
++    (v.author === null ||
++      (isObject(v.author) &&
++        typeof v.author.id === "string" &&
++        typeof v.author.name === "string" &&
++        typeof v.author.email === "string"))
++  );
++}
++
++function isLeadDetail(v: unknown): v is LeadDetail {
++  return (
++    isObject(v) &&
++    isAdminLead(v.lead) &&
++    Array.isArray(v.submissions) &&
++    v.submissions.every(isSubmission) &&
++    Array.isArray(v.notes) &&
++    v.notes.every(isLeadNote)
++  );
++}
++
++/** Only the filters that are set, so an unset one is absent, not empty. */
++function setFilters(filters: LeadFilters): Partial<LeadFilters> {
++  const out: Partial<LeadFilters> = {};
++  for (const key of ["segment", "status", "from", "to"] as const) {
++    if (filters[key] !== "") out[key] = filters[key];
++  }
++  return out;
++}
++
++function leadPath(id: string, action?: string): string {
++  const base = `/api/admin/leads/${encodeURIComponent(id)}`;
++  return action ? `${base}/${action}` : base;
++}
++
++/** `GET /api/admin/leads?…` (vendor admin): at most 100 leads, latest first. Audited. */
++export async function listLeads(filters: LeadFilters, fetchImpl: Fetch = fetch): Promise<LeadList> {
++  const query = new URLSearchParams(setFilters(filters)).toString();
++  const path = query ? `/api/admin/leads?${query}` : "/api/admin/leads";
++  const res = await ensureOk(await request(fetchImpl, "GET", path));
++  return json(res, isLeadList, "lead list");
++}
++
++/** `GET /api/admin/leads/{id}`: the lead, its submissions and notes. Audited. */
++export async function fetchLead(id: string, fetchImpl: Fetch = fetch): Promise<LeadDetail> {
++  const res = await ensureOk(await request(fetchImpl, "GET", leadPath(id)));
++  return json(res, isLeadDetail, "lead");
++}
++
++/** `POST /api/admin/leads/{id}/status`: the updated lead. Audited when it changes. */
++export async function setLeadStatus(
++  id: string,
++  status: LeadStatus,
++  fetchImpl: Fetch = fetch,
++): Promise<AdminLead> {
++  const res = await ensureOk(await request(fetchImpl, "POST", leadPath(id, "status"), { status }));
++  const body = await json(
++    res,
++    (v): v is { lead: AdminLead } => isObject(v) && isAdminLead(v.lead),
++    "lead status",
++  );
++  return body.lead;
++}
++
++/** `POST /api/admin/leads/{id}/notes` (201): the new note. Audited. */
++export async function addLeadNote(
++  id: string,
++  body: string,
++  fetchImpl: Fetch = fetch,
++): Promise<LeadNote> {
++  const res = await ensureOk(await request(fetchImpl, "POST", leadPath(id, "notes"), { body }));
++  const out = await json(
++    res,
++    (v): v is { note: LeadNote } => isObject(v) && isLeadNote(v.note),
++    "lead note",
++  );
++  return out.note;
++}
++
++/** `POST /api/admin/leads/{id}/erase`: deletes the lead, its submissions and notes. Audited. */
++export async function eraseLead(id: string, fetchImpl: Fetch = fetch): Promise<void> {
++  await ensureOk(await request(fetchImpl, "POST", leadPath(id, "erase"), {}));
++}
++
++/** The file name in a `Content-Disposition: attachment; filename="…"` header. */
++export function attachmentName(header: string | null): string | null {
++  const match = header?.match(/filename="([^"]+)"/);
++  return match ? match[1] : null;
++}
++
++/**
++ * `POST /api/admin/leads/export` with the CSRF token: every matching lead as
++ * CSV, uncapped, and the hub's file name for it. Audited.
++ */
++export async function exportLeads(
++  filters: LeadFilters,
++  fetchImpl: Fetch = fetch,
++): Promise<{ blob: Blob; filename: string }> {
++  const res = await ensureOk(
++    await request(fetchImpl, "POST", "/api/admin/leads/export", setFilters(filters)),
++  );
++  const filename = attachmentName(res.headers.get("Content-Disposition")) ?? "sales-leads.csv";
++  return { blob: await res.blob(), filename };
++}
+diff --git a/apps/portal/src/main.tsx b/apps/portal/src/main.tsx
+index 1af3499..8c5aa3f 100644
+--- a/apps/portal/src/main.tsx
++++ b/apps/portal/src/main.tsx
+@@ -13,6 +13,8 @@ import {
+ import "./index.css";
+ import { AcceptInvitePage } from "./pages/AcceptInvitePage";
+ import { AccountPage } from "./pages/AccountPage";
++import { AdminLeadPage } from "./pages/AdminLeadPage";
++import { AdminLeadsPage } from "./pages/AdminLeadsPage";
+ import { AdminOrganizationPage } from "./pages/AdminOrganizationPage";
+ import { AdminPage } from "./pages/AdminPage";
+ import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
+@@ -181,6 +183,21 @@ const adminOrganizationRoute = createRoute({
+   },
+ });
+ 
++const adminLeadsRoute = createRoute({
++  getParentRoute: () => rootRoute,
++  path: "/admin/leads",
++  component: AdminLeadsPage,
++});
++
++const adminLeadRoute = createRoute({
++  getParentRoute: () => rootRoute,
++  path: "/admin/leads/$id",
++  component: function AdminLeadRoute() {
++    const { id } = adminLeadRoute.useParams();
++    return <AdminLeadPage id={id} />;
++  },
++});
++
+ const routeTree = rootRoute.addChildren([
+   indexRoute,
+   signUpRoute,
+@@ -196,6 +213,8 @@ const routeTree = rootRoute.addChildren([
+   acceptInviteRoute,
+   adminRoute,
+   adminOrganizationRoute,
++  adminLeadsRoute,
++  adminLeadRoute,
+ ]);
+ 
+ const router = createRouter({ routeTree });
+diff --git a/apps/portal/src/pages/AdminLeadPage.tsx b/apps/portal/src/pages/AdminLeadPage.tsx
+new file mode 100644
+index 0000000..7e947d9
+--- /dev/null
++++ b/apps/portal/src/pages/AdminLeadPage.tsx
+@@ -0,0 +1,271 @@
++import { useState, type FormEvent } from "react";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { Link, useNavigate } from "@tanstack/react-router";
++import { fetchMe } from "@/api/auth";
++import { retryAdminQuery } from "@/api/admin";
++import {
++  STATUSES,
++  addLeadNote,
++  eraseLead,
++  fetchLead,
++  setLeadStatus,
++  type LeadDetail,
++  type LeadStatus,
++} from "@/api/adminLeads";
++import { SignInPrompt } from "./AccountPage";
++import { FormError, SubmitButton } from "./AuthForm";
++import { Select, segmentLabel } from "./AdminLeadsPage";
++
++/**
++ * `/admin/leads/$id`: one sales lead for vendor admins, with every
++ * submission and the exact consent text agreed to, its status, notes, and
++ * erasure. Opening it is an audited view on the hub, so a change updates the
++ * page from the hub's answer and never refetches (which would be another
++ * audited view).
++ */
++export function AdminLeadPage({ id }: { id: string }) {
++  const me = useQuery({ queryKey: ["me"], queryFn: () => fetchMe(), retry: false });
++
++  return (
++    <section className="space-y-6">
++      <p className="text-sm">
++        <Link to="/admin/leads" className="text-indigo-400 hover:underline">
++          Back to sales leads
++        </Link>
++      </p>
++      {me.isPending && <p className="text-sm text-slate-400">Loading…</p>}
++      {me.isError && (
++        <p role="alert" className="text-sm text-rose-400">
++          Could not load your account: {me.error instanceof Error ? me.error.message : "unknown error"}
++        </p>
++      )}
++      {me.data === null && <SignInPrompt />}
++      {me.data && <Detail id={id} />}
++    </section>
++  );
++}
++
++function Detail({ id }: { id: string }) {
++  const queryKey = ["admin", "lead", id];
++  const detail = useQuery({
++    queryKey,
++    queryFn: () => fetchLead(id),
++    refetchOnWindowFocus: false,
++    refetchOnMount: false,
++    refetchOnReconnect: false,
++    staleTime: Infinity,
++    // Dropped as soon as the page unmounts: never shown to a later user.
++    gcTime: 0,
++    retry: retryAdminQuery,
++  });
++  const queryClient = useQueryClient();
++  /** Apply a change's answer to the page without refetching. */
++  const update = (f: (d: LeadDetail) => LeadDetail) =>
++    queryClient.setQueryData<LeadDetail>(queryKey, (d) => (d ? f(d) : d));
++
++  return (
++    <>
++      {detail.isPending && <p className="text-sm text-slate-400">Loading…</p>}
++      <FormError error={detail.error} />
++      {detail.data && <LeadView id={id} detail={detail.data} update={update} />}
++    </>
++  );
++}
++
++function LeadView({
++  id,
++  detail,
++  update,
++}: {
++  id: string;
++  detail: LeadDetail;
++  update: (f: (d: LeadDetail) => LeadDetail) => void;
++}) {
++  const { lead, submissions, notes } = detail;
++  return (
++    <>
++      <div className="space-y-1">
++        <h1 className="text-xl font-semibold">{lead.name}</h1>
++        <p className="text-sm text-slate-300">
++          {lead.email} · {lead.company}
++          {lead.role && ` · ${lead.role}`}
++        </p>
++        <p className="text-sm text-slate-400">
++          Segment {segmentLabel(lead.segment)} · first submitted {lead.created_at.slice(0, 10)} ·{" "}
++          {lead.id}
++        </p>
++        {lead.unsubscribed_at && (
++          <p className="text-sm text-amber-400">
++            Unsubscribed {lead.unsubscribed_at.slice(0, 10)}
++          </p>
++        )}
++      </div>
++
++      <StatusForm
++        id={id}
++        status={lead.status}
++        onSaved={(l) => update((d) => ({ ...d, lead: l }))}
++      />
++
++      <div className="space-y-2">
++        <h2 className="text-sm font-medium text-slate-400">Submissions</h2>
++        <ul className="space-y-3">
++          {submissions.map((s) => (
++            <li key={s.id} className="space-y-1 rounded-md border border-slate-800 p-3 text-sm">
++              <p className="text-slate-400">
++                {s.kind === "early-access" ? "Early access" : "Contact"} · {s.consented_at}
++              </p>
++              {s.message && <p className="whitespace-pre-wrap">{s.message}</p>}
++              <p className="text-xs text-slate-400">Consented to: “{s.consent_text}”</p>
++            </li>
++          ))}
++        </ul>
++      </div>
++
++      <div className="space-y-2">
++        <h2 className="text-sm font-medium text-slate-400">Notes</h2>
++        <NoteForm
++          id={id}
++          onAdded={(n) => update((d) => ({ ...d, notes: [n, ...d.notes] }))}
++        />
++        {notes.length === 0 ? (
++          <p className="text-sm text-slate-400">No notes yet.</p>
++        ) : (
++          <ul className="space-y-2">
++            {notes.map((n) => (
++              <li key={n.id} className="text-sm">
++                <p className="text-xs text-slate-400">
++                  {n.created_at} · {n.author ? n.author.name : "removed user"}
++                </p>
++                <p className="whitespace-pre-wrap">{n.body}</p>
++              </li>
++            ))}
++          </ul>
++        )}
++      </div>
++
++      <EraseButton id={id} />
++    </>
++  );
++}
++
++function StatusForm({
++  id,
++  status,
++  onSaved,
++}: {
++  id: string;
++  status: LeadStatus;
++  onSaved: (lead: LeadDetail["lead"]) => void;
++}) {
++  const [value, setValue] = useState<LeadStatus>(status);
++  const save = useMutation({
++    mutationFn: (s: LeadStatus) => setLeadStatus(id, s),
++    onSuccess: onSaved,
++  });
++  function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    save.mutate(value);
++  }
++  return (
++    <form onSubmit={onSubmit} className="flex max-w-sm items-end gap-3">
++      <div className="flex-1">
++        <Select
++          label="Status"
++          name="status"
++          value={value}
++          onChange={(v) => setValue(v as LeadStatus)}
++          options={STATUSES.map((s) => ({ value: s, label: s }))}
++        />
++      </div>
++      <SubmitButton pending={save.isPending}>Save status</SubmitButton>
++      <FormError error={save.error} />
++    </form>
++  );
++}
++
++function NoteForm({
++  id,
++  onAdded,
++}: {
++  id: string;
++  onAdded: (note: LeadDetail["notes"][number]) => void;
++}) {
++  const [body, setBody] = useState("");
++  const add = useMutation({
++    mutationFn: (b: string) => addLeadNote(id, b),
++    onSuccess: (note) => {
++      setBody("");
++      onAdded(note);
++    },
++  });
++  function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    add.mutate(body);
++  }
++  return (
++    <form onSubmit={onSubmit} className="max-w-xl space-y-2">
++      <label className="block space-y-1 text-sm">
++        <span className="text-slate-300">New note</span>
++        <textarea
++          name="note"
++          required
++          rows={3}
++          value={body}
++          onChange={(e) => setBody(e.target.value)}
++          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 focus:border-indigo-500 focus:outline-none"
++        />
++      </label>
++      <SubmitButton pending={add.isPending}>Add note</SubmitButton>
++      <FormError error={add.error} />
++    </form>
++  );
++}
++
++/** Erasure needs a second, confirming press; then back to the list. */
++function EraseButton({ id }: { id: string }) {
++  const navigate = useNavigate();
++  const [confirming, setConfirming] = useState(false);
++  const erase = useMutation({
++    mutationFn: () => eraseLead(id),
++    onSuccess: () => navigate({ to: "/admin/leads" }),
++  });
++  return (
++    <div className="space-y-2 border-t border-slate-800 pt-4">
++      <h2 className="text-sm font-medium text-slate-400">Erase</h2>
++      <p className="text-sm text-slate-400">
++        Deletes this lead, every submission and every note for good. The audit log keeps only that
++        an erasure happened.
++      </p>
++      {confirming ? (
++        <div className="flex gap-3">
++          <button
++            type="button"
++            disabled={erase.isPending}
++            onClick={() => erase.mutate()}
++            className="rounded-md bg-rose-600 px-4 py-2 text-sm font-medium text-white hover:bg-rose-500 disabled:opacity-50"
++          >
++            Erase permanently
++          </button>
++          <button
++            type="button"
++            disabled={erase.isPending}
++            onClick={() => setConfirming(false)}
++            className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
++          >
++            Cancel
++          </button>
++        </div>
++      ) : (
++        <button
++          type="button"
++          onClick={() => setConfirming(true)}
++          className="rounded-md border border-rose-700 px-4 py-2 text-sm font-medium text-rose-300 hover:bg-rose-950"
++        >
++          Erase lead
++        </button>
++      )}
++      <FormError error={erase.error} />
++    </div>
++  );
++}
+diff --git a/apps/portal/src/pages/AdminLeadsPage.tsx b/apps/portal/src/pages/AdminLeadsPage.tsx
+new file mode 100644
+index 0000000..02d7f1a
+--- /dev/null
++++ b/apps/portal/src/pages/AdminLeadsPage.tsx
+@@ -0,0 +1,251 @@
++import { useState, type FormEvent } from "react";
++import { useMutation, useQuery } from "@tanstack/react-query";
++import { Link } from "@tanstack/react-router";
++import { fetchMe } from "@/api/auth";
++import { retryAdminQuery } from "@/api/admin";
++import {
++  NO_FILTERS,
++  SEGMENTS,
++  SEGMENT_NONE,
++  STATUSES,
++  exportLeads,
++  listLeads,
++  type AdminLead,
++  type LeadFilters,
++} from "@/api/adminLeads";
++import { SignInPrompt } from "./AccountPage";
++import { Field, FormError, SubmitButton } from "./AuthForm";
++
++/**
++ * `/admin/leads`: vendor admins list sales leads by segment, status and
++ * submission date, and download them as CSV. Each list run and each export
++ * is audited on the hub, so the list runs only when the form is submitted,
++ * and the export uses the filters of the last run, never unsubmitted edits.
++ */
++export function AdminLeadsPage() {
++  const me = useQuery({ queryKey: ["me"], queryFn: () => fetchMe(), retry: false });
++
++  return (
++    <section className="space-y-6">
++      <p className="text-sm">
++        <Link to="/admin" className="text-indigo-400 hover:underline">
++          Back to the admin area
++        </Link>
++      </p>
++      <h1 className="text-xl font-semibold">Sales leads</h1>
++      {me.isPending && <p className="text-sm text-slate-400">Loading…</p>}
++      {me.isError && (
++        <p role="alert" className="text-sm text-rose-400">
++          Could not load your account: {me.error instanceof Error ? me.error.message : "unknown error"}
++        </p>
++      )}
++      {me.data === null && <SignInPrompt />}
++      {me.data && (
++        <>
++          <p className="text-sm text-slate-400">
++            Every list, lead you open and export is recorded in the audit log.
++          </p>
++          <Leads />
++        </>
++      )}
++    </section>
++  );
++}
++
++const SEGMENT_LABELS: Record<string, string> = {
++  itad: "ITAD",
++  "enterprise-it": "Enterprise IT",
++  government: "Government",
++  other: "Other",
++  [SEGMENT_NONE]: "None (contact form)",
++};
++
++export function segmentLabel(segment: string | null): string {
++  return segment === null ? "—" : (SEGMENT_LABELS[segment] ?? segment);
++}
++
++export function Select({
++  label,
++  name,
++  value,
++  onChange,
++  options,
++}: {
++  label: string;
++  name: string;
++  value: string;
++  onChange: (v: string) => void;
++  options: { value: string; label: string }[];
++}) {
++  return (
++    <label className="block space-y-1 text-sm">
++      <span className="text-slate-300">{label}</span>
++      <select
++        name={name}
++        value={value}
++        onChange={(e) => onChange(e.target.value)}
++        className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 focus:border-indigo-500 focus:outline-none"
++      >
++        {options.map((o) => (
++          <option key={o.value} value={o.value}>
++            {o.label}
++          </option>
++        ))}
++      </select>
++    </label>
++  );
++}
++
++/** Hand a downloaded file to the browser. */
++function saveFile(blob: Blob, filename: string) {
++  const url = URL.createObjectURL(blob);
++  const a = document.createElement("a");
++  a.href = url;
++  a.download = filename;
++  document.body.appendChild(a);
++  a.click();
++  a.remove();
++  URL.revokeObjectURL(url);
++}
++
++function Leads() {
++  const [draft, setDraft] = useState<LeadFilters>(NO_FILTERS);
++  // Each submit gets a new sequence number, so it is a new query key and
++  // runs the list again even when the filters are unchanged.
++  const [submitted, setSubmitted] = useState<{ filters: LeadFilters; n: number } | null>(null);
++  const set = (key: keyof LeadFilters) => (v: string) => setDraft((d) => ({ ...d, [key]: v }));
++
++  const list = useQuery({
++    queryKey: ["admin", "leads", submitted],
++    queryFn: () => listLeads(submitted?.filters ?? NO_FILTERS),
++    enabled: submitted !== null,
++    refetchOnWindowFocus: false,
++    refetchOnMount: false,
++    refetchOnReconnect: false,
++    staleTime: Infinity,
++    // Never keep lead data once the page unmounts.
++    gcTime: 0,
++    retry: retryAdminQuery,
++  });
++
++  const exporter = useMutation({
++    mutationFn: (filters: LeadFilters) => exportLeads(filters),
++    onSuccess: ({ blob, filename }) => saveFile(blob, filename),
++  });
++
++  function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    exporter.reset();
++    setSubmitted((prev) => ({ filters: draft, n: (prev?.n ?? 0) + 1 }));
++  }
++
++  return (
++    <div className="space-y-4">
++      <form onSubmit={onSubmit} className="grid max-w-2xl grid-cols-2 items-end gap-3 sm:grid-cols-4">
++        <Select
++          label="Segment"
++          name="segment"
++          value={draft.segment}
++          onChange={set("segment")}
++          options={[
++            { value: "", label: "Any" },
++            ...[...SEGMENTS, SEGMENT_NONE].map((s) => ({ value: s, label: segmentLabel(s) })),
++          ]}
++        />
++        <Select
++          label="Status"
++          name="status"
++          value={draft.status}
++          onChange={set("status")}
++          options={[{ value: "", label: "Any" }, ...STATUSES.map((s) => ({ value: s, label: s }))]}
++        />
++        <Field
++          label="Submitted from (UTC)"
++          name="from"
++          type="date"
++          required={false}
++          value={draft.from}
++          onChange={set("from")}
++        />
++        <Field
++          label="Submitted to (UTC)"
++          name="to"
++          type="date"
++          required={false}
++          value={draft.to}
++          onChange={set("to")}
++        />
++        <div className="col-span-2 flex gap-3 sm:col-span-4">
++          <SubmitButton pending={list.isFetching}>Show leads</SubmitButton>
++          <button
++            type="button"
++            disabled={submitted === null || exporter.isPending}
++            onClick={() => submitted && exporter.mutate(submitted.filters)}
++            className="rounded-md border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-50"
++          >
++            Export CSV
++          </button>
++        </div>
++      </form>
++      {submitted === null && (
++        <p className="text-sm text-slate-400">Show leads first; Export CSV uses the same filters.</p>
++      )}
++      <FormError error={list.error} />
++      <FormError error={exporter.error} />
++      {list.data && <LeadTable leads={list.data.leads} />}
++      {list.data?.truncated && (
++        <p className="text-sm text-amber-400">
++          Showing the first 100 leads. Narrow the filters to see the rest, or export them all.
++        </p>
++      )}
++    </div>
++  );
++}
++
++function LeadTable({ leads }: { leads: AdminLead[] }) {
++  if (leads.length === 0) return <p className="text-sm text-slate-400">No leads match.</p>;
++  return (
++    <table className="w-full text-left text-sm">
++      <thead className="text-slate-400">
++        <tr>
++          <th className="py-1 pr-3 font-medium">Name</th>
++          <th className="py-1 pr-3 font-medium">Email</th>
++          <th className="py-1 pr-3 font-medium">Company</th>
++          <th className="py-1 pr-3 font-medium">Segment</th>
++          <th className="py-1 pr-3 font-medium">Status</th>
++          <th className="py-1 font-medium">Last submitted</th>
++        </tr>
++      </thead>
++      <tbody className="divide-y divide-slate-800">
++        {leads.map((l) => (
++          <tr key={l.id}>
++            <td className="py-1 pr-3">
++              <Link
++                to="/admin/leads/$id"
++                params={{ id: l.id }}
++                className="text-indigo-400 hover:underline"
++              >
++                {l.name}
++              </Link>
++            </td>
++            <td className="py-1 pr-3">
++              {l.email}
++              {l.unsubscribed_at && (
++                <span className="block text-xs text-amber-400">
++                  Unsubscribed {l.unsubscribed_at.slice(0, 10)}
++                </span>
++              )}
++            </td>
++            <td className="py-1 pr-3">{l.company}</td>
++            <td className="py-1 pr-3">{segmentLabel(l.segment)}</td>
++            <td className="py-1 pr-3">{l.status}</td>
++            <td className="py-1 text-slate-400">
++              {l.last_submitted_at?.slice(0, 10) ?? "—"}
++              {l.submission_count > 1 && ` (${l.submission_count})`}
++            </td>
++          </tr>
++        ))}
++      </tbody>
++    </table>
++  );
++}
+diff --git a/apps/portal/src/pages/AdminPage.tsx b/apps/portal/src/pages/AdminPage.tsx
+index 20b623a..386b0ad 100644
+--- a/apps/portal/src/pages/AdminPage.tsx
++++ b/apps/portal/src/pages/AdminPage.tsx
+@@ -13,7 +13,8 @@ import { SignInPrompt } from "./AccountPage";
+ import { Field, FormError, SubmitButton } from "./AuthForm";
+ 
+ /**
+- * `/admin`: vendor admins search customer organizations and users. Each
++ * `/admin`: vendor admins search customer organizations and users, and
++ * reach the sales leads (`/admin/leads`). Each
+  * search is an audited view on the hub, so one runs only when its form is
+  * submitted, never per keystroke or on page load. The hub decides who may
+  * search; anyone else sees its 403 message.
+@@ -36,6 +37,12 @@ export function AdminPage() {
+           <p className="text-sm text-slate-400">
+             Every search and every organization you open is recorded in the audit log.
+           </p>
++          <p className="text-sm">
++            <Link to="/admin/leads" className="text-indigo-400 hover:underline">
++              Sales leads
++            </Link>{" "}
++            <span className="text-slate-400">from the marketing site's forms</span>
++          </p>
+           <OrganizationSearchForm />
+           <UserSearchForm />
+         </>
+diff --git a/crates/wipe-hub/migrations/0009_lead_notes.sql b/crates/wipe-hub/migrations/0009_lead_notes.sql
+new file mode 100644
+index 0000000..203a448
+--- /dev/null
++++ b/crates/wipe-hub/migrations/0009_lead_notes.sql
+@@ -0,0 +1,18 @@
++-- Notes on sales leads (lead-capture story 2, CAP-3): vendor staff's working
++-- notes, written in the admin area. A note is append-only: there is no edit
++-- or delete of a single note. It is attributed to the vendor admin who wrote
++-- it; removing that user keeps the note with no author (`ON DELETE SET
++-- NULL`). Erasing the lead deletes its notes (`ON DELETE CASCADE`), like its
++-- submissions, so an erasure leaves no note behind (CAP-4).
++--
++-- Never edit an applied migration; add a new NNNN_name.sql.
++
++CREATE TABLE lead_notes (
++    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
++    lead_id    uuid NOT NULL REFERENCES leads (id) ON DELETE CASCADE,
++    author_id  uuid REFERENCES users (id) ON DELETE SET NULL,
++    body       text NOT NULL CHECK (body ~ '\S'),
++    created_at timestamptz NOT NULL DEFAULT now()
++);
++
++CREATE INDEX lead_notes_lead_id_idx ON lead_notes (lead_id);
+diff --git a/crates/wipe-hub/src/admin.rs b/crates/wipe-hub/src/admin.rs
+index 49ccfcf..eabf91e 100644
+--- a/crates/wipe-hub/src/admin.rs
++++ b/crates/wipe-hub/src/admin.rs
+@@ -22,7 +22,9 @@
+ //! - Searches match case-insensitive substrings with LIKE wildcards escaped
+ //!   ([`escape_like`]), return at most [`SEARCH_LIMIT`] rows and say whether
+ //!   more matched. Timestamps are RFC 3339 UTC strings formatted in SQL.
+-//! - Read-only: nothing here writes customer data.
++//! - Read-only: nothing here writes customer data. The sales-lead admin
++//!   functions, which do write (status, notes, erasure), live in
++//!   [`crate::lead_admin`] under the same rules.
+ 
+ use std::str::FromStr;
+ use std::time::Duration;
+@@ -57,7 +59,7 @@ pub const CLI_ACTOR: &str = "cli:admin-create";
+ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+ 
+ /// `to_char` format for RFC 3339 UTC, whole seconds (as `team.rs`).
+-const RFC3339_UTC: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS"Z"'"#;
++pub(crate) const RFC3339_UTC: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS"Z"'"#;
+ 
+ /// A signed-in vendor admin. Only the `/api/admin/*` extractor builds one,
+ /// after checking the role, the vendor organization and a verified email in
+@@ -188,8 +190,9 @@ fn decode_role(s: &str) -> Result<Role, sqlx::Error> {
+     Role::from_str(s).map_err(|e| sqlx::Error::Decode(e.into()))
+ }
+ 
+-/// Append one admin read to the audit log, as `admin`.
+-async fn audit_read(
++/// Append one admin read (or, from [`crate::lead_admin`], action) to the
++/// audit log, as `admin`.
++pub(crate) async fn audit_read(
+     conn: &mut PgConnection,
+     admin: &VendorAdmin,
+     action: &str,
+@@ -210,7 +213,7 @@ async fn audit_read(
+ }
+ 
+ /// Split one extra row off a `LIMIT SEARCH_LIMIT + 1` result.
+-fn truncate<T>(mut rows: Vec<T>) -> (Vec<T>, bool) {
++pub(crate) fn truncate<T>(mut rows: Vec<T>) -> (Vec<T>, bool) {
+     let truncated = rows.len() as i64 > SEARCH_LIMIT;
+     rows.truncate(SEARCH_LIMIT as usize);
+     (rows, truncated)
+diff --git a/crates/wipe-hub/src/admin_routes.rs b/crates/wipe-hub/src/admin_routes.rs
+index 289ba9b..ce8e0fc 100644
+--- a/crates/wipe-hub/src/admin_routes.rs
++++ b/crates/wipe-hub/src/admin_routes.rs
+@@ -1,47 +1,77 @@
+-//! The admin area's routes (portal-accounts story 5), all GET and read-only:
++//! The admin area's routes (portal-accounts story 5; sales leads,
++//! lead-capture story 2):
+ //!
+ //! - `GET /api/admin/organizations?q=` — search customer organizations by
+ //!   name or by their users' emails and names.
+ //! - `GET /api/admin/users?q=` — search customer users by email or name.
+ //! - `GET /api/admin/organizations/:id` — one customer organization and its
+ //!   users.
++//! - `GET /api/admin/leads?segment=&status=&from=&to=` — sales leads,
++//!   filtered ([`lead_admin::LeadFilter`]), at most 100 plus `truncated`.
++//! - `GET /api/admin/leads/:id` — one lead, its submissions and its notes.
++//! - `POST /api/admin/leads/:id/status {status}` — set the lead's status.
++//! - `POST /api/admin/leads/:id/notes {body}` — add a note (201).
++//! - `POST /api/admin/leads/:id/erase` — delete the lead, its submissions
++//!   and its notes.
++//! - `POST /api/admin/leads/export {segment?, status?, from?, to?}` — every
++//!   matching lead as a CSV download. A CSRF-protected POST, not a GET, so
++//!   no other site can start a download of personal data.
+ //!
+-//! Only a vendor admin gets in ([`VendorAdmin`]'s extractor): no session is
+-//! 401 `not signed in`; any other session (an owner, a member, a
+-//! `vendor_admin`-role user outside the vendor organization, or one whose
+-//! email is unverified) is 403 [`MSG_ADMIN_ONLY`]. The check runs before
+-//! the query string is read or any data is touched, and is read live, so a
+-//! change applies to the next request. Each handler runs one transaction in
+-//! which [`crate::admin`] reads and writes its audit row. A bad `q` is 400
+-//! [`admin::MSG_BAD_QUERY`] and an unknown, non-UUID or vendor organization
+-//! id is 404 [`MSG_NO_ORGANIZATION`]; neither writes an audit row. Error
+-//! bodies are `{"error": "<message>"}`.
++//! The organization and user routes are read-only; the lead routes also
++//! change sales leads, through [`crate::lead_admin`].
++//!
++//! Only a vendor admin gets in ([`VendorAdmin`]'s extractor, the first
++//! extractor of every handler): no session is 401 `not signed in`; any
++//! other session (an owner, a member, a `vendor_admin`-role user outside the
++//! vendor organization, or one whose email is unverified) is 403
++//! [`MSG_ADMIN_ONLY`]. The check runs before the path, query or body is read
++//! or any data is touched, and is read live, so a change applies to the
++//! next request. Each handler runs one transaction in which the data layer
++//! reads or writes and records its audit row. A bad `q` is 400
++//! [`admin::MSG_BAD_QUERY`], a bad lead filter 400 [`MSG_BAD_FILTER`], an
++//! unknown, non-UUID or vendor organization id 404 [`MSG_NO_ORGANIZATION`]
++//! and an unknown, non-UUID or erased lead id 404 [`MSG_NO_LEAD`]; none
++//! writes an audit row. Error bodies are `{"error": "<message>"}`.
+ 
+ use axum::async_trait;
+ use axum::extract::rejection::QueryRejection;
+ use axum::extract::{FromRequestParts, Path, Query, State};
++use axum::http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE};
+ use axum::http::request::Parts;
+ use axum::http::StatusCode;
+-use axum::routing::get;
++use axum::response::{IntoResponse, Response};
++use axum::routing::{get, post};
+ use axum::{Json, Router};
+ use serde::Deserialize;
++use serde_json::json;
+ use uuid::Uuid;
+ 
+ use crate::accounts;
+ use crate::admin::{
+     self, AdminOrganizationDetail, AdminReadError, OrganizationSearch, UserSearch, VendorAdmin,
+ };
+-use crate::auth::{session_token, ApiError, MSG_NOT_SIGNED_IN};
++use crate::auth::{session_token, ApiError, JsonBody, MSG_NOT_SIGNED_IN};
++use crate::lead_admin::{self, FilterParams, LeadDetail, LeadFilter, LeadList};
+ use crate::AppState;
+ 
+ pub const MSG_ADMIN_ONLY: &str = "only vendor admins can use the admin area";
+ pub const MSG_NO_ORGANIZATION: &str = "no such organization";
++pub const MSG_NO_LEAD: &str = "no such sales lead";
++pub const MSG_BAD_FILTER: &str = "segment must be one of itad, enterprise-it, government, other, \
++     none; status one of new, contacted, qualified, closed; from and to dates as YYYY-MM-DD, \
++     from not after to";
+ 
+ pub fn routes() -> Router<AppState> {
+     Router::new()
+         .route("/api/admin/organizations", get(search_organizations))
+         .route("/api/admin/organizations/:id", get(organization_detail))
+         .route("/api/admin/users", get(search_users))
++        .route("/api/admin/leads", get(list_leads))
++        .route("/api/admin/leads/export", post(export_leads))
++        .route("/api/admin/leads/:id", get(lead_detail))
++        .route("/api/admin/leads/:id/status", post(set_lead_status))
++        .route("/api/admin/leads/:id/notes", post(add_lead_note))
++        .route("/api/admin/leads/:id/erase", post(erase_lead))
+ }
+ 
+ impl From<AdminReadError> for ApiError {
+@@ -131,3 +161,129 @@ async fn organization_detail(
+     tx.commit().await?;
+     Ok(Json(detail))
+ }
++
++// ---------------------------------------------------------------------------
++// Sales leads
++
++fn bad_filter() -> ApiError {
++    ApiError::new(StatusCode::BAD_REQUEST, MSG_BAD_FILTER)
++}
++
++fn no_lead() -> ApiError {
++    ApiError::new(StatusCode::NOT_FOUND, MSG_NO_LEAD)
++}
++
++/// The lead id from the path, or 404.
++fn lead_id(id: &str) -> Result<Uuid, ApiError> {
++    Uuid::parse_str(id).map_err(|_| no_lead())
++}
++
++async fn list_leads(
++    State(state): State<AppState>,
++    admin: VendorAdmin,
++    params: Result<Query<FilterParams>, QueryRejection>,
++) -> Result<Json<LeadList>, ApiError> {
++    let Query(params) = params.map_err(|_| bad_filter())?;
++    let filter = LeadFilter::parse(&params).map_err(|_| bad_filter())?;
++    let mut tx = state.pool.begin().await?;
++    let found = lead_admin::list(&mut tx, &admin, &filter).await?;
++    tx.commit().await?;
++    Ok(Json(found))
++}
++
++/// The CSV is built from rows read in the transaction that audits the
++/// export, and sent only after it commits: no export leaves unaudited.
++async fn export_leads(
++    State(state): State<AppState>,
++    admin: VendorAdmin,
++    JsonBody(params): JsonBody<FilterParams>,
++) -> Result<Response, ApiError> {
++    let filter = LeadFilter::parse(&params).map_err(|_| bad_filter())?;
++    let mut tx = state.pool.begin().await?;
++    let export = lead_admin::export_rows(&mut tx, &admin, &filter).await?;
++    tx.commit().await?;
++    let disposition = format!("attachment; filename=\"sales-leads-{}.csv\"", export.date);
++    Ok((
++        [
++            (CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
++            (CONTENT_DISPOSITION, disposition),
++            (CACHE_CONTROL, "no-store".to_string()),
++        ],
++        lead_admin::to_csv(&export.leads),
++    )
++        .into_response())
++}
++
++async fn lead_detail(
++    State(state): State<AppState>,
++    admin: VendorAdmin,
++    Path(id): Path<String>,
++) -> Result<Json<LeadDetail>, ApiError> {
++    let id = lead_id(&id)?;
++    let mut tx = state.pool.begin().await?;
++    let detail = lead_admin::detail(&mut tx, &admin, id)
++        .await?
++        .ok_or_else(no_lead)?;
++    tx.commit().await?;
++    Ok(Json(detail))
++}
++
++#[derive(Debug, Deserialize)]
++struct StatusRequest {
++    #[serde(default)]
++    status: String,
++}
++
++async fn set_lead_status(
++    State(state): State<AppState>,
++    admin: VendorAdmin,
++    Path(id): Path<String>,
++    JsonBody(req): JsonBody<StatusRequest>,
++) -> Result<Json<serde_json::Value>, ApiError> {
++    let id = lead_id(&id)?;
++    let status = lead_admin::validate_status(&req.status)
++        .map_err(|m| ApiError::new(StatusCode::BAD_REQUEST, m))?;
++    let mut tx = state.pool.begin().await?;
++    let lead = lead_admin::set_status(&mut tx, &admin, id, status)
++        .await?
++        .ok_or_else(no_lead)?;
++    tx.commit().await?;
++    Ok(Json(json!({ "lead": lead })))
++}
++
++#[derive(Debug, Deserialize)]
++struct NoteRequest {
++    #[serde(default)]
++    body: String,
++}
++
++async fn add_lead_note(
++    State(state): State<AppState>,
++    admin: VendorAdmin,
++    Path(id): Path<String>,
++    JsonBody(req): JsonBody<NoteRequest>,
++) -> Result<Response, ApiError> {
++    let id = lead_id(&id)?;
++    let body = lead_admin::validate_note(&req.body)
++        .map_err(|m| ApiError::new(StatusCode::BAD_REQUEST, m))?;
++    let mut tx = state.pool.begin().await?;
++    let note = lead_admin::add_note(&mut tx, &admin, id, &body)
++        .await?
++        .ok_or_else(no_lead)?;
++    tx.commit().await?;
++    Ok((StatusCode::CREATED, Json(json!({ "note": note }))).into_response())
++}
++
++async fn erase_lead(
++    State(state): State<AppState>,
++    admin: VendorAdmin,
++    Path(id): Path<String>,
++) -> Result<Json<serde_json::Value>, ApiError> {
++    let id = lead_id(&id)?;
++    let mut tx = state.pool.begin().await?;
++    lead_admin::erase(&mut tx, &admin, id)
++        .await?
++        .ok_or_else(no_lead)?;
++    tx.commit().await?;
++    Ok(Json(json!({})))
++}
+diff --git a/crates/wipe-hub/src/lead_admin.rs b/crates/wipe-hub/src/lead_admin.rs
+new file mode 100644
+index 0000000..86c170c
+--- /dev/null
++++ b/crates/wipe-hub/src/lead_admin.rs
+@@ -0,0 +1,729 @@
++//! The sales-lead admin data layer (lead-capture story 2, CAP-3 and the
++//! erasure half of CAP-4): vendor admins list, view, work, export and erase
++//! sales leads. The routes are in [`crate::admin_routes`].
++//!
++//! The rules of [`crate::admin`] apply: every function takes a
++//! `&VendorAdmin` and a connection (a transaction in practice) and writes
++//! its own audit row (actor `user:<admin id>`) in it, so no lead data is
++//! returned, and no lead changed, without its row; a lookup that finds no
++//! lead writes nothing. Timestamps are RFC 3339 UTC strings formatted in
++//! SQL.
++//!
++//! - **No personal data in audit rows.** Rows written here hold ids, filter
++//!   values, counts and status names only, never a name, email, company,
++//!   role, message, consent text or note body, so an erased lead leaves no
++//!   personal data in the append-only log. That is why the list filters on
++//!   segment, status and submission date, never on free text.
++//! - **Mutations lock the lead first** (`SELECT … FOR UPDATE`), so one that
++//!   races an erasure finds no lead (a 404), never a foreign-key error.
++//! - **Notes are append-only** and attributed to their author; they are
++//!   deleted with the lead.
++//! - **Erasure keeps nothing**: the lead, its submissions and its notes are
++//!   deleted, and no suppression record is kept (it would retain the
++//!   address). A later submission from the same address is a new lead.
++
++use serde::{Deserialize, Serialize};
++use serde_json::json;
++use sqlx::postgres::PgConnection;
++use uuid::Uuid;
++
++use crate::admin::{audit_read, truncate, AdminReadError, VendorAdmin, RFC3339_UTC, SEARCH_LIMIT};
++use crate::leads::{self, SEGMENTS};
++
++/// The statuses a vendor admin can give a lead (migration 0008's CHECK).
++pub const STATUSES: [&str; 4] = ["new", "contacted", "qualified", "closed"];
++
++/// The `segment` filter value matching leads with no segment (contact-only
++/// leads).
++pub const SEGMENT_NONE: &str = "none";
++
++pub const MSG_BAD_STATUS: &str = "status must be one of new, contacted, qualified, closed";
++pub const MSG_BLANK_NOTE: &str = "note must not be blank";
++
++// ---------------------------------------------------------------------------
++// Filters
++
++/// The filters as sent: the list's query string, or the export's body.
++/// Every field is optional; empty means any.
++#[derive(Debug, Clone, Default, Deserialize)]
++pub struct FilterParams {
++    pub segment: Option<String>,
++    pub status: Option<String>,
++    pub from: Option<String>,
++    pub to: Option<String>,
++}
++
++/// Validated filters. `None` matches any lead. Serialized as the audit
++/// row's `filter` (no personal data: fixed vocabularies and dates only).
++#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
++pub struct LeadFilter {
++    /// One of [`SEGMENTS`] or [`SEGMENT_NONE`].
++    pub segment: Option<String>,
++    /// One of [`STATUSES`].
++    pub status: Option<String>,
++    /// `YYYY-MM-DD`, an inclusive UTC day.
++    pub from: Option<String>,
++    /// `YYYY-MM-DD`, an inclusive UTC day, never before `from`.
++    pub to: Option<String>,
++}
++
++/// A filter value outside its vocabulary, a malformed or impossible date, or
++/// `from` after `to`.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct BadFilter;
++
++fn given(v: &Option<String>) -> Option<&str> {
++    v.as_deref().filter(|s| !s.is_empty())
++}
++
++/// Whether `s` is a real calendar date written `YYYY-MM-DD`.
++pub fn is_iso_date(s: &str) -> bool {
++    let b = s.as_bytes();
++    if b.len() != 10
++        || b[4] != b'-'
++        || b[7] != b'-'
++        || !b
++            .iter()
++            .enumerate()
++            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
++    {
++        return false;
++    }
++    let num = |r: std::ops::Range<usize>| s[r].parse::<u32>().unwrap_or(0);
++    let (year, month, day) = (num(0..4), num(5..7), num(8..10));
++    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
++    let days = match month {
++        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
++        4 | 6 | 9 | 11 => 30,
++        2 if leap => 29,
++        2 => 28,
++        _ => return false,
++    };
++    year >= 1 && (1..=days).contains(&day)
++}
++
++impl LeadFilter {
++    pub fn parse(p: &FilterParams) -> Result<Self, BadFilter> {
++        let segment = given(&p.segment);
++        if segment.is_some_and(|s| s != SEGMENT_NONE && !SEGMENTS.contains(&s)) {
++            return Err(BadFilter);
++        }
++        let status = given(&p.status);
++        if status.is_some_and(|s| !STATUSES.contains(&s)) {
++            return Err(BadFilter);
++        }
++        let (from, to) = (given(&p.from), given(&p.to));
++        if from.is_some_and(|d| !is_iso_date(d)) || to.is_some_and(|d| !is_iso_date(d)) {
++            return Err(BadFilter);
++        }
++        // Same fixed-width format, so string order is date order.
++        if let (Some(f), Some(t)) = (from, to) {
++            if f > t {
++                return Err(BadFilter);
++            }
++        }
++        Ok(Self {
++            segment: segment.map(str::to_string),
++            status: status.map(str::to_string),
++            from: from.map(str::to_string),
++            to: to.map(str::to_string),
++        })
++    }
++}
++
++/// A status from a request body, or [`MSG_BAD_STATUS`].
++pub fn validate_status(s: &str) -> Result<&'static str, &'static str> {
++    STATUSES
++        .iter()
++        .copied()
++        .find(|v| *v == s)
++        .ok_or(MSG_BAD_STATUS)
++}
++
++/// A trimmed, non-blank note body under [`leads::validate_message`]'s rules;
++/// the error is the 400 message.
++pub fn validate_note(body: &str) -> Result<String, String> {
++    match leads::validate_message(Some(body)) {
++        Ok(Some(b)) => Ok(b),
++        Ok(None) => Err(MSG_BLANK_NOTE.into()),
++        Err(e) => Err(e.replacen("message", "note", 1)),
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Shapes
++
++/// A sales lead as the admin area shows it (list rows, detail, export).
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
++pub struct AdminLead {
++    pub id: Uuid,
++    pub email: String,
++    pub name: String,
++    pub company: String,
++    pub role: Option<String>,
++    pub segment: Option<String>,
++    pub status: String,
++    /// RFC 3339, UTC.
++    pub created_at: String,
++    pub updated_at: String,
++    /// The newest submission's consent time.
++    pub last_submitted_at: Option<String>,
++    pub submission_count: i64,
++    pub unsubscribed_at: Option<String>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct LeadList {
++    pub leads: Vec<AdminLead>,
++    /// More than [`SEARCH_LIMIT`] matched.
++    pub truncated: bool,
++}
++
++/// One form submission, with the exact consent text agreed to.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
++pub struct AdminSubmission {
++    pub id: Uuid,
++    pub kind: String,
++    pub message: Option<String>,
++    pub consent_text: String,
++    /// RFC 3339, UTC.
++    pub consented_at: String,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct NoteAuthor {
++    pub id: Uuid,
++    pub name: String,
++    pub email: String,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct LeadNote {
++    pub id: Uuid,
++    pub body: String,
++    /// RFC 3339, UTC.
++    pub created_at: String,
++    /// `None` once the author's account is removed.
++    pub author: Option<NoteAuthor>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct LeadDetail {
++    pub lead: AdminLead,
++    /// Newest first.
++    pub submissions: Vec<AdminSubmission>,
++    /// Newest first.
++    pub notes: Vec<LeadNote>,
++}
++
++/// An export: the UTC date it was taken (for the file name) and every
++/// matching lead.
++#[derive(Debug, Clone)]
++pub struct LeadExport {
++    pub date: String,
++    pub leads: Vec<AdminLead>,
++}
++
++// ---------------------------------------------------------------------------
++// Queries
++
++/// The `AdminLead` columns over `leads l` and its submission summary.
++fn lead_select() -> String {
++    format!(
++        "SELECT l.id, l.email, l.name, l.company, l.role, l.segment, l.status, \
++                to_char(l.created_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS created_at, \
++                to_char(l.updated_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS updated_at, \
++                to_char(st.last AT TIME ZONE 'UTC', {RFC3339_UTC}) AS last_submitted_at, \
++                st.n AS submission_count, \
++                to_char(l.unsubscribed_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS unsubscribed_at \
++         FROM leads l \
++         CROSS JOIN LATERAL (SELECT max(s.consented_at) AS last, count(*) AS n \
++                             FROM lead_submissions s WHERE s.lead_id = l.id) st"
++    )
++}
++
++/// Leads matching `filter`, latest submission first, then id; at most
++/// `limit` rows when given.
++async fn matching(
++    conn: &mut PgConnection,
++    filter: &LeadFilter,
++    limit: Option<i64>,
++) -> Result<Vec<AdminLead>, sqlx::Error> {
++    let sql = format!(
++        "{} \
++         WHERE ($1::text IS NULL \
++                OR ($1 = '{SEGMENT_NONE}' AND l.segment IS NULL) OR l.segment = $1) \
++           AND ($2::text IS NULL OR l.status = $2) \
++           AND (($3::text IS NULL AND $4::text IS NULL) OR EXISTS ( \
++                SELECT 1 FROM lead_submissions s WHERE s.lead_id = l.id \
++                  AND ($3::text IS NULL \
++                       OR s.consented_at >= ($3::text::date)::timestamp AT TIME ZONE 'UTC') \
++                  AND ($4::text IS NULL \
++                       OR s.consented_at < ($4::text::date + 1)::timestamp AT TIME ZONE 'UTC'))) \
++         ORDER BY st.last DESC NULLS LAST, l.id \
++         LIMIT $5",
++        lead_select()
++    );
++    sqlx::query_as(&sql)
++        .bind(filter.segment.as_deref())
++        .bind(filter.status.as_deref())
++        .bind(filter.from.as_deref())
++        .bind(filter.to.as_deref())
++        .bind(limit)
++        .fetch_all(&mut *conn)
++        .await
++}
++
++async fn lead_by_id(conn: &mut PgConnection, id: Uuid) -> Result<Option<AdminLead>, sqlx::Error> {
++    sqlx::query_as(&format!("{} WHERE l.id = $1", lead_select()))
++        .bind(id)
++        .fetch_optional(&mut *conn)
++        .await
++}
++
++/// Lock the lead row; `Some(status)` when it exists.
++async fn lock(conn: &mut PgConnection, id: Uuid) -> Result<Option<String>, sqlx::Error> {
++    sqlx::query_scalar("SELECT status FROM leads WHERE id = $1 FOR UPDATE")
++        .bind(id)
++        .fetch_optional(&mut *conn)
++        .await
++}
++
++fn lead_ids(leads: &[AdminLead]) -> Vec<Uuid> {
++    leads.iter().map(|l| l.id).collect()
++}
++
++// ---------------------------------------------------------------------------
++// Reads
++
++/// At most [`SEARCH_LIMIT`] leads matching `filter`. Audited as
++/// `admin.leads_listed` with the filter and the returned ids.
++pub async fn list(
++    conn: &mut PgConnection,
++    admin: &VendorAdmin,
++    filter: &LeadFilter,
++) -> Result<LeadList, AdminReadError> {
++    let rows = matching(conn, filter, Some(SEARCH_LIMIT + 1)).await?;
++    let (leads, truncated) = truncate(rows);
++    audit_read(
++        conn,
++        admin,
++        "admin.leads_listed",
++        "search:leads",
++        json!({ "filter": filter, "lead_ids": lead_ids(&leads) }),
++    )
++    .await?;
++    Ok(LeadList { leads, truncated })
++}
++
++/// Every lead matching `filter`, uncapped, in the list's order. Audited as
++/// `admin.leads_exported` with the filter and every exported id.
++pub async fn export_rows(
++    conn: &mut PgConnection,
++    admin: &VendorAdmin,
++    filter: &LeadFilter,
++) -> Result<LeadExport, AdminReadError> {
++    let leads = matching(conn, filter, None).await?;
++    let date: String = sqlx::query_scalar("SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD')")
++        .fetch_one(&mut *conn)
++        .await?;
++    audit_read(
++        conn,
++        admin,
++        "admin.leads_exported",
++        "search:leads",
++        json!({ "filter": filter, "lead_ids": lead_ids(&leads) }),
++    )
++    .await?;
++    Ok(LeadExport { date, leads })
++}
++
++/// One lead with its submissions and notes; `None` (no audit row) when
++/// there is no such lead. Audited as `admin.lead_viewed`.
++pub async fn detail(
++    conn: &mut PgConnection,
++    admin: &VendorAdmin,
++    id: Uuid,
++) -> Result<Option<LeadDetail>, AdminReadError> {
++    let Some(lead) = lead_by_id(conn, id).await? else {
++        return Ok(None);
++    };
++    let submissions: Vec<AdminSubmission> = sqlx::query_as(&format!(
++        "SELECT id, kind, message, consent_text, \
++                to_char(consented_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS consented_at \
++         FROM lead_submissions WHERE lead_id = $1 \
++         ORDER BY lead_submissions.consented_at DESC, id DESC"
++    ))
++    .bind(id)
++    .fetch_all(&mut *conn)
++    .await?;
++    type NoteRow = (
++        Uuid,
++        String,
++        String,
++        Option<Uuid>,
++        Option<String>,
++        Option<String>,
++    );
++    let rows: Vec<NoteRow> = sqlx::query_as(&format!(
++        "SELECT n.id, n.body, to_char(n.created_at AT TIME ZONE 'UTC', {RFC3339_UTC}), \
++                u.id, u.name, u.email \
++         FROM lead_notes n LEFT JOIN users u ON u.id = n.author_id \
++         WHERE n.lead_id = $1 \
++         ORDER BY n.created_at DESC, n.id DESC"
++    ))
++    .bind(id)
++    .fetch_all(&mut *conn)
++    .await?;
++    let notes = rows
++        .into_iter()
++        .map(|(id, body, created_at, author_id, name, email)| LeadNote {
++            id,
++            body,
++            created_at,
++            author: match (author_id, name, email) {
++                (Some(id), Some(name), Some(email)) => Some(NoteAuthor { id, name, email }),
++                _ => None,
++            },
++        })
++        .collect();
++    audit_read(
++        conn,
++        admin,
++        "admin.lead_viewed",
++        &leads::subject(id),
++        json!({}),
++    )
++    .await?;
++    Ok(Some(LeadDetail {
++        lead,
++        submissions,
++        notes,
++    }))
++}
++
++// ---------------------------------------------------------------------------
++// Changes
++
++/// Set the lead's status (already [`validate_status`]d). Only a change bumps
++/// `updated_at` and is audited, as `admin.lead_status_changed {from, to}`.
++/// `None` (no audit row) when there is no such lead.
++pub async fn set_status(
++    conn: &mut PgConnection,
++    admin: &VendorAdmin,
++    id: Uuid,
++    status: &str,
++) -> Result<Option<AdminLead>, AdminReadError> {
++    let Some(current) = lock(conn, id).await? else {
++        return Ok(None);
++    };
++    if current != status {
++        sqlx::query("UPDATE leads SET status = $2, updated_at = now() WHERE id = $1")
++            .bind(id)
++            .bind(status)
++            .execute(&mut *conn)
++            .await?;
++        audit_read(
++            conn,
++            admin,
++            "admin.lead_status_changed",
++            &leads::subject(id),
++            json!({ "from": current, "to": status }),
++        )
++        .await?;
++    }
++    Ok(lead_by_id(conn, id).await?)
++}
++
++/// Add a note (already [`validate_note`]d) by `admin`. Audited as
++/// `admin.lead_note_added {note_id}`. `None` (no audit row) when there is
++/// no such lead.
++pub async fn add_note(
++    conn: &mut PgConnection,
++    admin: &VendorAdmin,
++    id: Uuid,
++    body: &str,
++) -> Result<Option<LeadNote>, AdminReadError> {
++    if lock(conn, id).await?.is_none() {
++        return Ok(None);
++    }
++    let (note_id, created_at): (Uuid, String) = sqlx::query_as(&format!(
++        "INSERT INTO lead_notes (lead_id, author_id, body) VALUES ($1, $2, $3) \
++         RETURNING id, to_char(created_at AT TIME ZONE 'UTC', {RFC3339_UTC})"
++    ))
++    .bind(id)
++    .bind(admin.user_id())
++    .bind(body)
++    .fetch_one(&mut *conn)
++    .await?;
++    let author: Option<(Uuid, String, String)> =
++        sqlx::query_as("SELECT id, name, email FROM users WHERE id = $1")
++            .bind(admin.user_id())
++            .fetch_optional(&mut *conn)
++            .await?;
++    audit_read(
++        conn,
++        admin,
++        "admin.lead_note_added",
++        &leads::subject(id),
++        json!({ "note_id": note_id }),
++    )
++    .await?;
++    Ok(Some(LeadNote {
++        id: note_id,
++        body: body.to_string(),
++        created_at,
++        author: author.map(|(id, name, email)| NoteAuthor { id, name, email }),
++    }))
++}
++
++/// What an erasure removed.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct Erased {
++    pub submissions: i64,
++    pub notes: i64,
++}
++
++/// Erase the lead: delete it with its submissions and notes (by cascade)
++/// and audit `admin.lead_erased {submissions, notes}`. `None` (no audit
++/// row) when there is no such lead.
++pub async fn erase(
++    conn: &mut PgConnection,
++    admin: &VendorAdmin,
++    id: Uuid,
++) -> Result<Option<Erased>, AdminReadError> {
++    if lock(conn, id).await?.is_none() {
++        return Ok(None);
++    }
++    let (submissions, notes): (i64, i64) = sqlx::query_as(
++        "SELECT (SELECT count(*) FROM lead_submissions WHERE lead_id = $1), \
++                (SELECT count(*) FROM lead_notes WHERE lead_id = $1)",
++    )
++    .bind(id)
++    .fetch_one(&mut *conn)
++    .await?;
++    sqlx::query("DELETE FROM leads WHERE id = $1")
++        .bind(id)
++        .execute(&mut *conn)
++        .await?;
++    audit_read(
++        conn,
++        admin,
++        "admin.lead_erased",
++        &leads::subject(id),
++        json!({ "submissions": submissions, "notes": notes }),
++    )
++    .await?;
++    Ok(Some(Erased { submissions, notes }))
++}
++
++// ---------------------------------------------------------------------------
++// CSV
++
++/// The export's columns, in order: the [`AdminLead`] shape.
++pub const CSV_COLUMNS: [&str; 12] = [
++    "id",
++    "email",
++    "name",
++    "company",
++    "role",
++    "segment",
++    "status",
++    "created_at",
++    "updated_at",
++    "last_submitted_at",
++    "submission_count",
++    "unsubscribed_at",
++];
++
++/// One RFC 4180 field. A value a spreadsheet would read as a formula
++/// (leading `=`, `+`, `-`, `@`, TAB or CR; OWASP CSV Injection) is prefixed
++/// with `'`; then a field holding `"`, `,`, CR or LF is quoted with `"`
++/// doubled.
++pub fn csv_field(value: &str) -> String {
++    let mut v = String::with_capacity(value.len() + 2);
++    if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
++        v.push('\'');
++    }
++    v.push_str(value);
++    if v.contains(['"', ',', '\r', '\n']) {
++        format!("\"{}\"", v.replace('"', "\"\""))
++    } else {
++        v
++    }
++}
++
++/// The export as RFC 4180 CSV: a header row, then one row per lead, CRLF
++/// line ends; absent values are empty fields.
++pub fn to_csv(leads: &[AdminLead]) -> String {
++    let mut out = String::new();
++    let mut row = |fields: Vec<String>| {
++        let cells: Vec<String> = fields.iter().map(|f| csv_field(f)).collect();
++        out.push_str(&cells.join(","));
++        out.push_str("\r\n");
++    };
++    row(CSV_COLUMNS.iter().map(|c| c.to_string()).collect());
++    for l in leads {
++        let opt = |v: &Option<String>| v.clone().unwrap_or_default();
++        row(vec![
++            l.id.to_string(),
++            l.email.clone(),
++            l.name.clone(),
++            l.company.clone(),
++            opt(&l.role),
++            opt(&l.segment),
++            l.status.clone(),
++            l.created_at.clone(),
++            l.updated_at.clone(),
++            opt(&l.last_submitted_at),
++            l.submission_count.to_string(),
++            opt(&l.unsubscribed_at),
++        ]);
++    }
++    out
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn params(segment: &str, status: &str, from: &str, to: &str) -> FilterParams {
++        let o = |s: &str| Some(s.to_string());
++        FilterParams {
++            segment: o(segment),
++            status: o(status),
++            from: o(from),
++            to: o(to),
++        }
++    }
++
++    #[test]
++    fn empty_and_missing_filters_match_anything() {
++        assert_eq!(
++            LeadFilter::parse(&FilterParams::default()),
++            Ok(LeadFilter::default())
++        );
++        assert_eq!(
++            LeadFilter::parse(&params("", "", "", "")),
++            Ok(LeadFilter::default())
++        );
++    }
++
++    #[test]
++    fn good_filters_parse() {
++        let f =
++            LeadFilter::parse(&params("itad", "contacted", "2026-01-01", "2026-01-01")).unwrap();
++        assert_eq!(f.segment.as_deref(), Some("itad"));
++        assert_eq!(f.status.as_deref(), Some("contacted"));
++        assert_eq!(
++            (f.from.as_deref(), f.to.as_deref()),
++            (Some("2026-01-01"), Some("2026-01-01"))
++        );
++        for s in SEGMENTS.iter().chain([&SEGMENT_NONE]) {
++            assert!(LeadFilter::parse(&params(s, "", "", "")).is_ok(), "{s}");
++        }
++        for s in STATUSES {
++            assert!(LeadFilter::parse(&params("", s, "", "")).is_ok(), "{s}");
++        }
++        assert!(LeadFilter::parse(&params("", "", "2024-02-29", "")).is_ok());
++        assert!(LeadFilter::parse(&params("", "", "", "2000-02-29")).is_ok());
++    }
++
++    #[test]
++    fn bad_filters_are_refused() {
++        for p in [
++            params("x", "", "", ""),
++            params("ITAD", "", "", ""),
++            params("", "open", "", ""),
++            params("", "New", "", ""),
++            params("", "", "2026-13-01", ""),
++            params("", "", "", "2026-02-30"),
++            params("", "", "2025-02-29", ""),
++            params("", "", "1900-02-29", ""),
++            params("", "", "0000-01-01", ""),
++            params("", "", "2026-1-01", ""),
++            params("", "", "2026/01/01", ""),
++            params("", "", "2026-01-01T00:00:00Z", ""),
++            params("", "", "+026-01-01", ""),
++            params("", "", "2026-01-02", "2026-01-01"),
++            params("", "", " 2026-01-01", ""),
++        ] {
++            assert_eq!(LeadFilter::parse(&p), Err(BadFilter), "{p:?}");
++        }
++    }
++
++    #[test]
++    fn statuses_and_notes_validate() {
++        assert_eq!(validate_status("qualified"), Ok("qualified"));
++        assert_eq!(validate_status("won"), Err(MSG_BAD_STATUS));
++        assert_eq!(validate_status(""), Err(MSG_BAD_STATUS));
++        assert_eq!(
++            validate_note("  called, follow up  ").unwrap(),
++            "called, follow up"
++        );
++        assert_eq!(validate_note(" \n ").unwrap_err(), MSG_BLANK_NOTE);
++        assert_eq!(
++            validate_note("a\u{7}").unwrap_err(),
++            "note must not contain control characters"
++        );
++        assert!(validate_note(&"x".repeat(5001))
++            .unwrap_err()
++            .starts_with("note must be at most"));
++    }
++
++    #[test]
++    fn csv_fields_are_quoted_per_rfc_4180() {
++        assert_eq!(csv_field("plain"), "plain");
++        assert_eq!(csv_field(""), "");
++        assert_eq!(csv_field("a,\"b\""), "\"a,\"\"b\"\"\"");
++        assert_eq!(csv_field("two\nlines"), "\"two\nlines\"");
++        assert_eq!(csv_field("cr\rhere"), "\"cr\rhere\"");
++        assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
++    }
++
++    #[test]
++    fn formula_cells_are_neutralised() {
++        assert_eq!(csv_field("=cmd()"), "'=cmd()");
++        assert_eq!(csv_field("+1"), "'+1");
++        assert_eq!(csv_field("-1"), "'-1");
++        assert_eq!(csv_field("@SUM(A1)"), "'@SUM(A1)");
++        assert_eq!(csv_field("\tx"), "'\tx");
++        assert_eq!(csv_field("\rx"), "\"'\rx\"");
++        assert_eq!(
++            csv_field("=HYPERLINK(\"a\",\"b\")"),
++            "\"'=HYPERLINK(\"\"a\"\",\"\"b\"\")\""
++        );
++        // Only a leading character counts.
++        assert_eq!(csv_field("a=b"), "a=b");
++    }
++
++    fn lead(name: &str, company: &str) -> AdminLead {
++        AdminLead {
++            id: Uuid::nil(),
++            email: "ada@example.com".into(),
++            name: name.into(),
++            company: company.into(),
++            role: None,
++            segment: Some("itad".into()),
++            status: "new".into(),
++            created_at: "2026-11-08T10:00:00Z".into(),
++            updated_at: "2026-11-08T10:00:00Z".into(),
++            last_submitted_at: Some("2026-11-08T10:00:00Z".into()),
++            submission_count: 2,
++            unsubscribed_at: None,
++        }
++    }
++
++    #[test]
++    fn csv_has_a_header_crlf_lines_and_the_lead_columns() {
++        let csv = to_csv(&[lead("=cmd()", "a,\"b\"")]);
++        assert_eq!(
++            csv,
++            "id,email,name,company,role,segment,status,created_at,updated_at,\
++             last_submitted_at,submission_count,unsubscribed_at\r\n\
++             00000000-0000-0000-0000-000000000000,ada@example.com,'=cmd(),\"a,\"\"b\"\"\",,itad,new,\
++             2026-11-08T10:00:00Z,2026-11-08T10:00:00Z,2026-11-08T10:00:00Z,2,\r\n"
++        );
++        assert_eq!(to_csv(&[]), format!("{}\r\n", CSV_COLUMNS.join(",")));
++    }
++}
+diff --git a/crates/wipe-hub/src/lib.rs b/crates/wipe-hub/src/lib.rs
+index 988b101..7a9b8bb 100644
+--- a/crates/wipe-hub/src/lib.rs
++++ b/crates/wipe-hub/src/lib.rs
+@@ -19,6 +19,7 @@ pub mod cors;
+ pub mod csrf;
+ pub mod db;
+ pub mod health;
++pub mod lead_admin;
+ pub mod lead_routes;
+ pub mod leads;
+ pub mod mail;
+diff --git a/crates/wipe-hub/tests/admin.rs b/crates/wipe-hub/tests/admin.rs
+index ee52065..b141e28 100644
+--- a/crates/wipe-hub/tests/admin.rs
++++ b/crates/wipe-hub/tests/admin.rs
+@@ -6,12 +6,11 @@
+ 
+ mod support;
+ 
+-use std::process::{Command, Output};
+-
+ use reqwest::{Response, StatusCode};
+ use serde_json::{json, Value};
+ use support::hub::{
+-    assert_error, cookie_pair, mail_texts, spawn_hub, token_in, Hub, Who, BASE, NEW_PASSWORD,
++    admin_create, assert_error, assert_failed_with, assert_ok, bootstrap_admin, closed_port,
++    cookie_pair, mail_texts, run, spawn_hub, stderr, stdout, token_in, Hub, Who, NEW_PASSWORD,
+ };
+ use support::{unique_address, Mailpit};
+ use uuid::Uuid;
+@@ -32,88 +31,7 @@ fn admin_paths(org: &str) -> Vec<String> {
+ }
+ 
+ // ---------------------------------------------------------------------------
+-// The CLI
+-
+-/// `wipe-hub admin create` against `db_url`, with every `WIPE_HUB_*` var
+-/// removed so a developer's environment cannot change the outcome.
+-fn admin_create(db_url: &str, args: &[&str]) -> Command {
+-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wipe-hub"));
+-    for (key, _) in std::env::vars_os() {
+-        if key.to_string_lossy().starts_with("WIPE_HUB_") {
+-            cmd.env_remove(&key);
+-        }
+-    }
+-    cmd.env("RUST_LOG", "warn")
+-        .args(["admin", "create", "--database-url", db_url])
+-        .args(["--public-base-url", BASE])
+-        .args(args);
+-    cmd
+-}
+-
+-fn run(db_url: &str, args: &[&str]) -> Output {
+-    admin_create(db_url, args).output().unwrap()
+-}
+-
+-fn stdout(out: &Output) -> String {
+-    String::from_utf8_lossy(&out.stdout).into_owned()
+-}
+-
+-fn stderr(out: &Output) -> String {
+-    String::from_utf8_lossy(&out.stderr).into_owned()
+-}
+-
+-fn assert_ok(out: &Output) {
+-    assert!(
+-        out.status.success(),
+-        "stdout: {}\nstderr: {}",
+-        stdout(out),
+-        stderr(out)
+-    );
+-}
+-
+-fn assert_failed_with(out: &Output, message: &str) {
+-    assert!(!out.status.success(), "stdout: {}", stdout(out));
+-    assert!(stderr(out).contains(message), "stderr: {}", stderr(out));
+-}
+-
+-fn closed_port() -> u16 {
+-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+-    l.local_addr().unwrap().port()
+-}
+-
+-/// The emailed set-password token for `email`.
+-async fn reset_token(email: &str) -> String {
+-    let texts = mail_texts(email, PASSWORD_RESET_SUBJECT, 1).await;
+-    token_in(&texts[0], "reset-password")
+-}
+-
+-/// Create a vendor admin through the CLI, follow the emailed link to set a
+-/// password, and sign in.
+-async fn bootstrap_admin(hub: &Hub) -> Who {
+-    let email = unique_address();
+-    assert_ok(&run(
+-        &hub.db.url,
+-        &["--email", &email, "--name", "Vera Vendor"],
+-    ));
+-    let token = reset_token(&email).await;
+-    let resp = hub
+-        .post(
+-            "/api/auth/password-reset/complete",
+-            json!({"token": token, "password": NEW_PASSWORD}),
+-            None,
+-        )
+-        .await;
+-    assert_eq!(resp.status(), StatusCode::OK);
+-    let resp = hub.sign_in(&email, NEW_PASSWORD).await;
+-    assert_eq!(resp.status(), StatusCode::OK);
+-    let cookie = cookie_pair(&resp);
+-    let (_, me) = hub.me(&cookie).await;
+-    Who {
+-        id: me["user"]["id"].as_str().unwrap().to_string(),
+-        email,
+-        cookie,
+-    }
+-}
++// The CLI (helpers in `support::hub`)
+ 
+ async fn vendor_orgs(hub: &Hub) -> Vec<(Uuid, String)> {
+     sqlx::query_as("SELECT id, name FROM organizations WHERE is_vendor")
+diff --git a/crates/wipe-hub/tests/isolation.rs b/crates/wipe-hub/tests/isolation.rs
+index c548e2d..74a55bf 100644
+--- a/crates/wipe-hub/tests/isolation.rs
++++ b/crates/wipe-hub/tests/isolation.rs
+@@ -119,6 +119,12 @@ const ROUTES: &[(&str, &str, Class)] = &[
+     ("GET", "/api/admin/organizations", Admin),
+     ("GET", "/api/admin/users", Admin),
+     ("GET", "/api/admin/organizations/:id", Admin),
++    ("GET", "/api/admin/leads", Admin),
++    ("POST", "/api/admin/leads/export", Admin),
++    ("GET", "/api/admin/leads/:id", Admin),
++    ("POST", "/api/admin/leads/:id/status", Admin),
++    ("POST", "/api/admin/leads/:id/notes", Admin),
++    ("POST", "/api/admin/leads/:id/erase", Admin),
+     ("ANY", "/api", CatchAll),
+     ("ANY", "/api/", CatchAll),
+     ("ANY", "/api/*rest", CatchAll),
+@@ -300,7 +306,8 @@ async fn organization_a_never_sees_or_changes_organization_b() {
+             } else if path.starts_with("/api/organization/invitations/") {
+                 b.invitation.clone()
+             } else {
+-                // Only the admin organization view remains with `:id`.
++                // Only admin routes remain with `:id`; they refuse a
++                // customer before reading it.
+                 b.org.to_string()
+             };
+             let url_path = path.replace(":id", &target);
+diff --git a/crates/wipe-hub/tests/lead_admin.rs b/crates/wipe-hub/tests/lead_admin.rs
+new file mode 100644
+index 0000000..d566988
+--- /dev/null
++++ b/crates/wipe-hub/tests/lead_admin.rs
+@@ -0,0 +1,755 @@
++//! The sales-lead admin area (lead-capture story 2, CAP-3 and the erasure
++//! half of CAP-4): `/api/admin/leads*` list, view, status, notes, CSV export
++//! and erasure, each audited without personal data. Leads are created
++//! through `POST /api/leads` as the marketing site does. One test per row of
++//! the story's I/O matrix. Needs `docker compose up -d`; fails, never skips,
++//! when it is down.
++
++mod support;
++
++use reqwest::{Response, StatusCode};
++use serde_json::{json, Value};
++use support::hub::{assert_error, bootstrap_admin, mail_texts, spawn_hub, token_in, Hub, Who};
++use support::unique_address;
++use uuid::Uuid;
++use wipe_hub::leads::{CONSENT_CONTACT, CONSENT_EARLY_ACCESS};
++use wipe_hub::mail::LEAD_EARLY_ACCESS_SUBJECT;
++
++const ADMIN_ONLY: &str = "only vendor admins can use the admin area";
++const NOT_SIGNED_IN: &str = "not signed in";
++const NO_LEAD: &str = "no such sales lead";
++const BAD_FILTER: &str = wipe_hub::admin_routes::MSG_BAD_FILTER;
++const SITE: &str = wipe_hub::config::DEFAULT_SITE_ORIGIN;
++
++/// A lead as submitted; its fields are unique to the test so a leak into an
++/// audit row cannot hide behind a shared value.
++struct Sub {
++    email: String,
++    name: String,
++    company: String,
++    message: String,
++}
++
++fn sub() -> Sub {
++    let tag = Uuid::new_v4().simple().to_string();
++    Sub {
++        email: unique_address(),
++        name: format!("Ada {tag}"),
++        company: format!("Engines {tag}"),
++        message: format!("Please call me {tag}"),
++    }
++}
++
++/// `POST /api/leads` from the site (early access when `segment` is given,
++/// contact otherwise); returns the lead's id.
++async fn submit(hub: &Hub, s: &Sub, segment: Option<&str>) -> Uuid {
++    let body = match segment {
++        Some(segment) => json!({
++            "kind": "early-access",
++            "name": s.name,
++            "email": s.email,
++            "company": s.company,
++            "role": "Head of operations",
++            "segment": segment,
++            "message": s.message,
++            "consent": true,
++            "consent_text": CONSENT_EARLY_ACCESS,
++        }),
++        None => json!({
++            "kind": "contact",
++            "name": s.name,
++            "email": s.email,
++            "company": s.company,
++            "message": s.message,
++            "consent": true,
++            "consent_text": CONSENT_CONTACT,
++        }),
++    };
++    let resp = hub
++        .post_req("/api/leads", None)
++        .header("origin", SITE)
++        .json(&body)
++        .send()
++        .await
++        .unwrap();
++    assert_eq!(resp.status(), StatusCode::ACCEPTED);
++    sqlx::query_scalar("SELECT id FROM leads WHERE lower(email) = lower($1)")
++        .bind(&s.email)
++        .fetch_one(&hub.db.pool)
++        .await
++        .unwrap()
++}
++
++struct Fixture {
++    hub: Hub,
++    admin: Who,
++}
++
++async fn fixture() -> Fixture {
++    let hub = spawn_hub().await;
++    let admin = bootstrap_admin(&hub).await;
++    Fixture { hub, admin }
++}
++
++impl Fixture {
++    async fn get(&self, path: &str) -> Response {
++        self.hub.get(path, Some(&self.admin.cookie)).await
++    }
++
++    async fn post(&self, path: &str, body: Value) -> Response {
++        self.hub.post(path, body, Some(&self.admin.cookie)).await
++    }
++
++    async fn list(&self, query: &str) -> Value {
++        ok_json(self.get(&format!("/api/admin/leads{query}")).await).await
++    }
++
++    async fn listed_ids(&self, query: &str) -> Vec<Uuid> {
++        ids(&self.list(query).await["leads"])
++    }
++
++    /// Every audit row for `action`, checking actor and subject.
++    async fn audits(&self, action: &str, subject: &str) -> Vec<Value> {
++        let rows = self.hub.audited(action).await;
++        for row in &rows {
++            assert_eq!(row.0, format!("user:{}", self.admin.id), "{action}");
++            assert_eq!(row.1, subject, "{action}");
++        }
++        rows.into_iter().map(|r| r.2).collect()
++    }
++}
++
++async fn ok_json(resp: Response) -> Value {
++    let code = resp.status();
++    let body: Value = resp.json().await.unwrap();
++    assert_eq!(code, StatusCode::OK, "{body}");
++    body
++}
++
++fn ids(list: &Value) -> Vec<Uuid> {
++    list.as_array()
++        .unwrap()
++        .iter()
++        .map(|x| Uuid::parse_str(x["id"].as_str().unwrap()).unwrap())
++        .collect()
++}
++
++fn uuids(v: &Value) -> Vec<Uuid> {
++    v.as_array()
++        .unwrap()
++        .iter()
++        .map(|x| Uuid::parse_str(x.as_str().unwrap()).unwrap())
++        .collect()
++}
++
++/// A UTC date `days` ago, as `YYYY-MM-DD`, by the database clock.
++async fn utc_date(hub: &Hub, days: i32) -> String {
++    sqlx::query_scalar(
++        "SELECT to_char((now() - make_interval(days => $1)) AT TIME ZONE 'UTC', 'YYYY-MM-DD')",
++    )
++    .bind(days)
++    .fetch_one(&hub.db.pool)
++    .await
++    .unwrap()
++}
++
++#[tokio::test]
++async fn the_list_filters_by_segment_and_status_and_is_audited_with_the_ids() {
++    let f = fixture().await;
++    let itad = submit(&f.hub, &sub(), Some("itad")).await;
++    let gov = submit(&f.hub, &sub(), Some("government")).await;
++    let contact = submit(&f.hub, &sub(), None).await;
++    sqlx::query("UPDATE leads SET status = 'contacted' WHERE id = $1")
++        .bind(gov)
++        .execute(&f.hub.db.pool)
++        .await
++        .unwrap();
++
++    let body = f.list("?segment=itad").await;
++    assert_eq!(ids(&body["leads"]), [itad]);
++    assert_eq!(body["truncated"], false);
++    let rows = f.audits("admin.leads_listed", "search:leads").await;
++    assert_eq!(rows.len(), 1);
++    assert_eq!(
++        rows[0]["filter"],
++        json!({"segment": "itad", "status": null, "from": null, "to": null})
++    );
++    assert_eq!(uuids(&rows[0]["lead_ids"]), [itad]);
++
++    assert_eq!(f.listed_ids("?status=contacted").await, [gov]);
++    assert_eq!(f.listed_ids("?segment=none").await, [contact]);
++    assert_eq!(
++        f.listed_ids("?segment=itad&status=contacted").await,
++        Vec::<Uuid>::new()
++    );
++    // Empty values mean any; the latest submission comes first.
++    assert_eq!(
++        f.listed_ids("?segment=&status=&from=&to=").await,
++        [contact, gov, itad]
++    );
++
++    // The row shape.
++    let lead = &f.list("?segment=itad").await["leads"][0];
++    let keys: Vec<&str> = lead
++        .as_object()
++        .unwrap()
++        .keys()
++        .map(|k| k.as_str())
++        .collect();
++    let mut want = [
++        "id",
++        "email",
++        "name",
++        "company",
++        "role",
++        "segment",
++        "status",
++        "created_at",
++        "updated_at",
++        "last_submitted_at",
++        "submission_count",
++        "unsubscribed_at",
++    ];
++    want.sort_unstable();
++    let mut keys = keys;
++    keys.sort_unstable();
++    assert_eq!(keys, want);
++    assert_eq!(lead["submission_count"], 1);
++    assert_eq!(lead["unsubscribed_at"], Value::Null);
++    let ts = lead["last_submitted_at"].as_str().unwrap();
++    assert!(
++        ts.len() == 20 && ts.ends_with('Z') && ts.as_bytes()[10] == b'T',
++        "{ts}"
++    );
++}
++
++#[tokio::test]
++async fn the_date_filter_matches_any_submission_in_the_range() {
++    let f = fixture().await;
++    let a = submit(&f.hub, &sub(), Some("itad")).await;
++    let b = submit(&f.hub, &sub(), Some("itad")).await;
++    sqlx::query(
++        "UPDATE lead_submissions SET consented_at = now() - interval '30 days' WHERE lead_id = $1",
++    )
++    .bind(a)
++    .execute(&f.hub.db.pool)
++    .await
++    .unwrap();
++    let today = utc_date(&f.hub, 0).await;
++    let past = utc_date(&f.hub, 30).await;
++    let (before, after) = (utc_date(&f.hub, 31).await, utc_date(&f.hub, 29).await);
++
++    assert_eq!(
++        f.listed_ids(&format!("?from={today}&to={today}")).await,
++        [b]
++    );
++    assert_eq!(
++        f.listed_ids(&format!("?from={before}&to={after}")).await,
++        [a]
++    );
++    assert_eq!(f.listed_ids(&format!("?from={past}&to={past}")).await, [a]);
++    assert_eq!(f.listed_ids(&format!("?from={after}")).await, [b]);
++    assert_eq!(f.listed_ids(&format!("?to={after}")).await, [a]);
++
++    // A new submission today brings A into today's range too.
++    let email: String = sqlx::query_scalar("SELECT email FROM leads WHERE id = $1")
++        .bind(a)
++        .fetch_one(&f.hub.db.pool)
++        .await
++        .unwrap();
++    let again = Sub { email, ..sub() };
++    assert_eq!(submit(&f.hub, &again, Some("itad")).await, a);
++    let mut both = f.listed_ids(&format!("?from={today}&to={today}")).await;
++    both.sort();
++    let mut want = vec![a, b];
++    want.sort();
++    assert_eq!(both, want);
++    assert_eq!(f.listed_ids(&format!("?from={past}&to={past}")).await, [a]);
++}
++
++#[tokio::test]
++async fn a_bad_filter_is_400_without_an_audit_row() {
++    let f = fixture().await;
++    submit(&f.hub, &sub(), Some("itad")).await;
++    let rows = f.hub.count("audit_log").await;
++    for q in [
++        "?status=open",
++        "?from=2026-13-01",
++        "?from=2026-02-02&to=2026-02-01",
++        "?segment=x",
++        "?to=yesterday",
++        "?status=new&status=closed",
++    ] {
++        assert_error(
++            f.get(&format!("/api/admin/leads{q}")).await,
++            StatusCode::BAD_REQUEST,
++            BAD_FILTER,
++        )
++        .await;
++    }
++    for body in [
++        json!({"status": "open"}),
++        json!({"from": "2026-13-01"}),
++        json!({"from": "2026-02-02", "to": "2026-02-01"}),
++        json!({"segment": "x"}),
++    ] {
++        assert_error(
++            f.post("/api/admin/leads/export", body).await,
++            StatusCode::BAD_REQUEST,
++            BAD_FILTER,
++        )
++        .await;
++    }
++    assert_eq!(f.hub.count("audit_log").await, rows);
++}
++
++#[tokio::test]
++async fn the_detail_shows_submissions_with_their_consent_and_notes_with_their_author() {
++    let f = fixture().await;
++    let s = sub();
++    let id = submit(&f.hub, &s, Some("itad")).await;
++    let contact = Sub {
++        email: s.email.clone(),
++        message: "A second message".into(),
++        ..sub()
++    };
++    assert_eq!(submit(&f.hub, &contact, None).await, id);
++    let resp = f
++        .post(
++            &format!("/api/admin/leads/{id}/notes"),
++            json!({"body": "Called"}),
++        )
++        .await;
++    assert_eq!(resp.status(), StatusCode::CREATED);
++
++    let body = ok_json(f.get(&format!("/api/admin/leads/{id}")).await).await;
++    assert_eq!(body["lead"]["id"], json!(id));
++    assert_eq!(body["lead"]["submission_count"], 2);
++    let subs = body["submissions"].as_array().unwrap();
++    assert_eq!(subs.len(), 2);
++    // Newest first, each with the exact text consented to.
++    assert_eq!(subs[0]["kind"], "contact");
++    assert_eq!(subs[0]["message"], "A second message");
++    assert_eq!(subs[0]["consent_text"], CONSENT_CONTACT);
++    assert_eq!(subs[1]["kind"], "early-access");
++    assert_eq!(subs[1]["message"], json!(s.message));
++    assert_eq!(subs[1]["consent_text"], CONSENT_EARLY_ACCESS);
++    assert!(subs[0]["consented_at"].as_str().unwrap() >= subs[1]["consented_at"].as_str().unwrap());
++    let keys: Vec<&String> = subs[0].as_object().unwrap().keys().collect();
++    assert_eq!(keys.len(), 5, "{keys:?}");
++
++    let notes = body["notes"].as_array().unwrap();
++    assert_eq!(notes.len(), 1);
++    assert_eq!(notes[0]["body"], "Called");
++    assert_eq!(
++        notes[0]["author"],
++        json!({"id": f.admin.id, "name": "Vera Vendor", "email": f.admin.email})
++    );
++
++    let rows = f.audits("admin.lead_viewed", &format!("lead:{id}")).await;
++    assert_eq!(rows, [json!({})]);
++}
++
++#[tokio::test]
++async fn a_status_change_is_audited_once_and_a_repeat_is_a_no_op() {
++    let f = fixture().await;
++    let id = submit(&f.hub, &sub(), Some("itad")).await;
++    sqlx::query("UPDATE leads SET updated_at = updated_at - interval '1 hour' WHERE id = $1")
++        .bind(id)
++        .execute(&f.hub.db.pool)
++        .await
++        .unwrap();
++    let before: String = f.list("").await["leads"][0]["updated_at"]
++        .as_str()
++        .unwrap()
++        .into();
++    let path = format!("/api/admin/leads/{id}/status");
++
++    let body = ok_json(f.post(&path, json!({"status": "contacted"})).await).await;
++    assert_eq!(body["lead"]["id"], json!(id));
++    assert_eq!(body["lead"]["status"], "contacted");
++    let bumped: String = body["lead"]["updated_at"].as_str().unwrap().into();
++    assert!(bumped > before, "{bumped} <= {before}");
++
++    let body = ok_json(f.post(&path, json!({"status": "contacted"})).await).await;
++    assert_eq!(body["lead"]["status"], "contacted");
++    assert_eq!(body["lead"]["updated_at"], json!(bumped));
++
++    let rows = f
++        .audits("admin.lead_status_changed", &format!("lead:{id}"))
++        .await;
++    assert_eq!(rows, [json!({"from": "new", "to": "contacted"})]);
++
++    let audit_rows = f.hub.count("audit_log").await;
++    for bad in [json!({"status": "won"}), json!({"status": ""}), json!({})] {
++        assert_error(
++            f.post(&path, bad).await,
++            StatusCode::BAD_REQUEST,
++            "status must be one of new, contacted, qualified, closed",
++        )
++        .await;
++    }
++    assert_eq!(f.hub.count("audit_log").await, audit_rows);
++}
++
++#[tokio::test]
++async fn a_note_is_trimmed_and_audited_by_id_only() {
++    let f = fixture().await;
++    let id = submit(&f.hub, &sub(), Some("itad")).await;
++    let path = format!("/api/admin/leads/{id}/notes");
++
++    let resp = f
++        .post(&path, json!({"body": "  called, follow up  "}))
++        .await;
++    assert_eq!(resp.status(), StatusCode::CREATED);
++    let body: Value = resp.json().await.unwrap();
++    let note = &body["note"];
++    assert_eq!(note["body"], "called, follow up");
++    assert_eq!(note["author"]["id"], json!(f.admin.id));
++    assert!(note["created_at"].as_str().unwrap().ends_with('Z'));
++    let note_id = note["id"].as_str().unwrap();
++
++    let rows = f
++        .audits("admin.lead_note_added", &format!("lead:{id}"))
++        .await;
++    assert_eq!(rows, [json!({"note_id": note_id})]);
++
++    let audit_rows = f.hub.count("audit_log").await;
++    for (bad, message) in [
++        (json!({"body": " \n "}), "note must not be blank"),
++        (json!({}), "note must not be blank"),
++        (
++            json!({"body": "a\u{7}b"}),
++            "note must not contain control characters",
++        ),
++        (
++            json!({"body": "x".repeat(5001)}),
++            "note must be at most 5000 characters",
++        ),
++    ] {
++        assert_error(f.post(&path, bad).await, StatusCode::BAD_REQUEST, message).await;
++    }
++    assert_eq!(f.hub.count("audit_log").await, audit_rows);
++    assert_eq!(f.hub.count("lead_notes").await, 1);
++}
++
++#[tokio::test]
++async fn the_export_is_a_guarded_csv_of_the_matching_leads_and_is_audited() {
++    let f = fixture().await;
++    let formula = Sub {
++        name: "=cmd()".into(),
++        ..sub()
++    };
++    let comma = Sub {
++        company: "a,\"b\"".into(),
++        ..sub()
++    };
++    let a = submit(&f.hub, &formula, Some("itad")).await;
++    let b = submit(&f.hub, &comma, Some("itad")).await;
++    let other = submit(&f.hub, &sub(), Some("government")).await;
++
++    // No CSRF token: refused by the CSRF check, nothing exported or audited.
++    let rows = f.hub.count("audit_log").await;
++    let resp = f
++        .hub
++        .http
++        .post(f.hub.url("/api/admin/leads/export"))
++        .header(reqwest::header::COOKIE, &f.admin.cookie)
++        .json(&json!({}))
++        .send()
++        .await
++        .unwrap();
++    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
++    assert_eq!(f.hub.count("audit_log").await, rows);
++
++    let resp = f
++        .post("/api/admin/leads/export", json!({"segment": "itad"}))
++        .await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let h = resp.headers().clone();
++    assert_eq!(h["content-type"], "text/csv; charset=utf-8");
++    assert_eq!(h["cache-control"], "no-store");
++    let today = utc_date(&f.hub, 0).await;
++    assert_eq!(
++        h["content-disposition"],
++        format!("attachment; filename=\"sales-leads-{today}.csv\"").as_str()
++    );
++    let csv = resp.text().await.unwrap();
++    let lines: Vec<&str> = csv.split("\r\n").collect();
++    assert_eq!(lines.len(), 4, "{csv:?}"); // header, 2 rows, trailing ""
++    assert_eq!(
++        lines[0],
++        "id,email,name,company,role,segment,status,created_at,updated_at,\
++         last_submitted_at,submission_count,unsubscribed_at"
++    );
++    assert_eq!(lines[3], "");
++    // Latest submission first, as in the list.
++    assert!(lines[1].starts_with(&format!("{b},")), "{}", lines[1]);
++    assert!(lines[2].starts_with(&format!("{a},")), "{}", lines[2]);
++    assert!(lines[2].contains(",'=cmd(),"), "{}", lines[2]);
++    assert!(lines[1].contains(",\"a,\"\"b\"\"\","), "{}", lines[1]);
++    assert!(!csv.contains(&formula.message) && !csv.contains(CONSENT_EARLY_ACCESS));
++    assert!(!csv.contains(&other.to_string()));
++
++    let rows = f.audits("admin.leads_exported", "search:leads").await;
++    assert_eq!(rows.len(), 1);
++    assert_eq!(rows[0]["filter"]["segment"], "itad");
++    assert_eq!(uuids(&rows[0]["lead_ids"]), [b, a]);
++}
++
++#[tokio::test]
++async fn the_export_has_no_row_cap() {
++    let f = fixture().await;
++    submit(&f.hub, &sub(), Some("itad")).await;
++    // More than the list's 100, inserted directly (the form is throttled).
++    sqlx::query(
++        "WITH l AS (INSERT INTO leads (email, name, company) \
++                    SELECT 'bulk' || g || '@example.com', 'Bulk', 'Co' \
++                    FROM generate_series(1, 120) g RETURNING id) \
++         INSERT INTO lead_submissions (lead_id, kind, consent_text, unsubscribe_token_hash) \
++         SELECT id, 'contact', 'I agree.', sha256(id::text::bytea) FROM l",
++    )
++    .execute(&f.hub.db.pool)
++    .await
++    .unwrap();
++    let body = f.list("").await;
++    assert_eq!(body["leads"].as_array().unwrap().len(), 100);
++    assert_eq!(body["truncated"], true);
++    let csv = f
++        .post("/api/admin/leads/export", json!({}))
++        .await
++        .text()
++        .await
++        .unwrap();
++    assert_eq!(csv.split("\r\n").count(), 1 + 121 + 1);
++}
++
++#[tokio::test]
++async fn erasing_a_lead_removes_everything_and_leaves_no_personal_data_in_the_audit_log() {
++    let f = fixture().await;
++    let s = sub();
++    let id = submit(&f.hub, &s, Some("itad")).await;
++    let again = Sub {
++        email: s.email.clone(),
++        name: s.name.clone(),
++        company: s.company.clone(),
++        message: format!("{} again", s.message),
++    };
++    submit(&f.hub, &again, None).await;
++    let token = token_in(
++        &mail_texts(&s.email, LEAD_EARLY_ACCESS_SUBJECT, 1).await[0],
++        "unsubscribe",
++    );
++    let resp = f
++        .hub
++        .post("/api/leads/unsubscribe", json!({ "token": token }), None)
++        .await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let resp = f
++        .post(
++            &format!("/api/admin/leads/{id}/notes"),
++            json!({"body": "Note about the lead"}),
++        )
++        .await;
++    assert_eq!(resp.status(), StatusCode::CREATED);
++    ok_json(
++        f.post(
++            &format!("/api/admin/leads/{id}/status"),
++            json!({"status": "qualified"}),
++        )
++        .await,
++    )
++    .await;
++    ok_json(f.get(&format!("/api/admin/leads/{id}")).await).await;
++    f.list("").await;
++
++    let body = ok_json(
++        f.post(&format!("/api/admin/leads/{id}/erase"), json!({}))
++            .await,
++    )
++    .await;
++    assert_eq!(body, json!({}));
++    for table in ["leads", "lead_submissions", "lead_notes"] {
++        assert_eq!(f.hub.count(table).await, 0, "{table}");
++    }
++    let rows = f.audits("admin.lead_erased", &format!("lead:{id}")).await;
++    assert_eq!(rows, [json!({"submissions": 2, "notes": 1})]);
++
++    // No audit row anywhere holds the lead's personal data.
++    let all: Vec<(String, String, String)> =
++        sqlx::query_as("SELECT action, subject, detail::text FROM audit_log")
++            .fetch_all(&f.hub.db.pool)
++            .await
++            .unwrap();
++    let lead_rows = all
++        .iter()
++        .filter(|(a, _, _)| a.starts_with("lead.") || a.starts_with("admin.lead"))
++        .count();
++    assert!(lead_rows >= 8, "{all:?}");
++    for (action, subject, detail) in &all {
++        for secret in [
++            s.email.as_str(),
++            &s.email.to_uppercase(),
++            &s.name,
++            &s.company,
++            &s.message,
++            &again.message,
++            "Note about the lead",
++        ] {
++            let row = format!("{subject} {detail}").to_lowercase();
++            assert!(
++                !row.contains(&secret.to_lowercase()),
++                "{action} keeps {secret:?}: {subject} {detail}"
++            );
++        }
++    }
++
++    assert_error(
++        f.get(&format!("/api/admin/leads/{id}")).await,
++        StatusCode::NOT_FOUND,
++        NO_LEAD,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn an_unknown_lead_is_404_on_every_id_route_without_an_audit_row() {
++    let f = fixture().await;
++    submit(&f.hub, &sub(), Some("itad")).await;
++    let rows = f.hub.count("audit_log").await;
++    for id in [Uuid::new_v4().to_string(), "nope".to_string()] {
++        assert_error(
++            f.get(&format!("/api/admin/leads/{id}")).await,
++            StatusCode::NOT_FOUND,
++            NO_LEAD,
++        )
++        .await;
++        for (route, body) in [
++            ("status", json!({"status": "closed"})),
++            ("notes", json!({"body": "hello"})),
++            ("erase", json!({})),
++        ] {
++            assert_error(
++                f.post(&format!("/api/admin/leads/{id}/{route}"), body)
++                    .await,
++                StatusCode::NOT_FOUND,
++                NO_LEAD,
++            )
++            .await;
++        }
++    }
++    assert_eq!(f.hub.count("audit_log").await, rows);
++    assert_eq!(f.hub.count("lead_notes").await, 0);
++}
++
++#[tokio::test]
++async fn an_unsubscribed_lead_shows_its_date_in_the_list_detail_and_csv() {
++    let f = fixture().await;
++    let s = sub();
++    let id = submit(&f.hub, &s, Some("itad")).await;
++    assert_eq!(f.list("").await["leads"][0]["unsubscribed_at"], Value::Null);
++    let token = token_in(
++        &mail_texts(&s.email, LEAD_EARLY_ACCESS_SUBJECT, 1).await[0],
++        "unsubscribe",
++    );
++    let resp = f
++        .hub
++        .post("/api/leads/unsubscribe", json!({ "token": token }), None)
++        .await;
++    assert_eq!(resp.status(), StatusCode::OK);
++
++    let listed = f.list("").await["leads"][0]["unsubscribed_at"].clone();
++    let at = listed.as_str().expect("unsubscribed_at set").to_string();
++    assert!(at.ends_with('Z'), "{at}");
++    let detail = ok_json(f.get(&format!("/api/admin/leads/{id}")).await).await;
++    assert_eq!(detail["lead"]["unsubscribed_at"], json!(at));
++    let csv = f
++        .post("/api/admin/leads/export", json!({}))
++        .await
++        .text()
++        .await
++        .unwrap();
++    let row = csv.split("\r\n").nth(1).unwrap();
++    assert!(row.ends_with(&format!(",{at}")), "{row}");
++}
++
++#[tokio::test]
++async fn customers_and_anonymous_callers_are_refused_on_every_lead_route_without_an_audit_row() {
++    let hub = spawn_hub().await;
++    let id = submit(&hub, &sub(), Some("itad")).await;
++    let owner = hub.verified_owner("Acme").await;
++    let member = hub.add(&owner, "member").await;
++    let rows = hub.count("audit_log").await;
++    let gets = [
++        "/api/admin/leads".to_string(),
++        format!("/api/admin/leads/{id}"),
++    ];
++    let posts = [
++        ("/api/admin/leads/export".to_string(), json!({})),
++        (
++            format!("/api/admin/leads/{id}/status"),
++            json!({"status": "closed"}),
++        ),
++        (
++            format!("/api/admin/leads/{id}/notes"),
++            json!({"body": "hello"}),
++        ),
++        (format!("/api/admin/leads/{id}/erase"), json!({})),
++    ];
++    for (cookie, code, message) in [
++        (
++            Some(owner.cookie.as_str()),
++            StatusCode::FORBIDDEN,
++            ADMIN_ONLY,
++        ),
++        (
++            Some(member.cookie.as_str()),
++            StatusCode::FORBIDDEN,
++            ADMIN_ONLY,
++        ),
++        (None, StatusCode::UNAUTHORIZED, NOT_SIGNED_IN),
++    ] {
++        for path in &gets {
++            assert_error(hub.get(path, cookie).await, code, message).await;
++        }
++        // Refused before the query string is read: a bad filter is no 400.
++        assert_error(
++            hub.get("/api/admin/leads?status=x", cookie).await,
++            code,
++            message,
++        )
++        .await;
++        for (path, body) in &posts {
++            assert_error(hub.post(path, body.clone(), cookie).await, code, message).await;
++            // Refused before the body is read.
++            assert_error(hub.post_empty(path, cookie).await, code, message).await;
++        }
++    }
++    assert_eq!(hub.count("audit_log").await, rows);
++    assert_eq!(hub.count("leads").await, 1);
++    let status: String = sqlx::query_scalar("SELECT status FROM leads")
++        .fetch_one(&hub.db.pool)
++        .await
++        .unwrap();
++    assert_eq!(status, "new");
++}
++
++#[tokio::test]
++async fn the_same_address_after_erasure_is_a_new_lead() {
++    let f = fixture().await;
++    let s = sub();
++    let id = submit(&f.hub, &s, Some("itad")).await;
++    ok_json(
++        f.post(&format!("/api/admin/leads/{id}/erase"), json!({}))
++            .await,
++    )
++    .await;
++    let again = submit(&f.hub, &s, Some("itad")).await;
++    assert_ne!(again, id);
++    let submitted = f.hub.audited("lead.submitted").await;
++    let last = submitted.last().unwrap();
++    assert_eq!(last.1, format!("lead:{again}"));
++    assert_eq!(last.2["created"], true);
++    assert_eq!(last.2["suppressed"], false);
++    assert_eq!(f.listed_ids("").await, [again]);
++}
+diff --git a/crates/wipe-hub/tests/migrations.rs b/crates/wipe-hub/tests/migrations.rs
+index 11ab23e..b487f2c 100644
+--- a/crates/wipe-hub/tests/migrations.rs
++++ b/crates/wipe-hub/tests/migrations.rs
+@@ -355,3 +355,73 @@ async fn leads_are_unique_by_lowercased_email_and_constrained() {
+         .unwrap();
+     assert_eq!(left, 0);
+ }
++
++#[tokio::test]
++async fn lead_notes_need_a_body_and_go_with_their_lead_but_not_their_author() {
++    let t = TestDb::migrated().await;
++    let lead: uuid::Uuid = sqlx::query_scalar(
++        "INSERT INTO leads (email, name, company) VALUES ('ada@example.com', 'Ada', 'Engines') \
++         RETURNING id",
++    )
++    .fetch_one(&t.pool)
++    .await
++    .unwrap();
++    let org: uuid::Uuid =
++        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ('Vendor') RETURNING id")
++            .fetch_one(&t.pool)
++            .await
++            .unwrap();
++    let author: uuid::Uuid = sqlx::query_scalar(
++        "INSERT INTO users (organization_id, email, name, password_hash, role) \
++         VALUES ($1, 'vera@example.com', 'Vera', 'x', 'vendor_admin') RETURNING id",
++    )
++    .bind(org)
++    .fetch_one(&t.pool)
++    .await
++    .unwrap();
++    let note = |body: &'static str| {
++        let pool = t.pool.clone();
++        async move {
++            sqlx::query("INSERT INTO lead_notes (lead_id, author_id, body) VALUES ($1, $2, $3)")
++                .bind(lead)
++                .bind(author)
++                .bind(body)
++                .execute(&pool)
++                .await
++        }
++    };
++    note("called").await.unwrap();
++    note("left a message").await.unwrap();
++    match note(" \n ").await.unwrap_err() {
++        sqlx::Error::Database(d) => assert_eq!(d.constraint(), Some("lead_notes_body_check")),
++        other => panic!("expected a constraint violation, got {other:?}"),
++    }
++    let count = |sql: &'static str| {
++        let pool = t.pool.clone();
++        async move {
++            sqlx::query_scalar::<_, i64>(sql)
++                .fetch_one(&pool)
++                .await
++                .unwrap()
++        }
++    };
++
++    // Removing the author keeps the notes, unattributed.
++    sqlx::query("DELETE FROM users WHERE id = $1")
++        .bind(author)
++        .execute(&t.pool)
++        .await
++        .unwrap();
++    assert_eq!(
++        count("SELECT count(*) FROM lead_notes WHERE author_id IS NULL").await,
++        2
++    );
++
++    // Deleting the lead deletes its notes.
++    sqlx::query("DELETE FROM leads WHERE id = $1")
++        .bind(lead)
++        .execute(&t.pool)
++        .await
++        .unwrap();
++    assert_eq!(count("SELECT count(*) FROM lead_notes").await, 0);
++}
+diff --git a/crates/wipe-hub/tests/support/hub.rs b/crates/wipe-hub/tests/support/hub.rs
+index 17adbef..7132dcf 100644
+--- a/crates/wipe-hub/tests/support/hub.rs
++++ b/crates/wipe-hub/tests/support/hub.rs
+@@ -1,11 +1,13 @@
+ //! An in-process hub over real HTTP for integration tests: a migrated
+ //! [`TestDb`], CSRF-aware requests and the sign-up, invitation and audit
+ //! helpers. Copied from `tests/team.rs` (portal-accounts story 5), which
+-//! keeps its own copy.
++//! keeps its own copy. Also `wipe-hub admin create` as a subprocess and
++//! [`bootstrap_admin`], a signed-in vendor admin.
+ 
+ #![allow(dead_code)]
+ 
+ use std::net::SocketAddr;
++use std::process::{Command, Output};
+ use std::time::{Duration, Instant};
+ 
+ use reqwest::header::{COOKIE, SET_COOKIE};
+@@ -14,7 +16,7 @@ use serde_json::{json, Value};
+ use tokio::net::TcpListener;
+ use uuid::Uuid;
+ use wipe_hub::config::{DEFAULT_MAIL_FROM, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT};
+-use wipe_hub::mail::INVITATION_SUBJECT;
++use wipe_hub::mail::{INVITATION_SUBJECT, PASSWORD_RESET_SUBJECT};
+ use wipe_hub::{AppState, Args, Config};
+ 
+ use super::{unique_address, Mailpit, TestDb};
+@@ -399,3 +401,88 @@ pub async fn assert_error(resp: Response, code: StatusCode, message: &str) {
+ 
+ // ---------------------------------------------------------------------------
+ // Profile and password
++
++// ---------------------------------------------------------------------------
++// `wipe-hub admin create` and a signed-in vendor admin (moved from
++// `tests/admin.rs` for lead-capture story 2)
++
++/// `wipe-hub admin create` against `db_url`, with every `WIPE_HUB_*` var
++/// removed so a developer's environment cannot change the outcome.
++pub fn admin_create(db_url: &str, args: &[&str]) -> Command {
++    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wipe-hub"));
++    for (key, _) in std::env::vars_os() {
++        if key.to_string_lossy().starts_with("WIPE_HUB_") {
++            cmd.env_remove(&key);
++        }
++    }
++    cmd.env("RUST_LOG", "warn")
++        .args(["admin", "create", "--database-url", db_url])
++        .args(["--public-base-url", BASE])
++        .args(args);
++    cmd
++}
++
++pub fn run(db_url: &str, args: &[&str]) -> Output {
++    admin_create(db_url, args).output().unwrap()
++}
++
++pub fn stdout(out: &Output) -> String {
++    String::from_utf8_lossy(&out.stdout).into_owned()
++}
++
++pub fn stderr(out: &Output) -> String {
++    String::from_utf8_lossy(&out.stderr).into_owned()
++}
++
++pub fn assert_ok(out: &Output) {
++    assert!(
++        out.status.success(),
++        "stdout: {}\nstderr: {}",
++        stdout(out),
++        stderr(out)
++    );
++}
++
++pub fn assert_failed_with(out: &Output, message: &str) {
++    assert!(!out.status.success(), "stdout: {}", stdout(out));
++    assert!(stderr(out).contains(message), "stderr: {}", stderr(out));
++}
++
++pub fn closed_port() -> u16 {
++    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++    l.local_addr().unwrap().port()
++}
++
++/// The emailed set-password token for `email`.
++pub async fn reset_token(email: &str) -> String {
++    let texts = mail_texts(email, PASSWORD_RESET_SUBJECT, 1).await;
++    token_in(&texts[0], "reset-password")
++}
++
++/// Create a vendor admin through the CLI, follow the emailed link to set a
++/// password, and sign in.
++pub async fn bootstrap_admin(hub: &Hub) -> Who {
++    let email = unique_address();
++    assert_ok(&run(
++        &hub.db.url,
++        &["--email", &email, "--name", "Vera Vendor"],
++    ));
++    let token = reset_token(&email).await;
++    let resp = hub
++        .post(
++            "/api/auth/password-reset/complete",
++            json!({"token": token, "password": NEW_PASSWORD}),
++            None,
++        )
++        .await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let resp = hub.sign_in(&email, NEW_PASSWORD).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let cookie = cookie_pair(&resp);
++    let (_, me) = hub.me(&cookie).await;
++    Who {
++        id: me["user"]["id"].as_str().unwrap().to_string(),
++        email,
++        cookie,
++    }
++}

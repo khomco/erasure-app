@@ -79,7 +79,7 @@ pub const MSG_OWNER_ONLY: &str = "only an organization owner can manage the team
 /// Prefix of a password sign-in throttle key for an email address.
 const SIGN_IN_EMAIL_PREFIX: &str = "email:";
 /// Prefix of an email-send throttle key for a recipient address.
-const MAIL_TO_PREFIX: &str = "mail:to:";
+pub(crate) const MAIL_TO_PREFIX: &str = "mail:to:";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -490,7 +490,7 @@ pub struct SignInRequest {
 /// compares with, so every spelling that reaches one account shares one key.
 /// Bounded to 254 characters, so an anonymous caller cannot bloat the table
 /// or the append-only log.
-async fn email_key<'e, E: sqlx::PgExecutor<'e>>(
+pub(crate) async fn email_key<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     prefix: &str,
     email: &str,

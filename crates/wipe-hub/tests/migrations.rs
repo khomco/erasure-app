@@ -355,3 +355,73 @@ async fn leads_are_unique_by_lowercased_email_and_constrained() {
         .unwrap();
     assert_eq!(left, 0);
 }
+
+#[tokio::test]
+async fn lead_notes_need_a_body_and_go_with_their_lead_but_not_their_author() {
+    let t = TestDb::migrated().await;
+    let lead: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO leads (email, name, company) VALUES ('ada@example.com', 'Ada', 'Engines') \
+         RETURNING id",
+    )
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    let org: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ('Vendor') RETURNING id")
+            .fetch_one(&t.pool)
+            .await
+            .unwrap();
+    let author: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO users (organization_id, email, name, password_hash, role) \
+         VALUES ($1, 'vera@example.com', 'Vera', 'x', 'vendor_admin') RETURNING id",
+    )
+    .bind(org)
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    let note = |body: &'static str| {
+        let pool = t.pool.clone();
+        async move {
+            sqlx::query("INSERT INTO lead_notes (lead_id, author_id, body) VALUES ($1, $2, $3)")
+                .bind(lead)
+                .bind(author)
+                .bind(body)
+                .execute(&pool)
+                .await
+        }
+    };
+    note("called").await.unwrap();
+    note("left a message").await.unwrap();
+    match note(" \n ").await.unwrap_err() {
+        sqlx::Error::Database(d) => assert_eq!(d.constraint(), Some("lead_notes_body_check")),
+        other => panic!("expected a constraint violation, got {other:?}"),
+    }
+    let count = |sql: &'static str| {
+        let pool = t.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(sql)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+
+    // Removing the author keeps the notes, unattributed.
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(author)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count("SELECT count(*) FROM lead_notes WHERE author_id IS NULL").await,
+        2
+    );
+
+    // Deleting the lead deletes its notes.
+    sqlx::query("DELETE FROM leads WHERE id = $1")
+        .bind(lead)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    assert_eq!(count("SELECT count(*) FROM lead_notes").await, 0);
+}

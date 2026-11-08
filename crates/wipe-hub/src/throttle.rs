@@ -28,7 +28,9 @@
 //! Whenever a row with `refused > 0` is cleared, restarted or purged, the
 //! call returns a [`LockSummary`] that the caller audits in the same
 //! transaction, so a lock costs at most two audit rows however hard it is
-//! hammered.
+//! hammered. The one exception is a sales-lead erasure
+//! (`lead_admin::erase`), which deletes the address's `mail:to:` row with no
+//! summary, since the summary's subject would name the erased address.
 //!
 //! Single-statement functions take any Postgres executor. [`charge`] may
 //! need a second statement (to create the row), so it takes a connection:

@@ -19,6 +19,7 @@ pub mod cors;
 pub mod csrf;
 pub mod db;
 pub mod health;
+pub mod lead_admin;
 pub mod lead_routes;
 pub mod leads;
 pub mod mail;

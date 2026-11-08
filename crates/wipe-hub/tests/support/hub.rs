@@ -1,11 +1,13 @@
 //! An in-process hub over real HTTP for integration tests: a migrated
 //! [`TestDb`], CSRF-aware requests and the sign-up, invitation and audit
 //! helpers. Copied from `tests/team.rs` (portal-accounts story 5), which
-//! keeps its own copy.
+//! keeps its own copy. Also `wipe-hub admin create` as a subprocess and
+//! [`bootstrap_admin`], a signed-in vendor admin.
 
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use reqwest::header::{COOKIE, SET_COOKIE};
@@ -14,7 +16,7 @@ use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 use wipe_hub::config::{DEFAULT_MAIL_FROM, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT};
-use wipe_hub::mail::INVITATION_SUBJECT;
+use wipe_hub::mail::{INVITATION_SUBJECT, PASSWORD_RESET_SUBJECT};
 use wipe_hub::{AppState, Args, Config};
 
 use super::{unique_address, Mailpit, TestDb};
@@ -399,3 +401,88 @@ pub async fn assert_error(resp: Response, code: StatusCode, message: &str) {
 
 // ---------------------------------------------------------------------------
 // Profile and password
+
+// ---------------------------------------------------------------------------
+// `wipe-hub admin create` and a signed-in vendor admin (moved from
+// `tests/admin.rs` for lead-capture story 2)
+
+/// `wipe-hub admin create` against `db_url`, with every `WIPE_HUB_*` var
+/// removed so a developer's environment cannot change the outcome.
+pub fn admin_create(db_url: &str, args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wipe-hub"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("WIPE_HUB_") {
+            cmd.env_remove(&key);
+        }
+    }
+    cmd.env("RUST_LOG", "warn")
+        .args(["admin", "create", "--database-url", db_url])
+        .args(["--public-base-url", BASE])
+        .args(args);
+    cmd
+}
+
+pub fn run(db_url: &str, args: &[&str]) -> Output {
+    admin_create(db_url, args).output().unwrap()
+}
+
+pub fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+pub fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+pub fn assert_ok(out: &Output) {
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(out),
+        stderr(out)
+    );
+}
+
+pub fn assert_failed_with(out: &Output, message: &str) {
+    assert!(!out.status.success(), "stdout: {}", stdout(out));
+    assert!(stderr(out).contains(message), "stderr: {}", stderr(out));
+}
+
+pub fn closed_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    l.local_addr().unwrap().port()
+}
+
+/// The emailed set-password token for `email`.
+pub async fn reset_token(email: &str) -> String {
+    let texts = mail_texts(email, PASSWORD_RESET_SUBJECT, 1).await;
+    token_in(&texts[0], "reset-password")
+}
+
+/// Create a vendor admin through the CLI, follow the emailed link to set a
+/// password, and sign in.
+pub async fn bootstrap_admin(hub: &Hub) -> Who {
+    let email = unique_address();
+    assert_ok(&run(
+        &hub.db.url,
+        &["--email", &email, "--name", "Vera Vendor"],
+    ));
+    let token = reset_token(&email).await;
+    let resp = hub
+        .post(
+            "/api/auth/password-reset/complete",
+            json!({"token": token, "password": NEW_PASSWORD}),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = hub.sign_in(&email, NEW_PASSWORD).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cookie = cookie_pair(&resp);
+    let (_, me) = hub.me(&cookie).await;
+    Who {
+        id: me["user"]["id"].as_str().unwrap().to_string(),
+        email,
+        cookie,
+    }
+}

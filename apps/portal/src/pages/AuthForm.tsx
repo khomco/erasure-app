@@ -61,11 +61,19 @@ export function FormError({
   );
 }
 
-export function SubmitButton({ pending, children }: { pending: boolean; children: ReactNode }) {
+export function SubmitButton({
+  pending,
+  disabled = false,
+  children,
+}: {
+  pending: boolean;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
   return (
     <button
       type="submit"
-      disabled={pending}
+      disabled={pending || disabled}
       className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
     >
       {children}

@@ -22,7 +22,9 @@
 //! - Searches match case-insensitive substrings with LIKE wildcards escaped
 //!   ([`escape_like`]), return at most [`SEARCH_LIMIT`] rows and say whether
 //!   more matched. Timestamps are RFC 3339 UTC strings formatted in SQL.
-//! - Read-only: nothing here writes customer data.
+//! - Read-only: nothing here writes customer data. The sales-lead admin
+//!   functions, which do write (status, notes, erasure), live in
+//!   [`crate::lead_admin`] under the same rules.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -57,7 +59,7 @@ pub const CLI_ACTOR: &str = "cli:admin-create";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `to_char` format for RFC 3339 UTC, whole seconds (as `team.rs`).
-const RFC3339_UTC: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS"Z"'"#;
+pub(crate) const RFC3339_UTC: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS"Z"'"#;
 
 /// A signed-in vendor admin. Only the `/api/admin/*` extractor builds one,
 /// after checking the role, the vendor organization and a verified email in
@@ -188,8 +190,9 @@ fn decode_role(s: &str) -> Result<Role, sqlx::Error> {
     Role::from_str(s).map_err(|e| sqlx::Error::Decode(e.into()))
 }
 
-/// Append one admin read to the audit log, as `admin`.
-async fn audit_read(
+/// Append one admin read (or, from [`crate::lead_admin`], action) to the
+/// audit log, as `admin`.
+pub(crate) async fn audit_read(
     conn: &mut PgConnection,
     admin: &VendorAdmin,
     action: &str,
@@ -210,7 +213,7 @@ async fn audit_read(
 }
 
 /// Split one extra row off a `LIMIT SEARCH_LIMIT + 1` result.
-fn truncate<T>(mut rows: Vec<T>) -> (Vec<T>, bool) {
+pub(crate) fn truncate<T>(mut rows: Vec<T>) -> (Vec<T>, bool) {
     let truncated = rows.len() as i64 > SEARCH_LIMIT;
     rows.truncate(SEARCH_LIMIT as usize);
     (rows, truncated)

@@ -6,12 +6,11 @@
 
 mod support;
 
-use std::process::{Command, Output};
-
 use reqwest::{Response, StatusCode};
 use serde_json::{json, Value};
 use support::hub::{
-    assert_error, cookie_pair, mail_texts, spawn_hub, token_in, Hub, Who, BASE, NEW_PASSWORD,
+    admin_create, assert_error, assert_failed_with, assert_ok, bootstrap_admin, closed_port,
+    cookie_pair, mail_texts, run, spawn_hub, stderr, stdout, token_in, Hub, Who, NEW_PASSWORD,
 };
 use support::{unique_address, Mailpit};
 use uuid::Uuid;
@@ -32,88 +31,7 @@ fn admin_paths(org: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// The CLI
-
-/// `wipe-hub admin create` against `db_url`, with every `WIPE_HUB_*` var
-/// removed so a developer's environment cannot change the outcome.
-fn admin_create(db_url: &str, args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wipe-hub"));
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("WIPE_HUB_") {
-            cmd.env_remove(&key);
-        }
-    }
-    cmd.env("RUST_LOG", "warn")
-        .args(["admin", "create", "--database-url", db_url])
-        .args(["--public-base-url", BASE])
-        .args(args);
-    cmd
-}
-
-fn run(db_url: &str, args: &[&str]) -> Output {
-    admin_create(db_url, args).output().unwrap()
-}
-
-fn stdout(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn stderr(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-fn assert_ok(out: &Output) {
-    assert!(
-        out.status.success(),
-        "stdout: {}\nstderr: {}",
-        stdout(out),
-        stderr(out)
-    );
-}
-
-fn assert_failed_with(out: &Output, message: &str) {
-    assert!(!out.status.success(), "stdout: {}", stdout(out));
-    assert!(stderr(out).contains(message), "stderr: {}", stderr(out));
-}
-
-fn closed_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap().port()
-}
-
-/// The emailed set-password token for `email`.
-async fn reset_token(email: &str) -> String {
-    let texts = mail_texts(email, PASSWORD_RESET_SUBJECT, 1).await;
-    token_in(&texts[0], "reset-password")
-}
-
-/// Create a vendor admin through the CLI, follow the emailed link to set a
-/// password, and sign in.
-async fn bootstrap_admin(hub: &Hub) -> Who {
-    let email = unique_address();
-    assert_ok(&run(
-        &hub.db.url,
-        &["--email", &email, "--name", "Vera Vendor"],
-    ));
-    let token = reset_token(&email).await;
-    let resp = hub
-        .post(
-            "/api/auth/password-reset/complete",
-            json!({"token": token, "password": NEW_PASSWORD}),
-            None,
-        )
-        .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let resp = hub.sign_in(&email, NEW_PASSWORD).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let cookie = cookie_pair(&resp);
-    let (_, me) = hub.me(&cookie).await;
-    Who {
-        id: me["user"]["id"].as_str().unwrap().to_string(),
-        email,
-        cookie,
-    }
-}
+// The CLI (helpers in `support::hub`)
 
 async fn vendor_orgs(hub: &Hub) -> Vec<(Uuid, String)> {
     sqlx::query_as("SELECT id, name FROM organizations WHERE is_vendor")

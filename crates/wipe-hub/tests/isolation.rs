@@ -119,6 +119,12 @@ const ROUTES: &[(&str, &str, Class)] = &[
     ("GET", "/api/admin/organizations", Admin),
     ("GET", "/api/admin/users", Admin),
     ("GET", "/api/admin/organizations/:id", Admin),
+    ("GET", "/api/admin/leads", Admin),
+    ("POST", "/api/admin/leads/export", Admin),
+    ("GET", "/api/admin/leads/:id", Admin),
+    ("POST", "/api/admin/leads/:id/status", Admin),
+    ("POST", "/api/admin/leads/:id/notes", Admin),
+    ("POST", "/api/admin/leads/:id/erase", Admin),
     ("ANY", "/api", CatchAll),
     ("ANY", "/api/", CatchAll),
     ("ANY", "/api/*rest", CatchAll),
@@ -300,7 +306,8 @@ async fn organization_a_never_sees_or_changes_organization_b() {
             } else if path.starts_with("/api/organization/invitations/") {
                 b.invitation.clone()
             } else {
-                // Only the admin organization view remains with `:id`.
+                // Only admin routes remain with `:id`; they refuse a
+                // customer before reading it.
                 b.org.to_string()
             };
             let url_path = path.replace(":id", &target);

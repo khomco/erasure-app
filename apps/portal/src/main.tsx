@@ -13,6 +13,8 @@ import {
 import "./index.css";
 import { AcceptInvitePage } from "./pages/AcceptInvitePage";
 import { AccountPage } from "./pages/AccountPage";
+import { AdminLeadPage } from "./pages/AdminLeadPage";
+import { AdminLeadsPage } from "./pages/AdminLeadsPage";
 import { AdminOrganizationPage } from "./pages/AdminOrganizationPage";
 import { AdminPage } from "./pages/AdminPage";
 import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
@@ -181,6 +183,21 @@ const adminOrganizationRoute = createRoute({
   },
 });
 
+const adminLeadsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/leads",
+  component: AdminLeadsPage,
+});
+
+const adminLeadRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/leads/$id",
+  component: function AdminLeadRoute() {
+    const { id } = adminLeadRoute.useParams();
+    return <AdminLeadPage id={id} />;
+  },
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   signUpRoute,
@@ -196,6 +213,8 @@ const routeTree = rootRoute.addChildren([
   acceptInviteRoute,
   adminRoute,
   adminOrganizationRoute,
+  adminLeadsRoute,
+  adminLeadRoute,
 ]);
 
 const router = createRouter({ routeTree });
