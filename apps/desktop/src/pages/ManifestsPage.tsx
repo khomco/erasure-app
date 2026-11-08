@@ -5,6 +5,7 @@ import { CheckCircle2, FileSignature, Loader2, UserCheck } from "lucide-react";
 import { api, classNames } from "@/api/client";
 import { useOperator } from "@/operator/context";
 import type { DestructionManifest, Job, OperatorRef } from "@/api/types";
+import { assemblableJobs, offeredSelection } from "./manifestAssembly";
 
 export function ManifestsPage() {
   const jobs = useQuery({
@@ -19,11 +20,8 @@ export function ManifestsPage() {
   });
 
   const pendingJobs = useMemo(
-    () =>
-      (jobs.data ?? []).filter(
-        (j) => j.state.state === "pending_co_sign" && !j.manifest_id
-      ),
-    [jobs.data]
+    () => assemblableJobs(jobs.data ?? [], manifests.data ?? []),
+    [jobs.data, manifests.data]
   );
 
   return (
@@ -36,7 +34,10 @@ export function ManifestsPage() {
         </p>
       </div>
 
-      <PendingJobsCard jobs={pendingJobs} loading={jobs.isLoading} />
+      <PendingJobsCard
+        jobs={pendingJobs}
+        loading={jobs.isLoading || manifests.isLoading}
+      />
 
       <ManifestList manifests={manifests.data ?? []} loading={manifests.isLoading} />
     </div>
@@ -48,13 +49,14 @@ function PendingJobsCard({ jobs, loading }: { jobs: Job[]; loading: boolean }) {
   const qc = useQueryClient();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [note, setNote] = useState("");
+  const submitIds = useMemo(() => offeredSelection(selected, jobs), [selected, jobs]);
 
   const create = useMutation({
     mutationFn: () => {
       if (!operator) throw new Error("operator not signed in");
       return api.createManifest({
         assembled_by: operator,
-        job_ids: Array.from(selected),
+        job_ids: submitIds,
         note: note || null,
       });
     },
@@ -129,10 +131,10 @@ function PendingJobsCard({ jobs, loading }: { jobs: Job[]; loading: boolean }) {
         </div>
         <button
           className="btn btn-primary"
-          disabled={selected.size === 0 || create.isPending || !operator}
+          disabled={submitIds.length === 0 || create.isPending || !operator}
           onClick={() => create.mutate()}
         >
-          {create.isPending ? "Creating…" : `Create manifest (${selected.size})`}
+          {create.isPending ? "Creating…" : `Create manifest (${submitIds.length})`}
         </button>
       </div>
       {create.isError && (

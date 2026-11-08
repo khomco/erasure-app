@@ -363,11 +363,14 @@ the hardware in front of them. See ADR-0002.
   assembly stamps no Job. The stored certificate is not re-signed, and
   its copy of the DestructionEvent never carries `manifest_ref`; each
   co-signature block the manifest adds carries it as `manifest_ref`.
-  A Job on a manifest cannot be escalated to destroy again. Co-sign happens
-  on that same station with its own key; the signer and role sit
-  outside the signed bytes and `verify-cert` never checks co-signatures
-  (see **PendingCoSign**). There is no reject route (`Rejected` is never
-  set), so a manifest whose co-sign is refused stays `Pending`, and its
+  A Job on a manifest cannot be escalated to destroy again. The
+  Manifests page offers for assembly only `PendingCoSign` Jobs with no
+  `manifest_id` that are on no pending or signed manifest, and submits
+  only ticked Jobs it still offers; the server remains the authority.
+  Co-sign happens on that same station with its own key; the signer
+  and role sit outside the signed bytes and `verify-cert` never checks
+  co-signatures (see **PendingCoSign**). There is no reject route
+  (`Rejected` is never set), so a manifest whose co-sign is refused stays `Pending`, and its
   Jobs cannot join another manifest until the station restarts. Under ADR-0011 (accepted, not built) the manifest
   stays as the batch record but co-sign becomes optional.
 - **JobSpec** — what was asked for at Job creation: target Asset (or
