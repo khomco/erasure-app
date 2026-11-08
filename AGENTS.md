@@ -37,6 +37,11 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   temp dir (`Hub::artifacts`, or `WIPE_HUB_ARTIFACT_DIR` for the binary). `wipe-hub release
   publish --version V --notes N --file <platform>=<path>` writes to the database and that
   directory directly, like `admin create`. No `sqlx::query!` macros: there is no build-time database.
+- The full local platform (compose, hub, portal, marketing site, optional Stripe test mode,
+  teardown) is in `docs/agents/local-stack.md`. `scripts/commerce-demo.sh` (needs `docker compose
+  up -d`; ports 7910/7890) proves the customer journey end to end. `GET /api/deployment` (no
+  session) drives the portal's development banner; the Fake-or-file-held-root rule lives only in
+  `crates/wipe-hub/src/deployment.rs`.
 - Hub migrations are embedded (`sqlx::migrate!`) and applied by `wipe-hub serve` before it
   listens; it exits non-zero within ~5 s if Postgres is unreachable. Add a migration as
   `crates/wipe-hub/migrations/NNNN_name.sql`; never edit an applied one.

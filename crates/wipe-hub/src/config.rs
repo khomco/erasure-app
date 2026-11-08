@@ -552,12 +552,13 @@ fn load_seed(path: &Path) -> Result<SigningKey, ConfigError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Defaults, built without reading the environment so a developer's
-    /// `WIPE_HUB_*` vars cannot change the outcome.
-    fn args() -> Args {
+    /// `WIPE_HUB_*` vars cannot change the outcome. Also used by other
+    /// modules' unit tests (`deployment`).
+    pub(crate) fn args() -> Args {
         Args {
             addr: DEFAULT_ADDR.parse().unwrap(),
             database_url: DEFAULT_DATABASE_URL.into(),

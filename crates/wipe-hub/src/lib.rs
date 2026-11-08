@@ -19,6 +19,7 @@ pub mod config;
 pub mod cors;
 pub mod csrf;
 pub mod db;
+pub mod deployment;
 pub mod download_routes;
 pub mod downloads;
 pub mod entitlements;
@@ -101,6 +102,7 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/api/health", get(health::health))
+        .route("/api/deployment", get(deployment::deployment))
         .merge(auth::routes())
         .merge(team_routes::routes())
         .merge(admin_routes::routes())

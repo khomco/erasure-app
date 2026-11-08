@@ -45,6 +45,11 @@ const ROUTES: &[(&str, &str, Class)] = &[
     ),
     (
         "GET",
+        "/api/deployment",
+        Anonymous("hub configuration only; no account data"),
+    ),
+    (
+        "GET",
         "/api/auth/csrf",
         Anonymous("issues a CSRF token; no account data"),
     ),

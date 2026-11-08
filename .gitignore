@@ -35,7 +35,9 @@ __pycache__/
 .scratch/.driver/
 .scratch/*/stories/*.approved
 
-# wipe-hub's default release artifact directory (--artifact-dir)
+# wipe-hub's default release artifact directory (--artifact-dir). It also holds the
+# development vendor-root seed (docs/agents/local-stack.md), a private key that must
+# never be committed.
 .wipe-hub/
 
 # Astro generated types and cache (sites/www)

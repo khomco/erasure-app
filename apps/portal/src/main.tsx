@@ -11,6 +11,7 @@ import {
 } from "@tanstack/react-router";
 
 import "./index.css";
+import { DevelopmentBanner } from "./DevelopmentBanner";
 import { AcceptInvitePage } from "./pages/AcceptInvitePage";
 import { AccountPage } from "./pages/AccountPage";
 import { AdminLeadPage } from "./pages/AdminLeadPage";
@@ -65,6 +66,7 @@ function NotFound() {
 const rootRoute = createRootRoute({
   component: () => (
     <div className="min-h-full">
+      <DevelopmentBanner />
       <header className="border-b border-slate-800 px-6 py-3">
         <Link to="/" className="font-semibold">
           Wipestation <span className="font-normal text-slate-400">portal</span>
