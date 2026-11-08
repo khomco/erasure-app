@@ -1,0 +1,2666 @@
+diff --git a/CONTEXT.md b/CONTEXT.md
+index 1d75fa1..048af9b 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -690,8 +690,9 @@ folder or in `.scratch/DECISIONS.md`.
+ | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
+ | Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check; landing page (problem, offline-verifiable certificate, differentiators, "what we are not", one early-access CTA); product, standards posture (certification roadmap labelled future), segment (ITAD, enterprise IT, government), pricing ("early-access pricing on request"), contact, privacy and terms pages; early-access and contact forms | ADR-0006 / ROADMAP W1.1–W1.4 | ✅ partial | The forms post nowhere (no `action`, submit disabled) until `lead-capture` adds `POST /api/leads`; pricing has no amounts until `offerings-and-payments`; privacy and terms are placeholders to publish before launch; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); copy and statuses await vendor sign-off |
+ | Vendor hub foundation — `crates/wipe-hub` (`wipe-hub serve`), flag/`WIPE_HUB_*` env config validated at start-up (`fake`\|`stripe` payment provider; `stripe` refuses to start without a webhook secret; optional 32-byte vendor root seed file, warned as file-held on every start), lazy Postgres pool, embedded sqlx migrations applied before listening (start-up exits within ~5 s if Postgres is unreachable), append-only `audit_log` table (ADR-0007 §6; written only through `audit::record`, which takes any executor so an action and its audit row share a transaction; UPDATE/DELETE/TRUNCATE rejected by triggers), `GET /api/health` probing Postgres and SMTP (≤2 s each; 503 `degraded` when either is down), root `compose.yaml` with Postgres and Mailpit, integration-test harness (`tests/support`: per-test `TestDb` databases dropped with their guard, `Mailpit` API client), portal serving (`apps/portal/dist` under the working directory or `--portal-dir`/`WIPE_HUB_PORTAL_DIR`; SPA fallback to `index.html`, `/assets/*` with no fallback, unknown `/api/*` paths JSON 404s; an explicit `--portal-dir` without `index.html` refuses to start, an unbuilt default is warned and non-API paths 404 naming the build) | ADR-0007 / ADR-0006 §1 / ROADMAP A1.1, A1.4 | ✅ partial | Only auth events call `audit::record` so far (row below); append-only does not stop the table owner (the hub's own role) or a superuser disabling the triggers (a separate unprivileged runtime role is a deployment decision, ROADMAP §0.5); no payments or licence issuance; vendor root custody is a file (production must not launch on it, ROADMAP A1.5); `cargo test --workspace` now needs `docker compose up -d` |
+-| Hub accounts: sign-up, email verification and password sign-in — migration `0003_accounts` (`organizations`; `users` with role `owner`\|`member`\|`vendor_admin`, unique on `lower(email)`; `auth_tokens` and `sessions` storing only the SHA-256 of 32-byte OS-RNG tokens), Argon2id password hashes (12–1024 chars, hashed off the async runtime), `/api/auth/{sign-up,verify-email,sign-in,sign-out,me,verification-email}` (sign-up creates an organization and its `owner` and signs them in; verification links `{public_base_url}/verify-email?token=…` are single-use and expire in 24 h; one generic 401 for a wrong password or unknown email, which still runs one Argon2 verification), server-side session per sign-up/sign-in in the `wipehub_session` cookie (`HttpOnly; SameSite=Lax; Path=/`, 14 days; `Secure` policy in the story-2 row below), plain-SMTP mailer with `--mail-from`/`WIPE_HUB_MAIL_FROM` sent after commit (SMTP down at sign-up: account still created, `verification_email_sent:false`, resend route recovers), every auth event audited in its transaction (`auth.sign_up`, `auth.email_verified`, `auth.sign_in`, `auth.sign_in_failed`, `auth.sign_out`), customer reads scoped by organization id in `accounts`; portal `/sign-up`, `/sign-in`, `/verify-email` pages and an account panel on home (verify notice with resend, sign-out) | ADR-0007 §3 / SPEC portal-accounts CAP-1, CAP-2 | ✅ partial | No magic link or password reset (story 3); no team or profile pages (story 4); no `vendor_admin` creation or admin area (story 5); nothing is purchase-gated yet (no purchase route; `email_verified` in `/api/auth/me` is the field to gate on); plain SMTP only, no STARTTLS/auth for a production relay (ROADMAP §0.5); expired email tokens are never purged (a user's expired sessions are purged when they next sign in); sign-up's 409 for a taken email reveals whether that email is registered |
+-| Hub sessions hardened: CSRF, sign-in throttles, rotation, sign out everywhere — double-submit CSRF token (`GET /api/auth/csrf` returns `{csrf_token}` with `Cache-Control: no-store`, reusing a well-formed `wipehub_csrf` cookie or minting 32 OS-RNG bytes; every non-GET/HEAD/OPTIONS `/api/*` request, unknown paths included, needs an `X-CSRF-Token` header equal to the cookie, compared in constant time, else 403 `missing or invalid CSRF token` before any handler or audit write; middleware `csrf::require`, no exemptions); migration `0004_auth_throttle` and `throttle::{charge, confirm_failure, refund, clear, purge_stale}` (reusable by story 3): every sign-in attempt, known or unknown email, is charged against `email:<address>` (trimmed, Postgres `lower()`, ≤254 chars) and `ip:<peer>` (IPv4 full address; IPv6 its /64) in one atomic statement per key before any lookup or Argon2 work, in a fixed 15-min window from the first charge; an attempt is refused while the key is locked or once charges in flight plus failures reach 5 per email or 20 per IP, so at most 5 (20) password checks run per window however many arrive at once; a refusal answers 429 `too many failed sign-in attempts; try again later` with `Retry-After` (time left on the lock, or 1 while only in-flight checks fill the window), even for the right password, and never extends a lock; a failure keeps its charge and the one that reaches the limit locks the key for 15 min; a success deletes the email key and refunds its IP charge, so the right password on the 5th try signs in unlocked; audit volume is bounded: `auth.sign_in_locked` once per lock (`{until}`), refusals counted in the row's `refused` and audited once as `auth.sign_in_lock_summary` (`{until, refused}`) when the row is cleared, restarted or purged, every sign-in audit row carrying `peer` except summaries of purged rows, which belong to other keys; the IP key is charged before the email key, so a locked IP never creates `email:` rows; the work after a charge runs in its own task, so a client disconnecting mid-check still has its outcome recorded; stale rows purged on failures with `SKIP LOCKED`; sign-in and sign-up delete the incoming session in the new session's transaction (`auth.sign_in` detail `{rotated}`); `POST /api/auth/sign-out-everywhere` ends every session of the signed-in user (`auth.sign_out_everywhere`, `{sessions: n}`); session and CSRF cookies are `Secure` unless `--public-base-url` is http on `localhost`, `*.localhost` or a loopback IP (http on any other host gets `Secure` and a start-up warning that browsers will drop the cookies); the portal client fetches and caches the token, sends it on every POST and refetches/retries once on a CSRF 403; the sign-in page turns a 429's `Retry-After` into "try again in N minutes"; "Sign out everywhere" on home | ADR-0007 §3 / SPEC portal-accounts CAP-2, CAP-3 | ✅ partial | The IP throttle keys on the TCP peer only (`X-Forwarded-For` is never trusted, ROADMAP §0.5), so behind a reverse proxy or a shared office NAT everyone shares one IP key and 20 failures among them lock all of them out (an IPv6 /64 is likewise one key); anyone who knows an email can lock that account out of password sign-in for 15 min at a time; because in-flight attempts count toward the limit, one failure while 19 other sign-ins from the same IP are mid-check can lock that IP; sign-up and resend-verification are not rate-limited until story 3 (every route that sends email gets its limit there, with magic link and reset); double-submit CSRF is open to cookie-tossing from a sibling subdomain until hosting is decided; no Origin/`Sec-Fetch-Site` checks; no idle timeout (sessions last 14 days unless signed out) |
++| Hub accounts: sign-up, email verification and password sign-in — migration `0003_accounts` (`organizations`; `users` with role `owner`\|`member`\|`vendor_admin`, unique on `lower(email)`; `auth_tokens` and `sessions` storing only the SHA-256 of 32-byte OS-RNG tokens), Argon2id password hashes (12–1024 chars, hashed off the async runtime), `/api/auth/{sign-up,verify-email,sign-in,sign-out,me,verification-email}` (sign-up creates an organization and its `owner` and signs them in; verification links `{public_base_url}/verify-email?token=…` are single-use and expire in 24 h; one generic 401 for a wrong password or unknown email, which still runs one Argon2 verification), server-side session per sign-up/sign-in in the `wipehub_session` cookie (`HttpOnly; SameSite=Lax; Path=/`, 14 days; `Secure` policy in the story-2 row below), plain-SMTP mailer with `--mail-from`/`WIPE_HUB_MAIL_FROM` sent after commit (SMTP down at sign-up: account still created, `verification_email_sent:false`, resend route recovers), every auth event audited in its transaction (`auth.sign_up`, `auth.email_verified`, `auth.sign_in`, `auth.sign_in_failed`, `auth.sign_out`), customer reads scoped by organization id in `accounts`; portal `/sign-up`, `/sign-in`, `/verify-email` pages and an account panel on home (verify notice with resend, sign-out) | ADR-0007 §3 / SPEC portal-accounts CAP-1, CAP-2 | ✅ partial | No team or profile pages (story 4); no `vendor_admin` creation or admin area (story 5); nothing is purchase-gated yet (no purchase route; `email_verified` in `/api/auth/me` is the field to gate on); plain SMTP only, no STARTTLS/auth for a production relay (ROADMAP §0.5); expired tokens are purged per user when that user is next issued one (a user's expired sessions are purged when they next sign in); sign-up's 409 for a taken email reveals whether that email is registered |
++| Hub sessions hardened: CSRF, sign-in throttles, rotation, sign out everywhere — double-submit CSRF token (`GET /api/auth/csrf` returns `{csrf_token}` with `Cache-Control: no-store`, reusing a well-formed `wipehub_csrf` cookie or minting 32 OS-RNG bytes; every non-GET/HEAD/OPTIONS `/api/*` request, unknown paths included, needs an `X-CSRF-Token` header equal to the cookie, compared in constant time, else 403 `missing or invalid CSRF token` before any handler or audit write; middleware `csrf::require`, no exemptions); migration `0004_auth_throttle` and `throttle::{charge, confirm_failure, refund, clear, purge_stale}` (reusable by story 3): every sign-in attempt, known or unknown email, is charged against `email:<address>` (trimmed, Postgres `lower()`, ≤254 chars) and `ip:<peer>` (IPv4 full address; IPv6 its /64) in one atomic statement per key before any lookup or Argon2 work, in a fixed 15-min window from the first charge; an attempt is refused while the key is locked or once charges in flight plus failures reach 5 per email or 20 per IP, so at most 5 (20) password checks run per window however many arrive at once; a refusal answers 429 `too many failed sign-in attempts; try again later` with `Retry-After` (time left on the lock, or 1 while only in-flight checks fill the window), even for the right password, and never extends a lock; a failure keeps its charge and the one that reaches the limit locks the key for 15 min; a success deletes the email key and refunds its IP charge, so the right password on the 5th try signs in unlocked; audit volume is bounded: `auth.sign_in_locked` once per lock (`{until}`), refusals counted in the row's `refused` and audited once as `auth.sign_in_lock_summary` (`{until, refused}`) when the row is cleared, restarted or purged, every sign-in audit row carrying `peer` except summaries of purged rows, which belong to other keys; the IP key is charged before the email key, so a locked IP never creates `email:` rows; the work after a charge runs in its own task, so a client disconnecting mid-check still has its outcome recorded; stale rows purged on failures with `SKIP LOCKED`; sign-in and sign-up delete the incoming session in the new session's transaction (`auth.sign_in` detail `{rotated}`); `POST /api/auth/sign-out-everywhere` ends every session of the signed-in user (`auth.sign_out_everywhere`, `{sessions: n}`); session and CSRF cookies are `Secure` unless `--public-base-url` is http on `localhost`, `*.localhost` or a loopback IP (http on any other host gets `Secure` and a start-up warning that browsers will drop the cookies); the portal client fetches and caches the token, sends it on every POST and refetches/retries once on a CSRF 403; the sign-in page turns a 429's `Retry-After` into "try again in N minutes"; "Sign out everywhere" on home | ADR-0007 §3 / SPEC portal-accounts CAP-2, CAP-3 | ✅ partial | The IP throttle keys on the TCP peer only (`X-Forwarded-For` is never trusted, ROADMAP §0.5), so behind a reverse proxy or a shared office NAT everyone shares one IP key and 20 failures among them lock all of them out (an IPv6 /64 is likewise one key); anyone who knows an email can lock that account out of password sign-in for 15 min at a time; because in-flight attempts count toward the limit, one failure while 19 other sign-ins from the same IP are mid-check can lock that IP; double-submit CSRF is open to cookie-tossing from a sibling subdomain until hosting is decided; no Origin/`Sec-Fetch-Site` checks; no idle timeout (sessions last 14 days unless signed out) |
++| Hub magic links, password reset and the email-send throttle — migration `0005_auth_token_purposes` widens `auth_tokens.purpose` to `verify_email`\|`magic_link`\|`password_reset`; every emailed token is 32 OS-RNG bytes with only its SHA-256 stored, consumed by one atomic `UPDATE … WHERE used_at IS NULL AND expires_at > now()` (concurrent uses: exactly one wins), and issuing one deletes that user's expired tokens; `POST /api/auth/magic-link` and `POST /api/auth/password-reset` take `{email}` and answer 202 `{}` for known and unknown emails alike, SMTP down included (the link `{public_base_url}/magic-link?token=…`, 15 min, or `/reset-password?token=…`, 1 h, is sent from a spawned task after commit; an unknown email writes no token, mail or audit row; `auth.magic_link_requested`/`auth.password_reset_requested`); `POST /api/auth/magic-link/sign-in {token}` signs in like a password sign-in (rotating the incoming session), retires the user's other magic links, marks the email verified, clears that email's sign-in lock and is not subject to the sign-in throttle (`auth.magic_link_sign_in` `{rotated, email_verified}`); `POST /api/auth/password-reset/complete {token, password}` checks the password first (an invalid one never burns the token), peeks the token before Argon2, then in one transaction consumes it, sets the hash, retires outstanding reset and magic links, ends every session of the user, verifies the email and clears the sign-in lock, and answers `{"password_reset": true}` with the session cookie cleared, without signing in (`auth.password_reset` `{sessions, email_verified}`); every route that sends email (sign-up, resend verification, magic link, reset) is charged against `mail:to:<address>` (5 per hour) and `mail:ip:<peer>` (20 per hour) before any lookup, Argon2 or send, each charge final whether or not mail goes out, the one reaching a limit locking the key for 1 h (`auth.mail_locked` once; refusals summarised as `auth.mail_lock_summary`), a refusal being 429 `too many emails requested; try again later` with `Retry-After`; portal `/sign-in-link`, `/forgot-password` (same confirmation whether or not the account exists), `/magic-link` (signs in only on a button press, never on load, so a mail scanner cannot use the link) and `/reset-password`, linked from `/sign-in`; email-sending forms show "Too many emails requested. Try again in N minutes." | ADR-0007 §3 / SPEC portal-accounts CAP-2 | ✅ partial | Anyone who knows an address can use up its 5 emails and block that person's magic link and reset for an hour (the limit counts unknown addresses too, so it reveals nothing); the per-IP mail limit has the same shared-NAT/proxy caveat as sign-in; expired tokens are only purged per user, with no global sweeper; the reset and magic-link token routes have no throttle of their own (a 256-bit token cannot be guessed); no MFA |
+ 
+ ## 11. Deferred — known and committed
+ 
+@@ -1061,6 +1062,20 @@ and resolve. None of these have a decided answer.
+   refunded if it succeeds; when failures reach the limit within a fixed
+   window, password sign-in for that key is locked. A lockout is a
+   throttle in its locked state, not a disabled account.
++- **Magic link** — an emailed, single-use link
++  (`{public_base_url}/magic-link?token=…`, 15 min) that signs a portal
++  user in without a password, once they press the button on the page.
++  Following it proves control of the mailbox: it verifies the email and
++  clears that email's sign-in lock.
++- **Password reset link** — an emailed, single-use link
++  (`/reset-password?token=…`, 1 h) for choosing a new portal password.
++  Completing a reset ends every portal session of the user and does not
++  sign them in.
++- **Email-send throttle** — the hub's limit on emails it sends, in the
++  same `auth_throttle` table as the sign-in throttle but keyed
++  `mail:to:<address>` and `mail:ip:<peer>`: 5 per address and 20 per IP
++  per hour across sign-up, resend verification, magic link and reset,
++  counted whether or not an account exists.
+ - **Verification portal / playground** — public, client-side certificate
+   verification. Runs the same code path as offline `verify-cert`, with
+   no network call and no lookup against us.
+diff --git a/README.md b/README.md
+index 10c831e..60b5f33 100644
+--- a/README.md
++++ b/README.md
+@@ -45,9 +45,9 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
+ | `wipe-fleet` | mDNS service advertise / browse + deterministic lead election |
+ | `wipe-server` | Axum REST API + WebSocket event stream; auto-signs certs when a Job reaches `Erased` or `PendingCoSign`; destruction-manifest assembly and co-sign |
+ | `wipe-cli` | `wipestation serve / inspect / verify-cert` binary |
+-| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), every auth event audited. Payments and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
++| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, a per-address and per-IP limit on every email it sends, every auth event audited. Payments and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
+ | `apps/desktop` | Vite + React + TanStack Router + Tailwind frontend, plus Tauri 2 shell |
+-| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in and email-verification pages, and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere); its API client sends the hub's CSRF token on every POST |
++| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in, email-verification, sign-in-link (magic link) and password-reset pages, and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere); its API client sends the hub's CSRF token on every POST |
+ | `sites/www` | Static Astro + Tailwind marketing site (pre-launch): landing, product, standards, segment (ITAD, enterprise IT, government), pricing, contact, privacy and terms pages, `/capabilities`, and early-access/contact forms that post nowhere until `lead-capture`; a build-time check fails `astro build` on any capability overclaim, missing meta/OG tag, missing sitemap, or resource loaded from another origin (ADR-0006 §2). See [`sites/www/README.md`](sites/www/README.md) |
+ 
+ ## Quick start
+diff --git a/apps/portal/src/api/auth.test.ts b/apps/portal/src/api/auth.test.ts
+index 9547888..7e811c6 100644
+--- a/apps/portal/src/api/auth.test.ts
++++ b/apps/portal/src/api/auth.test.ts
+@@ -2,11 +2,16 @@ import { beforeEach, describe, expect, it } from "vitest";
+ import {
+   CSRF_ERROR,
+   HubError,
++  emailRequestErrorMessage,
+   fetchMe,
++  requestMagicLink,
++  requestPasswordReset,
+   resendVerification,
+   resetCsrfCache,
++  resetPassword,
+   signIn,
+   signInErrorMessage,
++  signInWithMagicLink,
+   signOut,
+   signOutEverywhere,
+   signUp,
+@@ -304,6 +309,10 @@ describe("CSRF token", () => {
+     ["sign-out-everywhere", (f) => signOutEverywhere(f)],
+     ["verify-email", (f) => verifyEmail("tok", f)],
+     ["verification-email", (f) => resendVerification(f)],
++    ["magic-link", (f) => requestMagicLink("a@b.co", f)],
++    ["magic-link/sign-in", (f) => signInWithMagicLink("tok", f)],
++    ["password-reset", (f) => requestPasswordReset("a@b.co", f)],
++    ["password-reset/complete", (f) => resetPassword("tok", "pw", f)],
+   ];
+ 
+   it.each(posts)("%s sends X-CSRF-Token from /api/auth/csrf", async (_, call) => {
+@@ -370,3 +379,123 @@ describe("CSRF token", () => {
+     expect(calls).toEqual(["/api/auth/csrf", "/api/auth/csrf", "/api/auth/sign-out"]);
+   });
+ });
++
++describe("requestMagicLink and requestPasswordReset", () => {
++  it.each([
++    ["/api/auth/magic-link", requestMagicLink],
++    ["/api/auth/password-reset", requestPasswordReset],
++  ])("%s posts the email and resolves on 202", async (url, call) => {
++    const f = respond(202, "{}");
++    await expect(call("ada@example.com", f.impl)).resolves.toBeUndefined();
++    expect(f.calls).toEqual([
++      { url, method: "POST", body: { email: "ada@example.com" }, csrf: "csrf-1" },
++    ]);
++  });
++
++  it.each([requestMagicLink, requestPasswordReset])(
++    "surfaces the email-send limit with its Retry-After",
++    async (call) => {
++      const f = fakeHub(() => ({
++        status: 429,
++        body: JSON.stringify({ error: "too many emails requested; try again later" }),
++        headers: { "Retry-After": "3600" },
++      }));
++      const err = await call("a@b.co", f.impl).then(
++        () => undefined,
++        (e: unknown) => e,
++      );
++      expect((err as HubError).status).toBe(429);
++      expect((err as HubError).retryAfterSecs).toBe(3600);
++      expect(emailRequestErrorMessage(err)).toBe(
++        "Too many emails requested. Try again in 60 minutes.",
++      );
++    },
++  );
++
++  it("surfaces a 400 for an invalid email", async () => {
++    const f = hubError(400, "email is not a valid email address");
++    await expectHubError(
++      requestMagicLink("nope", f.impl),
++      400,
++      "email is not a valid email address",
++    );
++  });
++});
++
++describe("signInWithMagicLink", () => {
++  it("posts the token and returns the account", async () => {
++    const f = respond(200, JSON.stringify(account));
++    expect(await signInWithMagicLink("tok", f.impl)).toEqual(account);
++    expect(f.calls).toEqual([
++      {
++        url: "/api/auth/magic-link/sign-in",
++        method: "POST",
++        body: { token: "tok" },
++        csrf: "csrf-1",
++      },
++    ]);
++  });
++
++  it("surfaces an invalid or expired link", async () => {
++    const f = hubError(400, "this sign-in link is invalid or has expired");
++    await expectHubError(
++      signInWithMagicLink("tok", f.impl),
++      400,
++      "this sign-in link is invalid or has expired",
++    );
++  });
++
++  it("rejects a body that is not an account", async () => {
++    const f = respond(200, JSON.stringify({ ok: true }));
++    await expect(signInWithMagicLink("tok", f.impl)).rejects.toThrow(/unexpected body/);
++  });
++});
++
++describe("resetPassword", () => {
++  it("posts the token and new password", async () => {
++    const f = respond(200, JSON.stringify({ password_reset: true }));
++    await expect(resetPassword("tok", "a new passphrase", f.impl)).resolves.toBeUndefined();
++    expect(f.calls).toEqual([
++      {
++        url: "/api/auth/password-reset/complete",
++        method: "POST",
++        body: { token: "tok", password: "a new passphrase" },
++        csrf: "csrf-1",
++      },
++    ]);
++  });
++
++  it.each([
++    "this password reset link is invalid or has expired",
++    "password must be at least 12 characters",
++  ])("surfaces the 400 %s", async (message) => {
++    await expectHubError(resetPassword("tok", "x", hubError(400, message).impl), 400, message);
++  });
++
++  it("rejects an unexpected success body", async () => {
++    const f = respond(200, JSON.stringify({}));
++    await expect(resetPassword("tok", "x", f.impl)).rejects.toThrow(/unexpected body/);
++  });
++});
++
++describe("emailRequestErrorMessage", () => {
++  it("rounds the wait up to whole minutes", () => {
++    const limited = (secs: number) => new HubError(429, "too many emails requested", secs);
++    expect(emailRequestErrorMessage(limited(1))).toBe(
++      "Too many emails requested. Try again in 1 minute.",
++    );
++    expect(emailRequestErrorMessage(limited(3590))).toBe(
++      "Too many emails requested. Try again in 60 minutes.",
++    );
++  });
++
++  it("describes other errors by their message", () => {
++    expect(emailRequestErrorMessage(new HubError(429, "too many emails requested"))).toBe(
++      "too many emails requested",
++    );
++    expect(emailRequestErrorMessage(new HubError(409, "an account with this email already exists"))).toBe(
++      "an account with this email already exists",
++    );
++    expect(emailRequestErrorMessage(undefined)).toBe("Something went wrong");
++  });
++});
+diff --git a/apps/portal/src/api/auth.ts b/apps/portal/src/api/auth.ts
+index cfd2abb..ace6052 100644
+--- a/apps/portal/src/api/auth.ts
++++ b/apps/portal/src/api/auth.ts
+@@ -1,4 +1,5 @@
+-// Mirrors the `/api/auth/*` shapes in crates/wipe-hub/src/auth.rs and
++// Mirrors the `/api/auth/*` shapes in crates/wipe-hub/src/auth.rs (sign-up,
++// sign-in, verification, sessions, magic links and password reset) and
+ // `wipe_hub::accounts::{Account, User, Organization, Role}`
+ // (crates/wipe-hub/src/accounts.rs). Change both together.
+ 
+@@ -54,17 +55,38 @@ function retryAfter(res: Response): number | null {
+   return v && /^\d+$/.test(v) ? Number(v) : null;
+ }
+ 
++/** A 429's `Retry-After` as "N minute(s)", rounded up; `null` for anything else. */
++function waitFor(error: unknown): string | null {
++  if (error instanceof HubError && error.status === 429 && error.retryAfterSecs !== null) {
++    const minutes = Math.max(1, Math.ceil(error.retryAfterSecs / 60));
++    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
++  }
++  return null;
++}
++
++function messageOf(error: unknown): string {
++  return error instanceof Error ? error.message : "Something went wrong";
++}
++
+ /**
+  * What the sign-in form shows for an error: a sign-in lockout (429) says
+  * how long to wait, rounded up to whole minutes; anything else is the
+  * error's own message.
+  */
+ export function signInErrorMessage(error: unknown): string {
+-  if (error instanceof HubError && error.status === 429 && error.retryAfterSecs !== null) {
+-    const minutes = Math.max(1, Math.ceil(error.retryAfterSecs / 60));
+-    return `Too many failed sign-in attempts. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`;
+-  }
+-  return error instanceof Error ? error.message : "Something went wrong";
++  const wait = waitFor(error);
++  return wait ? `Too many failed sign-in attempts. Try again in ${wait}.` : messageOf(error);
++}
++
++/**
++ * What a form that makes the hub send email (sign-up, resend verification,
++ * magic link, password reset) shows for an error: the email-send limit (429)
++ * says how long to wait, rounded up to whole minutes; anything else is the
++ * error's own message.
++ */
++export function emailRequestErrorMessage(error: unknown): string {
++  const wait = waitFor(error);
++  return wait ? `Too many emails requested. Try again in ${wait}.` : messageOf(error);
+ }
+ 
+ type Fetch = typeof fetch;
+@@ -219,6 +241,55 @@ export async function resendVerification(fetchImpl: Fetch = fetch): Promise<void
+   await ensureOk(await request(fetchImpl, "POST", "/api/auth/verification-email"));
+ }
+ 
++/**
++ * `POST /api/auth/magic-link` (202): email a sign-in link to `email` if an
++ * account has it. The hub answers the same whether or not one does.
++ */
++export async function requestMagicLink(email: string, fetchImpl: Fetch = fetch): Promise<void> {
++  await ensureOk(await request(fetchImpl, "POST", "/api/auth/magic-link", { email }));
++}
++
++/**
++ * `POST /api/auth/magic-link/sign-in` with the token from the emailed link:
++ * signs in and returns the account. A used, expired or unknown link is a 400
++ * `HubError`.
++ */
++export async function signInWithMagicLink(token: string, fetchImpl: Fetch = fetch): Promise<Account> {
++  const res = await ensureOk(
++    await request(fetchImpl, "POST", "/api/auth/magic-link/sign-in", { token }),
++  );
++  return json(res, isAccount, "magic-link sign-in");
++}
++
++/**
++ * `POST /api/auth/password-reset` (202): email a password reset link to
++ * `email` if an account has it. The hub answers the same whether or not one
++ * does.
++ */
++export async function requestPasswordReset(email: string, fetchImpl: Fetch = fetch): Promise<void> {
++  await ensureOk(await request(fetchImpl, "POST", "/api/auth/password-reset", { email }));
++}
++
++/**
++ * `POST /api/auth/password-reset/complete`: set a new password with the
++ * token from the emailed link. Every session of the account ends, this
++ * browser's included: the user then signs in with the new password.
++ */
++export async function resetPassword(
++  token: string,
++  password: string,
++  fetchImpl: Fetch = fetch,
++): Promise<void> {
++  const res = await ensureOk(
++    await request(fetchImpl, "POST", "/api/auth/password-reset/complete", { token, password }),
++  );
++  await json(
++    res,
++    (v): v is { password_reset: true } => isObject(v) && v.password_reset === true,
++    "password reset",
++  );
++}
++
+ function isObject(v: unknown): v is Record<string, unknown> {
+   return typeof v === "object" && v !== null;
+ }
+diff --git a/apps/portal/src/main.tsx b/apps/portal/src/main.tsx
+index e4c26b9..ad0cfc9 100644
+--- a/apps/portal/src/main.tsx
++++ b/apps/portal/src/main.tsx
+@@ -11,7 +11,11 @@ import {
+ } from "@tanstack/react-router";
+ 
+ import "./index.css";
++import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
+ import { HomePage } from "./pages/HomePage";
++import { MagicLinkPage } from "./pages/MagicLinkPage";
++import { ResetPasswordPage } from "./pages/ResetPasswordPage";
++import { SignInLinkPage } from "./pages/SignInLinkPage";
+ import { SignInPage } from "./pages/SignInPage";
+ import { SignUpPage } from "./pages/SignUpPage";
+ import { VerifyEmailPage } from "./pages/VerifyEmailPage";
+@@ -82,7 +86,55 @@ const verifyEmailRoute = createRoute({
+   },
+ });
+ 
+-const routeTree = rootRoute.addChildren([indexRoute, signUpRoute, signInRoute, verifyEmailRoute]);
++/** `?token=` as a string, or nothing. */
++function tokenSearch(search: Record<string, unknown>): { token?: string } {
++  return typeof search.token === "string" ? { token: search.token } : {};
++}
++
++const signInLinkRoute = createRoute({
++  getParentRoute: () => rootRoute,
++  path: "/sign-in-link",
++  component: SignInLinkPage,
++});
++
++const forgotPasswordRoute = createRoute({
++  getParentRoute: () => rootRoute,
++  path: "/forgot-password",
++  component: ForgotPasswordPage,
++});
++
++// The hub emails `{public_base_url}/magic-link?token=…`.
++const magicLinkRoute = createRoute({
++  getParentRoute: () => rootRoute,
++  path: "/magic-link",
++  validateSearch: tokenSearch,
++  component: function MagicLinkRoute() {
++    const { token } = magicLinkRoute.useSearch();
++    return <MagicLinkPage token={token} />;
++  },
++});
++
++// The hub emails `{public_base_url}/reset-password?token=…`.
++const resetPasswordRoute = createRoute({
++  getParentRoute: () => rootRoute,
++  path: "/reset-password",
++  validateSearch: tokenSearch,
++  component: function ResetPasswordRoute() {
++    const { token } = resetPasswordRoute.useSearch();
++    return <ResetPasswordPage token={token} />;
++  },
++});
++
++const routeTree = rootRoute.addChildren([
++  indexRoute,
++  signUpRoute,
++  signInRoute,
++  verifyEmailRoute,
++  signInLinkRoute,
++  forgotPasswordRoute,
++  magicLinkRoute,
++  resetPasswordRoute,
++]);
+ 
+ const router = createRouter({ routeTree });
+ 
+diff --git a/apps/portal/src/pages/AuthForm.tsx b/apps/portal/src/pages/AuthForm.tsx
+index bfe3f3e..615459c 100644
+--- a/apps/portal/src/pages/AuthForm.tsx
++++ b/apps/portal/src/pages/AuthForm.tsx
+@@ -1,4 +1,7 @@
+-import type { ReactNode } from "react";
++import { useState, type FormEvent, type ReactNode } from "react";
++import { useMutation } from "@tanstack/react-query";
++import { Link } from "@tanstack/react-router";
++import { emailRequestErrorMessage } from "@/api/auth";
+ 
+ /** Shared look for the sign-up and sign-in forms. */
+ export function Field({
+@@ -66,3 +69,64 @@ export function SubmitButton({ pending, children }: { pending: boolean; children
+     </button>
+   );
+ }
++
++/**
++ * Asks the hub to email a link (sign-in or password reset). The hub answers
++ * the same whether or not an account has the address, so the confirmation
++ * never says which.
++ */
++export function RequestLinkForm({
++  title,
++  intro,
++  submitLabel,
++  lifetime,
++  send,
++}: {
++  title: string;
++  intro: string;
++  submitLabel: string;
++  /** How long the emailed link lasts, e.g. "15 minutes". */
++  lifetime: string;
++  send: (email: string) => Promise<void>;
++}) {
++  const [email, setEmail] = useState("");
++  const mutation = useMutation({ mutationFn: (address: string) => send(address) });
++
++  function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    mutation.mutate(email);
++  }
++
++  return (
++    <section className="max-w-sm space-y-4">
++      <h1 className="text-xl font-semibold">{title}</h1>
++      {mutation.isSuccess ? (
++        <p role="status" className="text-sm text-emerald-400">
++          If an account exists for {mutation.variables}, we've emailed it a link. The link works
++          once and expires in {lifetime}.
++        </p>
++      ) : (
++        <>
++          <p className="text-sm text-slate-400">{intro}</p>
++          <form onSubmit={onSubmit} className="space-y-3">
++            <Field
++              label="Email"
++              name="email"
++              type="email"
++              autoComplete="email"
++              value={email}
++              onChange={setEmail}
++            />
++            <FormError error={mutation.error} describe={emailRequestErrorMessage} />
++            <SubmitButton pending={mutation.isPending}>{submitLabel}</SubmitButton>
++          </form>
++        </>
++      )}
++      <p className="text-sm text-slate-400">
++        <Link to="/sign-in" className="text-indigo-400 hover:underline">
++          Back to sign in
++        </Link>
++      </p>
++    </section>
++  );
++}
+diff --git a/apps/portal/src/pages/ForgotPasswordPage.tsx b/apps/portal/src/pages/ForgotPasswordPage.tsx
+new file mode 100644
+index 0000000..ef01396
+--- /dev/null
++++ b/apps/portal/src/pages/ForgotPasswordPage.tsx
+@@ -0,0 +1,15 @@
++import { requestPasswordReset } from "@/api/auth";
++import { RequestLinkForm } from "./AuthForm";
++
++/** `/forgot-password`: email a password reset link. */
++export function ForgotPasswordPage() {
++  return (
++    <RequestLinkForm
++      title="Reset your password"
++      intro="Enter your account's email address and we'll send you a link to choose a new password."
++      submitLabel="Email me a reset link"
++      lifetime="1 hour"
++      send={(email) => requestPasswordReset(email)}
++    />
++  );
++}
+diff --git a/apps/portal/src/pages/HomePage.tsx b/apps/portal/src/pages/HomePage.tsx
+index 4d726d3..02d5d39 100644
+--- a/apps/portal/src/pages/HomePage.tsx
++++ b/apps/portal/src/pages/HomePage.tsx
+@@ -1,6 +1,7 @@
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+ import { Link } from "@tanstack/react-router";
+ import {
++  emailRequestErrorMessage,
+   fetchMe,
+   resendVerification,
+   signOut,
+@@ -122,7 +123,7 @@ function SignedIn({ account }: { account: Account }) {
+           {resend.isSuccess && <p className="mt-1 text-emerald-400">Sent. Check your inbox.</p>}
+           {resend.isError && (
+             <p role="alert" className="mt-1 text-rose-400">
+-              {resend.error instanceof Error ? resend.error.message : "Could not send"}
++              {emailRequestErrorMessage(resend.error)}
+             </p>
+           )}
+         </div>
+diff --git a/apps/portal/src/pages/MagicLinkPage.tsx b/apps/portal/src/pages/MagicLinkPage.tsx
+new file mode 100644
+index 0000000..d51127d
+--- /dev/null
++++ b/apps/portal/src/pages/MagicLinkPage.tsx
+@@ -0,0 +1,52 @@
++import { useMutation, useQueryClient } from "@tanstack/react-query";
++import { Link, useNavigate } from "@tanstack/react-router";
++import { signInWithMagicLink, type Account } from "@/api/auth";
++
++/**
++ * Landing page for the emailed `/magic-link?token=…` link. It signs in only
++ * when the user presses the button, never on load: some mail scanners open
++ * links in a real browser, and must not use up the link or get a session.
++ */
++export function MagicLinkPage({ token }: { token: string | undefined }) {
++  const queryClient = useQueryClient();
++  const navigate = useNavigate();
++  const mutation = useMutation({
++    mutationFn: (t: string) => signInWithMagicLink(t),
++    onSuccess: (account) => {
++      queryClient.setQueryData<Account>(["me"], account);
++      void navigate({ to: "/" });
++    },
++  });
++
++  return (
++    <section className="max-w-sm space-y-4">
++      <h1 className="text-xl font-semibold">Sign in with your link</h1>
++      {!token ? (
++        <p role="alert" className="text-sm text-rose-400">
++          This link has no sign-in token.
++        </p>
++      ) : (
++        <button
++          type="button"
++          onClick={() => mutation.mutate(token)}
++          disabled={mutation.isPending || mutation.isSuccess}
++          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
++        >
++          Sign in
++        </button>
++      )}
++      {mutation.isError && (
++        <p role="alert" className="text-sm text-rose-400">
++          {mutation.error instanceof Error ? mutation.error.message : "Sign-in failed"}
++        </p>
++      )}
++      {(!token || mutation.isError) && (
++        <p className="text-sm text-slate-400">
++          <Link to="/sign-in-link" className="text-indigo-400 hover:underline">
++            Email me a new sign-in link
++          </Link>
++        </p>
++      )}
++    </section>
++  );
++}
+diff --git a/apps/portal/src/pages/ResetPasswordPage.tsx b/apps/portal/src/pages/ResetPasswordPage.tsx
+new file mode 100644
+index 0000000..78dca69
+--- /dev/null
++++ b/apps/portal/src/pages/ResetPasswordPage.tsx
+@@ -0,0 +1,77 @@
++import { useState, type FormEvent } from "react";
++import { useMutation, useQueryClient } from "@tanstack/react-query";
++import { Link } from "@tanstack/react-router";
++import { resetPassword } from "@/api/auth";
++import { Field, FormError, SubmitButton } from "./AuthForm";
++
++/**
++ * Landing page for the emailed `/reset-password?token=…` link. A reset ends
++ * every session of the account, so it does not sign in: the user signs in
++ * afterwards with the new password.
++ */
++export function ResetPasswordPage({ token }: { token: string | undefined }) {
++  const queryClient = useQueryClient();
++  const [password, setPassword] = useState("");
++  const mutation = useMutation({
++    mutationFn: (t: string) => resetPassword(t, password),
++    // This browser's session ended with all the others.
++    onSuccess: () => queryClient.setQueryData(["me"], null),
++  });
++
++  function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    if (token) mutation.mutate(token);
++  }
++
++  if (!token) {
++    return (
++      <section className="max-w-sm space-y-4">
++        <h1 className="text-xl font-semibold">Choose a new password</h1>
++        <p role="alert" className="text-sm text-rose-400">
++          This link has no reset token.
++        </p>
++        <Link to="/forgot-password" className="text-sm text-indigo-400 hover:underline">
++          Email me a new reset link
++        </Link>
++      </section>
++    );
++  }
++
++  if (mutation.isSuccess) {
++    return (
++      <section className="max-w-sm space-y-4">
++        <h1 className="text-xl font-semibold">Password changed</h1>
++        <p role="status" className="text-sm text-emerald-400">
++          Your password has been changed and every session of your account has been signed out.
++        </p>
++        <Link to="/sign-in" className="text-sm text-indigo-400 hover:underline">
++          Sign in with your new password
++        </Link>
++      </section>
++    );
++  }
++
++  return (
++    <section className="max-w-sm space-y-4">
++      <h1 className="text-xl font-semibold">Choose a new password</h1>
++      <form onSubmit={onSubmit} className="space-y-3">
++        <Field
++          label="New password (at least 12 characters)"
++          name="password"
++          type="password"
++          autoComplete="new-password"
++          minLength={12}
++          value={password}
++          onChange={setPassword}
++        />
++        <FormError error={mutation.error} />
++        <SubmitButton pending={mutation.isPending}>Change password</SubmitButton>
++      </form>
++      {mutation.isError && (
++        <Link to="/forgot-password" className="text-sm text-indigo-400 hover:underline">
++          Email me a new reset link
++        </Link>
++      )}
++    </section>
++  );
++}
+diff --git a/apps/portal/src/pages/SignInLinkPage.tsx b/apps/portal/src/pages/SignInLinkPage.tsx
+new file mode 100644
+index 0000000..2247352
+--- /dev/null
++++ b/apps/portal/src/pages/SignInLinkPage.tsx
+@@ -0,0 +1,15 @@
++import { requestMagicLink } from "@/api/auth";
++import { RequestLinkForm } from "./AuthForm";
++
++/** `/sign-in-link`: email a one-time sign-in (magic) link. */
++export function SignInLinkPage() {
++  return (
++    <RequestLinkForm
++      title="Email me a sign-in link"
++      intro="Enter your account's email address and we'll send you a link that signs you in without a password."
++      submitLabel="Email me a link"
++      lifetime="15 minutes"
++      send={(email) => requestMagicLink(email)}
++    />
++  );
++}
+diff --git a/apps/portal/src/pages/SignInPage.tsx b/apps/portal/src/pages/SignInPage.tsx
+index 4577e44..0a974eb 100644
+--- a/apps/portal/src/pages/SignInPage.tsx
++++ b/apps/portal/src/pages/SignInPage.tsx
+@@ -46,6 +46,18 @@ export function SignInPage() {
+         <FormError error={mutation.error} describe={signInErrorMessage} />
+         <SubmitButton pending={mutation.isPending}>Sign in</SubmitButton>
+       </form>
++      <ul className="space-y-1 text-sm">
++        <li>
++          <Link to="/sign-in-link" className="text-indigo-400 hover:underline">
++            Email me a sign-in link
++          </Link>
++        </li>
++        <li>
++          <Link to="/forgot-password" className="text-indigo-400 hover:underline">
++            Forgot your password?
++          </Link>
++        </li>
++      </ul>
+       <p className="text-sm text-slate-400">
+         New here?{" "}
+         <Link to="/sign-up" className="text-indigo-400 hover:underline">
+diff --git a/apps/portal/src/pages/SignUpPage.tsx b/apps/portal/src/pages/SignUpPage.tsx
+index 2e89d97..e6b6170 100644
+--- a/apps/portal/src/pages/SignUpPage.tsx
++++ b/apps/portal/src/pages/SignUpPage.tsx
+@@ -1,7 +1,7 @@
+ import { useState, type FormEvent } from "react";
+ import { useMutation, useQueryClient } from "@tanstack/react-query";
+ import { Link, useNavigate } from "@tanstack/react-router";
+-import { signUp, type Account } from "@/api/auth";
++import { emailRequestErrorMessage, signUp, type Account } from "@/api/auth";
+ import { Field, FormError, SubmitButton } from "./AuthForm";
+ 
+ export function SignUpPage() {
+@@ -55,7 +55,7 @@ export function SignUpPage() {
+           value={password}
+           onChange={setPassword}
+         />
+-        <FormError error={mutation.error} />
++        <FormError error={mutation.error} describe={emailRequestErrorMessage} />
+         <SubmitButton pending={mutation.isPending}>Create account</SubmitButton>
+       </form>
+       <p className="text-sm text-slate-400">
+diff --git a/crates/wipe-hub/migrations/0005_auth_token_purposes.sql b/crates/wipe-hub/migrations/0005_auth_token_purposes.sql
+new file mode 100644
+index 0000000..3d3f192
+--- /dev/null
++++ b/crates/wipe-hub/migrations/0005_auth_token_purposes.sql
+@@ -0,0 +1,12 @@
++-- Magic-link and password-reset tokens (ADR-0007 §3, portal-accounts story 3).
++-- Widens the `auth_tokens.purpose` CHECK list, as 0003 planned, rather than
++-- adding a table: every emailed token keeps the same shape (only its SHA-256
++-- stored, single-use through `used_at`, expiring at `expires_at`).
++-- `auth_tokens_purpose_check` is the name Postgres gave 0003's column CHECK.
++--
++-- Never edit an applied migration; add a new NNNN_name.sql.
++
++ALTER TABLE auth_tokens
++    DROP CONSTRAINT auth_tokens_purpose_check,
++    ADD CONSTRAINT auth_tokens_purpose_check
++        CHECK (purpose IN ('verify_email', 'magic_link', 'password_reset'));
+diff --git a/crates/wipe-hub/src/accounts.rs b/crates/wipe-hub/src/accounts.rs
+index 64f501a..10f5439 100644
+--- a/crates/wipe-hub/src/accounts.rs
++++ b/crates/wipe-hub/src/accounts.rs
+@@ -39,9 +39,15 @@ pub const EMAIL_MAX_CHARS: usize = 254;
+ pub const SESSION_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+ /// How long an email-verification token is valid.
+ pub const VERIFY_EMAIL_TTL: Duration = Duration::from_secs(24 * 60 * 60);
++/// How long a magic (sign-in) link is valid.
++pub const MAGIC_LINK_TTL: Duration = Duration::from_secs(15 * 60);
++/// How long a password reset link is valid.
++pub const PASSWORD_RESET_TTL: Duration = Duration::from_secs(60 * 60);
+ 
+-/// Purpose of an `auth_tokens` row (the migration's CHECK list).
++/// Purposes of an `auth_tokens` row (the CHECK list, widened by 0005).
+ pub const PURPOSE_VERIFY_EMAIL: &str = "verify_email";
++pub const PURPOSE_MAGIC_LINK: &str = "magic_link";
++pub const PURPOSE_PASSWORD_RESET: &str = "password_reset";
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "snake_case")]
+@@ -376,62 +382,163 @@ pub async fn account<'e, E: sqlx::PgExecutor<'e>>(
+     .transpose()
+ }
+ 
+-/// Issue an email-verification token for `user_id`; returns the raw token.
+-pub async fn create_verification_token<'e, E: sqlx::PgExecutor<'e>>(
++/// A user found by email (any case): `(user_id, organization_id, stored email)`.
++pub async fn find_user_by_email<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    email: &str,
++) -> Result<Option<(Uuid, Uuid, String)>, sqlx::Error> {
++    sqlx::query_as("SELECT id, organization_id, email FROM users WHERE lower(email) = lower($1)")
++        .bind(email.trim())
++        .fetch_optional(executor)
++        .await
++}
++
++/// A user's `(organization_id, stored email)` by id.
++pub async fn find_user_by_id<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    user_id: Uuid,
++) -> Result<Option<(Uuid, String)>, sqlx::Error> {
++    sqlx::query_as("SELECT organization_id, email FROM users WHERE id = $1")
++        .bind(user_id)
++        .fetch_optional(executor)
++        .await
++}
++
++/// Replace a user's password hash.
++pub async fn set_password_hash<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    user_id: Uuid,
++    password_hash: &str,
++) -> Result<(), sqlx::Error> {
++    sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
++        .bind(user_id)
++        .bind(password_hash)
++        .execute(executor)
++        .await?;
++    Ok(())
++}
++
++/// Issue a `purpose` token for `user_id`, valid for `ttl`; returns the raw
++/// token. The same statement deletes that user's already-expired tokens of
++/// any purpose.
++pub async fn create_token<'e, E: sqlx::PgExecutor<'e>>(
+     executor: E,
+     user_id: Uuid,
++    purpose: &str,
++    ttl: Duration,
+ ) -> Result<String, sqlx::Error> {
+     let token = Token::generate();
+     sqlx::query(
+-        "INSERT INTO auth_tokens (token_hash, user_id, purpose, expires_at) \
++        "WITH purged AS (DELETE FROM auth_tokens WHERE user_id = $2 AND expires_at <= now()) \
++         INSERT INTO auth_tokens (token_hash, user_id, purpose, expires_at) \
+          VALUES ($1, $2, $3, now() + make_interval(secs => $4))",
+     )
+     .bind(&token.hash[..])
+     .bind(user_id)
+-    .bind(PURPOSE_VERIFY_EMAIL)
+-    .bind(VERIFY_EMAIL_TTL.as_secs_f64())
++    .bind(purpose)
++    .bind(ttl.as_secs_f64())
+     .execute(executor)
+     .await?;
+     Ok(token.raw)
+ }
+ 
+-/// Consume an unused, unexpired verification token and mark its user's email
+-/// verified. Returns the user's id, or `None` for an unknown, used or expired
+-/// token (nothing changes then). Call inside a transaction.
+-pub async fn consume_verification_token(
+-    conn: &mut sqlx::PgConnection,
++/// Issue an email-verification token for `user_id`; returns the raw token.
++pub async fn create_verification_token<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    user_id: Uuid,
++) -> Result<String, sqlx::Error> {
++    create_token(executor, user_id, PURPOSE_VERIFY_EMAIL, VERIFY_EMAIL_TTL).await
++}
++
++/// Consume an unused, unexpired `purpose` token: one atomic statement, so of
++/// any number of concurrent uses exactly one gets the user's id. `None` for
++/// an unknown, malformed, used or expired token (nothing changes then).
++pub async fn consume_token<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
+     raw: &str,
++    purpose: &str,
+ ) -> Result<Option<Uuid>, sqlx::Error> {
+     let Some(hash) = hash_token(raw) else {
+         return Ok(None);
+     };
+-    let user_id: Option<Uuid> = sqlx::query_scalar(
++    sqlx::query_scalar(
+         "UPDATE auth_tokens SET used_at = now() \
+          WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > now() \
+          RETURNING user_id",
+     )
+     .bind(&hash[..])
+-    .bind(PURPOSE_VERIFY_EMAIL)
+-    .fetch_optional(&mut *conn)
++    .bind(purpose)
++    .fetch_optional(executor)
++    .await
++}
++
++/// The user an unused, unexpired `purpose` token belongs to, without using
++/// it up.
++pub async fn peek_token<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    raw: &str,
++    purpose: &str,
++) -> Result<Option<Uuid>, sqlx::Error> {
++    let Some(hash) = hash_token(raw) else {
++        return Ok(None);
++    };
++    sqlx::query_scalar(
++        "SELECT user_id FROM auth_tokens \
++         WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > now()",
++    )
++    .bind(&hash[..])
++    .bind(purpose)
++    .fetch_optional(executor)
++    .await
++}
++
++/// Mark every outstanding token of `user_id` with one of `purposes` used;
++/// returns how many.
++pub async fn retire_tokens<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    user_id: Uuid,
++    purposes: &[&str],
++) -> Result<u64, sqlx::Error> {
++    let purposes: Vec<String> = purposes.iter().map(|p| p.to_string()).collect();
++    let done = sqlx::query(
++        "UPDATE auth_tokens SET used_at = now() \
++         WHERE user_id = $1 AND purpose = ANY($2) AND used_at IS NULL",
++    )
++    .bind(user_id)
++    .bind(purposes)
++    .execute(executor)
++    .await?;
++    Ok(done.rows_affected())
++}
++
++/// Mark `user_id`'s email verified and retire their outstanding
++/// verification links, so none can verify or audit again. Returns whether
++/// this call verified it (`false` if it already was).
++pub async fn mark_email_verified(
++    conn: &mut sqlx::PgConnection,
++    user_id: Uuid,
++) -> Result<bool, sqlx::Error> {
++    let done = sqlx::query(
++        "UPDATE users SET email_verified_at = now() \
++         WHERE id = $1 AND email_verified_at IS NULL",
++    )
++    .bind(user_id)
++    .execute(&mut *conn)
+     .await?;
++    retire_tokens(&mut *conn, user_id, &[PURPOSE_VERIFY_EMAIL]).await?;
++    Ok(done.rows_affected() > 0)
++}
++
++/// Consume an unused, unexpired verification token and mark its user's email
++/// verified. Returns the user's id, or `None` for an unknown, used or expired
++/// token (nothing changes then). Call inside a transaction.
++pub async fn consume_verification_token(
++    conn: &mut sqlx::PgConnection,
++    raw: &str,
++) -> Result<Option<Uuid>, sqlx::Error> {
++    let user_id = consume_token(&mut *conn, raw, PURPOSE_VERIFY_EMAIL).await?;
+     if let Some(id) = user_id {
+-        sqlx::query(
+-            "UPDATE users SET email_verified_at = coalesce(email_verified_at, now()) \
+-             WHERE id = $1",
+-        )
+-        .bind(id)
+-        .execute(&mut *conn)
+-        .await?;
+-        // One verification per user: retire any other outstanding links
+-        // (e.g. from a resend) so they cannot verify or audit again.
+-        sqlx::query(
+-            "UPDATE auth_tokens SET used_at = now() \
+-             WHERE user_id = $1 AND purpose = $2 AND used_at IS NULL",
+-        )
+-        .bind(id)
+-        .bind(PURPOSE_VERIFY_EMAIL)
+-        .execute(&mut *conn)
+-        .await?;
++        mark_email_verified(conn, id).await?;
+     }
+     Ok(user_id)
+ }
+@@ -522,6 +629,22 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn token_lifetimes_and_purposes() {
++        assert_eq!(MAGIC_LINK_TTL.as_secs(), 15 * 60);
++        assert_eq!(PASSWORD_RESET_TTL.as_secs(), 60 * 60);
++        assert_eq!(VERIFY_EMAIL_TTL.as_secs(), 24 * 60 * 60);
++        // The names in migration 0005's CHECK list.
++        assert_eq!(
++            [
++                PURPOSE_VERIFY_EMAIL,
++                PURPOSE_MAGIC_LINK,
++                PURPOSE_PASSWORD_RESET
++            ],
++            ["verify_email", "magic_link", "password_reset"]
++        );
++    }
++
+     #[test]
+     fn password_bounds() {
+         assert!(validate_password(&"a".repeat(11)).is_err());
+diff --git a/crates/wipe-hub/src/auth.rs b/crates/wipe-hub/src/auth.rs
+index 8667430..0bb9b7a 100644
+--- a/crates/wipe-hub/src/auth.rs
++++ b/crates/wipe-hub/src/auth.rs
+@@ -1,7 +1,8 @@
+ //! `/api/auth/*`: sign-up, email verification, password sign-in, sign-out,
+ //! `me` and resending the verification email (portal-accounts story 1);
+ //! the CSRF token, sign-in throttles, session rotation and sign-out
+-//! everywhere (story 2).
++//! everywhere (story 2); magic links, password reset and the email-send
++//! throttle (story 3).
+ //!
+ //! - Sign-in and sign-up delete the request's incoming session in the
+ //!   transaction that creates the new one.
+@@ -13,6 +14,17 @@
+ //!   `ConnectInfo` (IPv6 keyed by /64); proxy headers are never trusted.
+ //!   Refusals are counted on the throttle row and audited once per lock as
+ //!   `auth.sign_in_lock_summary`, never one row each.
++//! - Every route that sends email (sign-up, resend verification, magic link,
++//!   password reset) first charges `mail:to:<address>` and `mail:<peer key>`
++//!   ([`charge_mail`]); each charge is final, so the send that reaches a
++//!   limit locks the key, and a refusal is 429 before any lookup, Argon2 or
++//!   send. Locks are `auth.mail_locked`, summaries `auth.mail_lock_summary`.
++//! - The magic-link and reset request routes answer 202 `{}` whether or not
++//!   the account exists, and send from a spawned task after commit, so
++//!   neither the answer nor its timing depends on the account or on SMTP.
++//!   Following a link proves mailbox control: it verifies the email and
++//!   clears the email's sign-in lock. A reset ends every session and does
++//!   not sign in.
+ //! - Both cookies are `Secure` except on an http localhost/loopback
+ //!   `--public-base-url` ([`secure_cookies`]).
+ //!
+@@ -53,6 +65,14 @@ pub const MSG_NOT_SIGNED_IN: &str = "not signed in";
+ pub const MSG_ALREADY_VERIFIED: &str = "this email address is already verified";
+ pub const MSG_MAIL_FAILED: &str = "the verification email could not be sent; try again later";
+ pub const MSG_LOCKED: &str = "too many failed sign-in attempts; try again later";
++pub const MSG_MAIL_LOCKED: &str = "too many emails requested; try again later";
++pub const MSG_BAD_MAGIC_LINK: &str = "this sign-in link is invalid or has expired";
++pub const MSG_BAD_RESET: &str = "this password reset link is invalid or has expired";
++
++/// Prefix of a password sign-in throttle key for an email address.
++const SIGN_IN_EMAIL_PREFIX: &str = "email:";
++/// Prefix of an email-send throttle key for a recipient address.
++const MAIL_TO_PREFIX: &str = "mail:to:";
+ 
+ pub fn routes() -> Router<AppState> {
+     Router::new()
+@@ -64,6 +84,13 @@ pub fn routes() -> Router<AppState> {
+         .route("/api/auth/csrf", get(csrf::get_token))
+         .route("/api/auth/me", get(me))
+         .route("/api/auth/verification-email", post(resend_verification))
++        .route("/api/auth/magic-link", post(request_magic_link))
++        .route("/api/auth/magic-link/sign-in", post(magic_link_sign_in))
++        .route("/api/auth/password-reset", post(request_password_reset))
++        .route(
++            "/api/auth/password-reset/complete",
++            post(complete_password_reset),
++        )
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -243,16 +270,25 @@ fn actor(user_id: Uuid) -> String {
+     format!("user:{user_id}")
+ }
+ 
+-/// `{public_base_url}/verify-email?token=…`, keeping any base path.
+-pub fn verification_link(base: &Url, token: &str) -> Url {
++/// `{public_base_url}/{page}?token=…`, keeping any base path.
++pub fn portal_link(base: &Url, page: &str, token: &str) -> Url {
+     let mut link = base.clone();
+-    let path = format!("{}/verify-email", base.path().trim_end_matches('/'));
++    let path = format!(
++        "{}/{}",
++        base.path().trim_end_matches('/'),
++        page.trim_start_matches('/')
++    );
+     link.set_path(&path);
+     link.set_fragment(None);
+     link.query_pairs_mut().clear().append_pair("token", token);
+     link
+ }
+ 
++/// `{public_base_url}/verify-email?token=…`, keeping any base path.
++pub fn verification_link(base: &Url, token: &str) -> Url {
++    portal_link(base, "verify-email", token)
++}
++
+ /// Send the verification email; `true` if the SMTP server accepted it.
+ async fn send_verification(state: &AppState, to: &str, token: &str) -> bool {
+     let link = verification_link(&state.config.public_base_url, token);
+@@ -265,6 +301,57 @@ async fn send_verification(state: &AppState, to: &str, token: &str) -> bool {
+     }
+ }
+ 
++/// Which emailed link a request route issues.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum LinkKind {
++    MagicLink,
++    PasswordReset,
++}
++
++impl LinkKind {
++    fn purpose(self) -> &'static str {
++        match self {
++            Self::MagicLink => accounts::PURPOSE_MAGIC_LINK,
++            Self::PasswordReset => accounts::PURPOSE_PASSWORD_RESET,
++        }
++    }
++
++    fn ttl(self) -> std::time::Duration {
++        match self {
++            Self::MagicLink => accounts::MAGIC_LINK_TTL,
++            Self::PasswordReset => accounts::PASSWORD_RESET_TTL,
++        }
++    }
++
++    /// The portal page the emailed link opens.
++    fn page(self) -> &'static str {
++        match self {
++            Self::MagicLink => "magic-link",
++            Self::PasswordReset => "reset-password",
++        }
++    }
++
++    fn requested_action(self) -> &'static str {
++        match self {
++            Self::MagicLink => "auth.magic_link_requested",
++            Self::PasswordReset => "auth.password_reset_requested",
++        }
++    }
++}
++
++/// Send a magic or reset link. Runs detached from the request, so a failure
++/// is logged (never the token) and goes nowhere else.
++async fn send_link(state: &AppState, kind: LinkKind, to: &str, token: &str) {
++    let link = portal_link(&state.config.public_base_url, kind.page(), token);
++    let sent = match kind {
++        LinkKind::MagicLink => state.mailer.send_magic_link(to, &link).await,
++        LinkKind::PasswordReset => state.mailer.send_password_reset(to, &link).await,
++    };
++    if let Err(e) = sent {
++        tracing::warn!(error = %e, kind = kind.purpose(), "link email not sent");
++    }
++}
++
+ // ---------------------------------------------------------------------------
+ // Handlers
+ 
+@@ -285,12 +372,18 @@ pub struct SignUpResponse {
+ 
+ async fn sign_up(
+     State(state): State<AppState>,
++    peer: Option<ConnectInfo<SocketAddr>>,
+     headers: HeaderMap,
+     JsonBody(req): JsonBody<SignUpRequest>,
+ ) -> Result<Response, ApiError> {
+     let new =
+         accounts::validate_sign_up(&req.email, &req.password, &req.name, &req.organization_name)
+             .map_err(|m| ApiError::new(StatusCode::BAD_REQUEST, m))?;
++    // Sign-up sends a verification email: charged before Argon2 or any write.
++    let peer = ip_key(peer.map(|ConnectInfo(addr)| addr));
++    if let Err(refused) = charge_mail(&state, &new.email, peer.as_deref()).await? {
++        return Ok(refused);
++    }
+     let password_hash = accounts::hash_password(new.password.clone()).await?;
+ 
+     let mut tx = state.pool.begin().await?;
+@@ -368,13 +461,15 @@ pub struct SignInRequest {
+     pub password: String,
+ }
+ 
+-/// The throttle key for a sign-in email: `email:` plus the address trimmed
+-/// (as the account lookup trims it) and lowercased by Postgres `lower()`,
+-/// the function the lookup compares with, so every spelling that reaches one
+-/// account shares one key. Bounded to 254 characters, so an anonymous caller
+-/// cannot bloat the table or the append-only log.
++/// The throttle key for an email address: `prefix` (`email:` for sign-in,
++/// `mail:to:` for sends) plus the address trimmed (as the account lookup
++/// trims it) and lowercased by Postgres `lower()`, the function the lookup
++/// compares with, so every spelling that reaches one account shares one key.
++/// Bounded to 254 characters, so an anonymous caller cannot bloat the table
++/// or the append-only log.
+ async fn email_key<'e, E: sqlx::PgExecutor<'e>>(
+     executor: E,
++    prefix: &str,
+     email: &str,
+ ) -> Result<String, sqlx::Error> {
+     // Truncate before binding so an oversized body never reaches Postgres;
+@@ -384,9 +479,10 @@ async fn email_key<'e, E: sqlx::PgExecutor<'e>>(
+         .chars()
+         .take(accounts::EMAIL_MAX_CHARS)
+         .collect();
+-    sqlx::query_scalar("SELECT 'email:' || left(lower($1), $2)")
++    sqlx::query_scalar("SELECT $3 || left(lower($1), $2)")
+         .bind(bounded)
+         .bind(accounts::EMAIL_MAX_CHARS as i32)
++        .bind(prefix)
+         .fetch_one(executor)
+         .await
+ }
+@@ -413,7 +509,17 @@ fn with_peer(mut detail: serde_json::Value, peer: Option<&str>) -> serde_json::V
+     detail
+ }
+ 
+-/// Audit a sign-in throttle row that had refused attempts and is now gone or
++/// The audit action for a summary of `key`'s refusals: email-send keys
++/// (`mail:…`) and sign-in keys are summarised under their own actions.
++fn lock_summary_action(key: &str) -> &'static str {
++    if key.starts_with(throttle::MAIL_KEY_PREFIX) {
++        "auth.mail_lock_summary"
++    } else {
++        "auth.sign_in_lock_summary"
++    }
++}
++
++/// Audit a throttle row that had refused attempts and is now gone or
+ /// restarted: at most one such row per lock.
+ async fn audit_lock_summary(
+     conn: &mut sqlx::PgConnection,
+@@ -424,7 +530,7 @@ async fn audit_lock_summary(
+         conn,
+         &AuditEntry {
+             actor: "anonymous",
+-            action: "auth.sign_in_lock_summary",
++            action: lock_summary_action(&summary.key),
+             subject: &summary.key,
+             detail: with_peer(summary.detail(), peer),
+         },
+@@ -433,9 +539,9 @@ async fn audit_lock_summary(
+     Ok(())
+ }
+ 
+-/// 429 [`MSG_LOCKED`] with `Retry-After`.
+-fn locked_response(retry_after_secs: u64) -> Response {
+-    let mut resp = ApiError::new(StatusCode::TOO_MANY_REQUESTS, MSG_LOCKED).into_response();
++/// 429 `message` with `Retry-After`.
++fn locked_response(message: &str, retry_after_secs: u64) -> Response {
++    let mut resp = ApiError::new(StatusCode::TOO_MANY_REQUESTS, message).into_response();
+     resp.headers_mut()
+         .insert(RETRY_AFTER, HeaderValue::from(retry_after_secs));
+     resp
+@@ -490,7 +596,89 @@ async fn charge_sign_in(
+     }
+     tx.commit().await?;
+     Ok(match refused {
+-        Some(secs) => Err(locked_response(secs)),
++        Some(secs) => Err(locked_response(MSG_LOCKED, secs)),
++        None => Ok(()),
++    })
++}
++
++/// Charge one email send against `mail:<peer key>` and then
++/// `mail:to:<address>`, in one transaction, before any lookup, Argon2 or
++/// send. `Err(response)` is the 429 for a refused send (the IP charge is
++/// given back if only the address refuses). A send is final, so every
++/// charge is confirmed at once: the one reaching a limit locks the key for
++/// [`throttle::MAIL_LOCKOUT`] and is audited once as `auth.mail_locked`.
++/// Charges are never refunded, so known and unknown addresses count alike.
++async fn charge_mail(
++    state: &AppState,
++    address: &str,
++    peer: Option<&str>,
++) -> Result<Result<(), Response>, ApiError> {
++    let mut tx = state.pool.begin().await?;
++    let address_key = email_key(&mut *tx, MAIL_TO_PREFIX, address).await?;
++    let ip_key = peer.map(|p| format!("{}{p}", throttle::MAIL_KEY_PREFIX));
++    let mut summaries = Vec::new();
++    let mut refused = None;
++
++    if let Some(ip) = ip_key.as_deref() {
++        let charged =
++            throttle::charge(&mut tx, ip, throttle::MAIL_IP_LIMIT, throttle::MAIL_WINDOW).await?;
++        summaries.extend(charged.summary);
++        if let throttle::Charge::Refused { retry_after_secs } = charged.outcome {
++            refused = Some(retry_after_secs);
++        }
++    }
++    if refused.is_none() {
++        let charged = throttle::charge(
++            &mut tx,
++            &address_key,
++            throttle::MAIL_ADDRESS_LIMIT,
++            throttle::MAIL_WINDOW,
++        )
++        .await?;
++        summaries.extend(charged.summary);
++        if let throttle::Charge::Refused { retry_after_secs } = charged.outcome {
++            if let Some(ip) = ip_key.as_deref() {
++                throttle::refund(&mut *tx, ip).await?;
++            }
++            refused = Some(retry_after_secs);
++        }
++    }
++    if refused.is_none() {
++        let keys = ip_key
++            .as_deref()
++            .map(|k| (k, throttle::MAIL_IP_LIMIT))
++            .into_iter()
++            .chain(std::iter::once((
++                address_key.as_str(),
++                throttle::MAIL_ADDRESS_LIMIT,
++            )));
++        for (key, limit) in keys {
++            let engaged =
++                throttle::confirm_failure(&mut *tx, key, limit, throttle::MAIL_LOCKOUT).await?;
++            if let Some(until) = engaged {
++                audit::record(
++                    &mut *tx,
++                    &AuditEntry {
++                        actor: "anonymous",
++                        action: "auth.mail_locked",
++                        subject: key,
++                        detail: with_peer(json!({ "until": until }), peer),
++                    },
++                )
++                .await?;
++            }
++        }
++    }
++    for s in &summaries {
++        audit_lock_summary(&mut tx, s, peer).await?;
++    }
++    // Purged rows belong to other keys: no `peer` of this request.
++    for s in throttle::purge_stale(&mut *tx).await? {
++        audit_lock_summary(&mut tx, &s, None).await?;
++    }
++    tx.commit().await?;
++    Ok(match refused {
++        Some(secs) => Err(locked_response(MSG_MAIL_LOCKED, secs)),
+         None => Ok(()),
+     })
+ }
+@@ -501,7 +689,7 @@ async fn sign_in(
+     headers: HeaderMap,
+     JsonBody(req): JsonBody<SignInRequest>,
+ ) -> Result<Response, ApiError> {
+-    let email_key = email_key(&state.pool, &req.email).await?;
++    let email_key = email_key(&state.pool, SIGN_IN_EMAIL_PREFIX, &req.email).await?;
+     let ip_key = ip_key(peer.map(|ConnectInfo(addr)| addr));
+ 
+     // Charged before any lookup or Argon2 work, known and unknown emails
+@@ -693,6 +881,7 @@ async fn me(State(state): State<AppState>, user: CurrentUser) -> Result<Json<Acc
+ 
+ async fn resend_verification(
+     State(state): State<AppState>,
++    peer: Option<ConnectInfo<SocketAddr>>,
+     user: CurrentUser,
+ ) -> Result<Response, ApiError> {
+     let account = accounts::account(&state.pool, user.organization_id, user.user_id)
+@@ -701,6 +890,10 @@ async fn resend_verification(
+     if account.user.email_verified {
+         return Err(ApiError::new(StatusCode::CONFLICT, MSG_ALREADY_VERIFIED));
+     }
++    let peer = ip_key(peer.map(|ConnectInfo(addr)| addr));
++    if let Err(refused) = charge_mail(&state, &account.user.email, peer.as_deref()).await? {
++        return Ok(refused);
++    }
+     let token = accounts::create_verification_token(&state.pool, user.user_id).await?;
+     if !send_verification(&state, &account.user.email, &token).await {
+         return Err(ApiError::new(StatusCode::BAD_GATEWAY, MSG_MAIL_FAILED));
+@@ -712,6 +905,216 @@ async fn resend_verification(
+         .into_response())
+ }
+ 
++#[derive(Debug, Deserialize)]
++pub struct EmailRequest {
++    pub email: String,
++}
++
++#[derive(Debug, Deserialize)]
++pub struct TokenRequest {
++    pub token: String,
++}
++
++#[derive(Debug, Deserialize)]
++pub struct CompletePasswordResetRequest {
++    pub token: String,
++    pub password: String,
++}
++
++/// `POST /api/auth/magic-link`: email a sign-in link, if the account exists.
++async fn request_magic_link(
++    State(state): State<AppState>,
++    peer: Option<ConnectInfo<SocketAddr>>,
++    JsonBody(req): JsonBody<EmailRequest>,
++) -> Result<Response, ApiError> {
++    request_link(state, peer, req, LinkKind::MagicLink).await
++}
++
++/// `POST /api/auth/password-reset`: email a reset link, if the account exists.
++async fn request_password_reset(
++    State(state): State<AppState>,
++    peer: Option<ConnectInfo<SocketAddr>>,
++    JsonBody(req): JsonBody<EmailRequest>,
++) -> Result<Response, ApiError> {
++    request_link(state, peer, req, LinkKind::PasswordReset).await
++}
++
++/// The two request routes. The answer is 202 `{}` for known and unknown
++/// emails alike, and the email goes out from a spawned task after commit,
++/// so neither the response nor its timing depends on SMTP. An unknown email
++/// writes nothing but its throttle charges.
++async fn request_link(
++    state: AppState,
++    peer: Option<ConnectInfo<SocketAddr>>,
++    req: EmailRequest,
++    kind: LinkKind,
++) -> Result<Response, ApiError> {
++    let email = accounts::validate_email(&req.email)
++        .map_err(|m| ApiError::new(StatusCode::BAD_REQUEST, m))?;
++    let peer = ip_key(peer.map(|ConnectInfo(addr)| addr));
++    if let Err(refused) = charge_mail(&state, &email, peer.as_deref()).await? {
++        return Ok(refused);
++    }
++
++    let mut tx = state.pool.begin().await?;
++    let to_send = match accounts::find_user_by_email(&mut *tx, &email).await? {
++        Some((user_id, _, stored_email)) => {
++            let token =
++                accounts::create_token(&mut *tx, user_id, kind.purpose(), kind.ttl()).await?;
++            audit::record(
++                &mut *tx,
++                &AuditEntry {
++                    actor: "anonymous",
++                    action: kind.requested_action(),
++                    subject: &actor(user_id),
++                    detail: with_peer(json!({}), peer.as_deref()),
++                },
++            )
++            .await?;
++            Some((stored_email, token))
++        }
++        None => None,
++    };
++    tx.commit().await?;
++
++    if let Some((to, token)) = to_send {
++        let state = state.clone();
++        tokio::spawn(async move { send_link(&state, kind, &to, &token).await });
++    }
++    Ok((StatusCode::ACCEPTED, Json(json!({}))).into_response())
++}
++
++/// Clear `user_id`'s password sign-in lock: an emailed link proves control
++/// of the mailbox. Audits the lock's summary, if it had refusals.
++async fn clear_sign_in_lock(
++    conn: &mut sqlx::PgConnection,
++    email: &str,
++    peer: Option<&str>,
++) -> Result<(), ApiError> {
++    let key = email_key(&mut *conn, SIGN_IN_EMAIL_PREFIX, email).await?;
++    if let Some(s) = throttle::clear(&mut *conn, &key).await? {
++        audit_lock_summary(conn, &s, peer).await?;
++    }
++    Ok(())
++}
++
++/// `POST /api/auth/magic-link/sign-in`: use a magic link. Signs in exactly
++/// like a password sign-in (rotating the incoming session), but neither the
++/// sign-in throttle nor its lock applies: the link is the way back in for a
++/// locked-out user.
++async fn magic_link_sign_in(
++    State(state): State<AppState>,
++    peer: Option<ConnectInfo<SocketAddr>>,
++    headers: HeaderMap,
++    JsonBody(req): JsonBody<TokenRequest>,
++) -> Result<Response, ApiError> {
++    let peer = ip_key(peer.map(|ConnectInfo(addr)| addr));
++    let peer = peer.as_deref();
++    let mut tx = state.pool.begin().await?;
++    let Some(user_id) =
++        accounts::consume_token(&mut *tx, &req.token, accounts::PURPOSE_MAGIC_LINK).await?
++    else {
++        return Err(ApiError::new(StatusCode::BAD_REQUEST, MSG_BAD_MAGIC_LINK));
++    };
++    accounts::retire_tokens(&mut *tx, user_id, &[accounts::PURPOSE_MAGIC_LINK]).await?;
++    let email_verified = accounts::mark_email_verified(&mut tx, user_id).await?;
++    let (organization_id, email) = accounts::find_user_by_id(&mut *tx, user_id)
++        .await?
++        .ok_or_else(|| ApiError::internal("magic-link user vanished"))?;
++    clear_sign_in_lock(&mut tx, &email, peer).await?;
++    let rotated = match session_token(&headers) {
++        Some(old) => accounts::delete_session(&mut *tx, &old).await?.is_some(),
++        None => false,
++    };
++    let session = accounts::create_session(&mut *tx, user_id).await?;
++    let who = actor(user_id);
++    audit::record(
++        &mut *tx,
++        &AuditEntry {
++            actor: &who,
++            action: "auth.magic_link_sign_in",
++            subject: &who,
++            detail: with_peer(
++                json!({ "rotated": rotated, "email_verified": email_verified }),
++                peer,
++            ),
++        },
++    )
++    .await?;
++    let account = accounts::account(&mut *tx, organization_id, user_id)
++        .await?
++        .ok_or_else(|| ApiError::internal("signed-in user vanished"))?;
++    tx.commit().await?;
++
++    let mut resp = Json(account).into_response();
++    resp.headers_mut()
++        .insert(SET_COOKIE, session_cookie(&session, secure(&state)));
++    Ok(resp)
++}
++
++/// `POST /api/auth/password-reset/complete`: set a new password with a reset
++/// link. Validates the password first (an invalid one never burns the
++/// token), peeks the token before any Argon2 work, then consumes it, sets
++/// the hash and ends every session of the user in one transaction. The user
++/// is not signed in: they sign in with the new password.
++async fn complete_password_reset(
++    State(state): State<AppState>,
++    peer: Option<ConnectInfo<SocketAddr>>,
++    JsonBody(req): JsonBody<CompletePasswordResetRequest>,
++) -> Result<Response, ApiError> {
++    let bad_link = || ApiError::new(StatusCode::BAD_REQUEST, MSG_BAD_RESET);
++    accounts::validate_password(&req.password)
++        .map_err(|m| ApiError::new(StatusCode::BAD_REQUEST, m))?;
++    accounts::peek_token(&state.pool, &req.token, accounts::PURPOSE_PASSWORD_RESET)
++        .await?
++        .ok_or_else(bad_link)?;
++    let password_hash = accounts::hash_password(req.password).await?;
++
++    let peer = ip_key(peer.map(|ConnectInfo(addr)| addr));
++    let peer = peer.as_deref();
++    let mut tx = state.pool.begin().await?;
++    // Another request may have used the token since the peek.
++    let user_id = accounts::consume_token(&mut *tx, &req.token, accounts::PURPOSE_PASSWORD_RESET)
++        .await?
++        .ok_or_else(bad_link)?;
++    accounts::set_password_hash(&mut *tx, user_id, &password_hash).await?;
++    accounts::retire_tokens(
++        &mut *tx,
++        user_id,
++        &[
++            accounts::PURPOSE_PASSWORD_RESET,
++            accounts::PURPOSE_MAGIC_LINK,
++        ],
++    )
++    .await?;
++    let sessions = accounts::delete_user_sessions(&mut *tx, user_id).await?;
++    let email_verified = accounts::mark_email_verified(&mut tx, user_id).await?;
++    let (_, email) = accounts::find_user_by_id(&mut *tx, user_id)
++        .await?
++        .ok_or_else(|| ApiError::internal("reset user vanished"))?;
++    clear_sign_in_lock(&mut tx, &email, peer).await?;
++    let who = actor(user_id);
++    audit::record(
++        &mut *tx,
++        &AuditEntry {
++            actor: &who,
++            action: "auth.password_reset",
++            subject: &who,
++            detail: with_peer(
++                json!({ "sessions": sessions, "email_verified": email_verified }),
++                peer,
++            ),
++        },
++    )
++    .await?;
++    tx.commit().await?;
++
++    let mut resp = Json(json!({ "password_reset": true })).into_response();
++    resp.headers_mut()
++        .insert(SET_COOKIE, cleared_cookie(secure(&state)));
++    Ok(resp)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -817,6 +1220,47 @@ mod tests {
+         assert_eq!(cookie_value(&h, "wipehub"), None);
+     }
+ 
++    #[test]
++    fn portal_links_keep_base_path() {
++        let base = Url::parse("http://127.0.0.1:7900").unwrap();
++        assert_eq!(
++            portal_link(&base, "magic-link", "abc-_").as_str(),
++            "http://127.0.0.1:7900/magic-link?token=abc-_"
++        );
++        let base = Url::parse("https://example.com/portal/?x=1#frag").unwrap();
++        assert_eq!(
++            portal_link(&base, "reset-password", "t").as_str(),
++            "https://example.com/portal/reset-password?token=t"
++        );
++        assert_eq!(LinkKind::MagicLink.page(), "magic-link");
++        assert_eq!(LinkKind::PasswordReset.page(), "reset-password");
++    }
++
++    #[test]
++    fn lock_summaries_are_audited_under_their_keys_action() {
++        assert_eq!(
++            lock_summary_action("mail:to:a@b.co"),
++            "auth.mail_lock_summary"
++        );
++        assert_eq!(
++            lock_summary_action("mail:ip:192.0.2.1"),
++            "auth.mail_lock_summary"
++        );
++        assert_eq!(
++            lock_summary_action("email:a@b.co"),
++            "auth.sign_in_lock_summary"
++        );
++        assert_eq!(
++            lock_summary_action("ip:192.0.2.1"),
++            "auth.sign_in_lock_summary"
++        );
++        // An address that merely contains `mail:` is still a sign-in key.
++        assert_eq!(
++            lock_summary_action("email:mail:x@b.co"),
++            "auth.sign_in_lock_summary"
++        );
++    }
++
+     #[test]
+     fn verification_link_keeps_base_path() {
+         let base = Url::parse("http://127.0.0.1:7900").unwrap();
+diff --git a/crates/wipe-hub/src/mail.rs b/crates/wipe-hub/src/mail.rs
+index 7015b57..9b93bbe 100644
+--- a/crates/wipe-hub/src/mail.rs
++++ b/crates/wipe-hub/src/mail.rs
+@@ -15,6 +15,8 @@ use url::Url;
+ pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+ 
+ pub const VERIFICATION_SUBJECT: &str = "Verify your Wipestation email address";
++pub const MAGIC_LINK_SUBJECT: &str = "Your Wipestation sign-in link";
++pub const PASSWORD_RESET_SUBJECT: &str = "Reset your Wipestation password";
+ 
+ #[derive(Debug, thiserror::Error)]
+ pub enum MailError {
+@@ -54,6 +56,31 @@ impl Mailer {
+         self.send(to, VERIFICATION_SUBJECT, body).await
+     }
+ 
++    /// The magic (sign-in) link message: plain text containing `link`.
++    pub async fn send_magic_link(&self, to: &str, link: &Url) -> Result<(), MailError> {
++        let body = format!(
++            "Sign in to the Wipestation portal by opening the link below. \
++             It works once and expires in 15 minutes.\n\n\
++             {link}\n\n\
++             If you did not ask for a sign-in link, ignore this email. \
++             Your account is unchanged.\n"
++        );
++        self.send(to, MAGIC_LINK_SUBJECT, body).await
++    }
++
++    /// The password reset message: plain text containing `link`.
++    pub async fn send_password_reset(&self, to: &str, link: &Url) -> Result<(), MailError> {
++        let body = format!(
++            "Choose a new password for your Wipestation account by opening the link below. \
++             It works once and expires in 1 hour. \
++             Resetting your password signs you out everywhere.\n\n\
++             {link}\n\n\
++             If you did not ask to reset your password, ignore this email. \
++             Your password is unchanged.\n"
++        );
++        self.send(to, PASSWORD_RESET_SUBJECT, body).await
++    }
++
+     async fn send(&self, to: &str, subject: &str, body: String) -> Result<(), MailError> {
+         let to: Mailbox = to
+             .parse()
+diff --git a/crates/wipe-hub/src/throttle.rs b/crates/wipe-hub/src/throttle.rs
+index d0a8d19..5d2ca51 100644
+--- a/crates/wipe-hub/src/throttle.rs
++++ b/crates/wipe-hub/src/throttle.rs
+@@ -1,7 +1,10 @@
+ //! Attempt throttles (ADR-0007 §3): shared, restart-proof counters in the
+-//! `auth_throttle` table, keyed by what is throttled (`email:<address>`,
+-//! `ip:<peer>`). Story 3 (reset and magic link) reuses this module with its
+-//! own keys and limits.
++//! `auth_throttle` table, keyed by what is throttled. Password sign-in
++//! (portal-accounts story 2) uses `email:<address>` and `ip:<peer>`; the
++//! email-send throttle on every route that sends mail (story 3) uses
++//! `mail:to:<address>` and `mail:ip:<peer>` ([`MAIL_KEY_PREFIX`]), with its
++//! own limits. Email sends are always final, so their charges are confirmed
++//! in the same transaction instead of waiting for a check.
+ //!
+ //! The protocol, per key, around one expensive check (e.g. Argon2):
+ //!
+@@ -40,6 +43,18 @@ pub const SIGN_IN_WINDOW: Duration = Duration::from_secs(15 * 60);
+ /// How long a sign-in lock lasts once engaged.
+ pub const SIGN_IN_LOCKOUT: Duration = Duration::from_secs(15 * 60);
+ 
++/// Emails sent per recipient address per window, across every route that
++/// sends mail.
++pub const MAIL_ADDRESS_LIMIT: i32 = 5;
++/// Email-sending requests per client IP (or IPv6 /64) per window.
++pub const MAIL_IP_LIMIT: i32 = 20;
++/// The fixed window email sends are counted in.
++pub const MAIL_WINDOW: Duration = Duration::from_secs(60 * 60);
++/// How long an email-send lock lasts once engaged.
++pub const MAIL_LOCKOUT: Duration = Duration::from_secs(60 * 60);
++/// Every email-send throttle key starts with this; no sign-in key does.
++pub const MAIL_KEY_PREFIX: &str = "mail:";
++
+ /// Rows whose window started longer ago than this, and whose lock (if any)
+ /// has elapsed, are deleted by [`purge_stale`]. Every window passed to
+ /// [`charge`] must be no longer than this (checked with `assert!`).
+@@ -292,6 +307,13 @@ mod tests {
+         assert_eq!(SIGN_IN_WINDOW.as_secs(), 900);
+         assert_eq!(SIGN_IN_LOCKOUT.as_secs(), 900);
+         assert!(SIGN_IN_WINDOW <= PURGE_AFTER);
++        assert_eq!(MAIL_ADDRESS_LIMIT, 5);
++        assert_eq!(MAIL_IP_LIMIT, 20);
++        assert_eq!(MAIL_WINDOW.as_secs(), 3600);
++        assert_eq!(MAIL_LOCKOUT.as_secs(), 3600);
++        assert!(MAIL_WINDOW <= PURGE_AFTER);
++        assert_eq!(MAIL_KEY_PREFIX, "mail:");
++        assert!(!"email:a@b.co".starts_with(MAIL_KEY_PREFIX));
+     }
+ 
+     #[test]
+@@ -319,5 +341,7 @@ mod tests {
+     fn sign_in_arguments_pass_the_checks() {
+         check_charge_args(SIGN_IN_EMAIL_LIMIT, SIGN_IN_WINDOW);
+         check_charge_args(SIGN_IN_IP_LIMIT, PURGE_AFTER);
++        check_charge_args(MAIL_ADDRESS_LIMIT, MAIL_WINDOW);
++        check_charge_args(MAIL_IP_LIMIT, MAIL_WINDOW);
+     }
+ }
+diff --git a/crates/wipe-hub/tests/auth.rs b/crates/wipe-hub/tests/auth.rs
+index d082ee1..f5f6d4b 100644
+--- a/crates/wipe-hub/tests/auth.rs
++++ b/crates/wipe-hub/tests/auth.rs
+@@ -1,5 +1,5 @@
+ //! `/api/auth/*` over real HTTP against a migrated test database and
+-//! Mailpit (portal-accounts stories 1 and 2). Needs `docker compose up -d`;
++//! Mailpit (portal-accounts stories 1, 2 and 3). Needs `docker compose up -d`;
+ //! fails, never skips, when the compose services are down.
+ //!
+ //! `Hub::post`/`post_empty` send a valid CSRF token (fetched once per hub);
+@@ -229,10 +229,15 @@ async fn error_of(resp: Response) -> (StatusCode, String) {
+ 
+ /// The `token` query parameter of the verification link in `text`.
+ fn token_from_mail(text: &str, base: &str) -> String {
+-    let prefix = format!("{base}/verify-email?token=");
++    token_in(text, base, "verify-email")
++}
++
++/// The `token` query parameter of the `{base}/{page}?token=` link in `text`.
++fn token_in(text: &str, base: &str, page: &str) -> String {
++    let prefix = format!("{base}/{page}?token=");
+     let start = text
+         .find(&prefix)
+-        .unwrap_or_else(|| panic!("no verification link in {text:?}"))
++        .unwrap_or_else(|| panic!("no {page} link in {text:?}"))
+         + prefix.len();
+     text[start..]
+         .chars()
+@@ -939,6 +944,16 @@ async fn mutating_api_requests_without_a_valid_csrf_token_are_403_and_write_noth
+         ),
+         ("/api/auth/verification-email", None),
+         ("/api/auth/sign-out-everywhere", None),
++        ("/api/auth/magic-link", Some(json!({"email": email}))),
++        (
++            "/api/auth/magic-link/sign-in",
++            Some(json!({"token": "A".repeat(43)})),
++        ),
++        ("/api/auth/password-reset", Some(json!({"email": email}))),
++        (
++            "/api/auth/password-reset/complete",
++            Some(json!({"token": "A".repeat(43), "password": PASSWORD})),
++        ),
+         ("/api/nope", None),
+         ("/api", None),
+         ("/api/health", None),
+@@ -1588,3 +1603,858 @@ async fn a_full_but_unlocked_key_answers_retry_after_one_second() {
+     // The IP charge was refunded.
+     assert_eq!(hub.throttle_failures("ip:127.0.0.1").await, Some(0));
+ }
++
++// ---------------------------------------------------------------------------
++// Story 3: magic links, password reset and the email-send throttle
++
++const BASE: &str = "http://127.0.0.1:7900";
++const MAGIC: &str = "/api/auth/magic-link";
++const MAGIC_SIGN_IN: &str = "/api/auth/magic-link/sign-in";
++const RESET: &str = "/api/auth/password-reset";
++const RESET_COMPLETE: &str = "/api/auth/password-reset/complete";
++const MAIL_LOCKED: &str = "too many emails requested; try again later";
++const BAD_MAGIC: &str = "this sign-in link is invalid or has expired";
++const BAD_RESET: &str = "this password reset link is invalid or has expired";
++const NEW_PASSWORD: &str = "a brand new passphrase";
++
++impl Hub {
++    /// `POST` `{email}` to one of the two request routes.
++    async fn request(&self, path: &str, email: &str) -> Response {
++        self.post(path, json!({ "email": email }), None).await
++    }
++
++    async fn magic_sign_in(&self, token: &str, cookie: Option<&str>) -> Response {
++        self.post(MAGIC_SIGN_IN, json!({ "token": token }), cookie)
++            .await
++    }
++
++    async fn complete_reset(&self, token: &str, password: &str) -> Response {
++        self.post(
++            RESET_COMPLETE,
++            json!({ "token": token, "password": password }),
++            None,
++        )
++        .await
++    }
++
++    async fn password_hash(&self, user_id: &str) -> String {
++        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1::uuid")
++            .bind(user_id)
++            .fetch_one(&self.db.pool)
++            .await
++            .unwrap()
++    }
++
++    async fn throttle_until(&self, key: &str) -> Option<String> {
++        sqlx::query_scalar("SELECT locked_until::text FROM auth_throttle WHERE key = $1")
++            .bind(key)
++            .fetch_optional(&self.db.pool)
++            .await
++            .unwrap()
++            .flatten()
++    }
++
++    /// Move every throttle lock into the past.
++    async fn expire_locks(&self) {
++        sqlx::query("UPDATE auth_throttle SET locked_until = now() - interval '1 second'")
++            .execute(&self.db.pool)
++            .await
++            .unwrap();
++    }
++}
++
++/// The messages to `addr` with `subject`, newest first.
++async fn messages_with_subject(addr: &str, subject: &str) -> Vec<support::MessageSummary> {
++    Mailpit::new()
++        .messages_to(addr)
++        .await
++        .into_iter()
++        .filter(|m| m.subject == subject)
++        .collect()
++}
++
++/// Wait until at least `n` messages to `addr` have `subject`, then return the
++/// tokens of their `page` links, oldest first.
++async fn mailed_tokens(addr: &str, subject: &str, page: &str, n: usize) -> Vec<String> {
++    let mailpit = Mailpit::new();
++    let deadline = std::time::Instant::now() + MAIL_WAIT;
++    loop {
++        let msgs = messages_with_subject(addr, subject).await;
++        if msgs.len() >= n {
++            let mut out = Vec::new();
++            for m in msgs.iter().rev() {
++                out.push(token_in(&mailpit.message(&m.id).await.text, BASE, page));
++            }
++            return out;
++        }
++        assert!(
++            std::time::Instant::now() < deadline,
++            "only {} of {n} {subject:?} messages to {addr}",
++            msgs.len()
++        );
++        tokio::time::sleep(Duration::from_millis(100)).await;
++    }
++}
++
++async fn magic_token(addr: &str) -> String {
++    mailed_tokens(addr, wipe_hub::mail::MAGIC_LINK_SUBJECT, "magic-link", 1)
++        .await
++        .pop()
++        .unwrap()
++}
++
++async fn reset_token(addr: &str) -> String {
++    mailed_tokens(
++        addr,
++        wipe_hub::mail::PASSWORD_RESET_SUBJECT,
++        "reset-password",
++        1,
++    )
++    .await
++    .pop()
++    .unwrap()
++}
++
++/// Assert `resp` is exactly the 202 `{}` both request routes answer.
++async fn assert_accepted(resp: Response) {
++    assert_eq!(resp.status(), StatusCode::ACCEPTED);
++    assert!(resp.headers().get(SET_COOKIE).is_none());
++    assert_eq!(resp.text().await.unwrap(), "{}");
++}
++
++async fn assert_mail_locked(resp: Response) -> u64 {
++    let retry = retry_after(&resp);
++    assert!((1..=3600).contains(&retry), "{retry}");
++    assert!(resp.headers().get(SET_COOKIE).is_none());
++    assert_eq!(
++        error_of(resp).await,
++        (StatusCode::TOO_MANY_REQUESTS, MAIL_LOCKED.into())
++    );
++    retry
++}
++
++fn user_of(body: &Value) -> String {
++    format!("user:{}", body["user"]["id"].as_str().unwrap())
++}
++
++#[tokio::test]
++async fn magic_link_signs_in_once() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    let (body, _) = hub.sign_up(&email).await;
++    let who = user_of(&body);
++
++    // Any spelling of the address reaches the account.
++    assert_accepted(
++        hub.request(MAGIC, &format!(" {} ", email.to_uppercase()))
++            .await,
++    )
++    .await;
++    let token = magic_token(&email).await;
++    assert_eq!(token.len(), 43);
++
++    let resp = hub.magic_sign_in(&token, None).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let cookie = cookie_pair(&resp);
++    let account: Value = resp.json().await.unwrap();
++    assert_eq!(account["user"]["id"], body["user"]["id"]);
++    assert_eq!(account["organization"], body["organization"]);
++    let (code, me) = hub.me(Some(&cookie)).await;
++    assert_eq!(code, StatusCode::OK);
++    assert_eq!(me["user"]["id"], body["user"]["id"]);
++
++    assert_eq!(
++        hub.audited("auth.magic_link_requested").await,
++        vec![("anonymous".to_string(), who.clone())]
++    );
++    assert_eq!(
++        hub.audit_details("auth.magic_link_requested").await[0].1,
++        json!({"peer": "ip:127.0.0.1"})
++    );
++    assert_eq!(
++        hub.audited("auth.magic_link_sign_in").await,
++        vec![(who.clone(), who)]
++    );
++
++    // Reuse is rejected and signs nobody in.
++    let sessions = hub.count("sessions").await;
++    let resp = hub.magic_sign_in(&token, None).await;
++    assert!(resp.headers().get(SET_COOKIE).is_none());
++    assert_eq!(
++        error_of(resp).await,
++        (StatusCode::BAD_REQUEST, BAD_MAGIC.into())
++    );
++    assert_eq!(hub.count("sessions").await, sessions);
++    let garbage_43 = "A".repeat(43);
++    for garbage in ["garbage", "", garbage_43.as_str()] {
++        let resp = hub.magic_sign_in(garbage, None).await;
++        assert_eq!(
++            error_of(resp).await,
++            (StatusCode::BAD_REQUEST, BAD_MAGIC.into())
++        );
++    }
++    assert_eq!(hub.audited("auth.magic_link_sign_in").await.len(), 1);
++
++    // 15 minutes, and the raw token is in no audit row.
++    let minutes: f64 = sqlx::query_scalar(
++        "SELECT extract(epoch FROM expires_at - created_at)::float8 / 60 FROM auth_tokens \
++         WHERE purpose = 'magic_link'",
++    )
++    .fetch_one(&hub.db.pool)
++    .await
++    .unwrap();
++    assert!((minutes - 15.0).abs() < 1e-6, "{minutes}");
++    let leaked: i64 = sqlx::query_scalar(
++        "SELECT count(*) FROM audit_log WHERE strpos(detail::text || subject, $1) > 0",
++    )
++    .bind(&token)
++    .fetch_one(&hub.db.pool)
++    .await
++    .unwrap();
++    assert_eq!(leaked, 0);
++}
++
++/// Headers other than `Date`, as sorted `(name, value)` pairs.
++fn comparable_headers(resp: &Response) -> Vec<(String, String)> {
++    let mut h: Vec<(String, String)> = resp
++        .headers()
++        .iter()
++        .filter(|(n, _)| *n != reqwest::header::DATE)
++        .map(|(n, v)| (n.to_string(), v.to_str().unwrap().to_string()))
++        .collect();
++    h.sort();
++    h
++}
++
++#[tokio::test]
++async fn request_routes_answer_known_and_unknown_emails_identically() {
++    let hub = spawn_hub().await;
++    let known = unique_address();
++    let (body, _) = hub.sign_up(&known).await;
++    let before = hub.counts().await;
++
++    for path in [MAGIC, RESET] {
++        let unknown = unique_address();
++        let u = hub.request(path, &unknown).await;
++        let k = hub.request(path, &known).await;
++        let (u_parts, k_parts) = (
++            (u.status(), comparable_headers(&u)),
++            (k.status(), comparable_headers(&k)),
++        );
++        assert_eq!(u_parts, k_parts, "{path}");
++        assert_eq!(u_parts.0, StatusCode::ACCEPTED);
++        assert_eq!(u.bytes().await.unwrap(), k.bytes().await.unwrap(), "{path}");
++
++        // The known address's mail arrives; the unknown one gets none.
++        let (subject, page) = if path == MAGIC {
++            (wipe_hub::mail::MAGIC_LINK_SUBJECT, "magic-link")
++        } else {
++            (wipe_hub::mail::PASSWORD_RESET_SUBJECT, "reset-password")
++        };
++        mailed_tokens(&known, subject, page, 1).await;
++        assert!(Mailpit::new().messages_to(&unknown).await.is_empty());
++    }
++    // Only the known address got tokens and audit rows.
++    let after = hub.counts().await;
++    assert_eq!(after[0], before[0] + 2, "audit_log");
++    assert_eq!(after[4], before[4] + 2, "auth_tokens");
++    let who = user_of(&body);
++    assert_eq!(
++        hub.audited("auth.password_reset_requested").await,
++        vec![("anonymous".to_string(), who)]
++    );
++
++    // A syntactically invalid email is 400 before any throttle charge.
++    let throttle_rows = hub.count("auth_throttle").await;
++    for path in [MAGIC, RESET] {
++        let resp = hub.request(path, "not-an-email").await;
++        assert_eq!(
++            error_of(resp).await,
++            (
++                StatusCode::BAD_REQUEST,
++                "email is not a valid email address".into()
++            )
++        );
++    }
++    assert_eq!(hub.count("auth_throttle").await, throttle_rows);
++}
++
++#[tokio::test]
++async fn request_routes_answer_202_when_smtp_is_down() {
++    let hub = spawn_hub_with(closed_port().await, BASE).await;
++    let email = unique_address();
++    hub.sign_up(&email).await;
++    for path in [MAGIC, RESET] {
++        assert_accepted(hub.request(path, &email).await).await;
++    }
++    // The tokens were still issued; only the send failed.
++    assert_eq!(hub.count("auth_tokens").await, 3);
++}
++
++#[tokio::test]
++async fn an_expired_magic_link_is_rejected() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    hub.sign_up(&email).await;
++    assert_accepted(hub.request(MAGIC, &email).await).await;
++    let token = magic_token(&email).await;
++    sqlx::query("UPDATE auth_tokens SET expires_at = now() - interval '1 second'")
++        .execute(&hub.db.pool)
++        .await
++        .unwrap();
++    let sessions = hub.count("sessions").await;
++    let resp = hub.magic_sign_in(&token, None).await;
++    assert_eq!(
++        error_of(resp).await,
++        (StatusCode::BAD_REQUEST, BAD_MAGIC.into())
++    );
++    assert_eq!(hub.count("sessions").await, sessions);
++}
++
++#[tokio::test]
++async fn a_magic_link_used_concurrently_signs_in_exactly_once() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    hub.sign_up(&email).await;
++    assert_accepted(hub.request(MAGIC, &email).await).await;
++    let token = magic_token(&email).await;
++    let mut set = tokio::task::JoinSet::new();
++    for _ in 0..10 {
++        let req = hub
++            .post_req(MAGIC_SIGN_IN, None)
++            .json(&json!({ "token": token }));
++        set.spawn(async move { req.send().await.unwrap().status() });
++    }
++    let mut ok = 0;
++    while let Some(status) = set.join_next().await {
++        match status.unwrap() {
++            StatusCode::OK => ok += 1,
++            StatusCode::BAD_REQUEST => {}
++            other => panic!("unexpected {other}"),
++        }
++    }
++    assert_eq!(ok, 1);
++    assert_eq!(hub.audited("auth.magic_link_sign_in").await.len(), 1);
++}
++
++#[tokio::test]
++async fn using_one_magic_link_retires_the_others() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    hub.sign_up(&email).await;
++    assert_accepted(hub.request(MAGIC, &email).await).await;
++    assert_accepted(hub.request(MAGIC, &email).await).await;
++    let tokens = mailed_tokens(&email, wipe_hub::mail::MAGIC_LINK_SUBJECT, "magic-link", 2).await;
++    assert_ne!(tokens[0], tokens[1]);
++    assert_eq!(
++        hub.magic_sign_in(&tokens[0], None).await.status(),
++        StatusCode::OK
++    );
++    let resp = hub.magic_sign_in(&tokens[1], None).await;
++    assert_eq!(
++        error_of(resp).await,
++        (StatusCode::BAD_REQUEST, BAD_MAGIC.into())
++    );
++}
++
++#[tokio::test]
++async fn a_magic_link_gets_a_locked_out_user_back_in() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    hub.sign_up(&email).await;
++    let key = format!("email:{}", email.to_lowercase());
++    for _ in 0..5 {
++        hub.sign_in(&email, "wrong password!!").await;
++    }
++    assert_locked(hub.sign_in(&email, PASSWORD).await).await;
++    assert_eq!(hub.throttle_refused(&key).await, Some(1));
++
++    assert_accepted(hub.request(MAGIC, &email).await).await;
++    let token = magic_token(&email).await;
++    let resp = hub.magic_sign_in(&token, None).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    assert_eq!(hub.throttle_failures(&key).await, None);
++    let summary = hub.audit_details("auth.sign_in_lock_summary").await;
++    assert_eq!(summary.len(), 1, "{summary:?}");
++    assert_eq!(summary[0].0, key);
++    assert_eq!(summary[0].1["refused"], 1);
++    assert_eq!(summary[0].1["peer"], "ip:127.0.0.1");
++    // The password works again at once.
++    assert_eq!(hub.sign_in(&email, PASSWORD).await.status(), StatusCode::OK);
++}
++
++#[tokio::test]
++async fn a_magic_link_verifies_the_email() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    hub.sign_up(&email).await;
++    let verification = verification_token(&email).await;
++
++    assert_accepted(hub.request(MAGIC, &email).await).await;
++    let resp = hub.magic_sign_in(&magic_token(&email).await, None).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let account: Value = resp.json().await.unwrap();
++    assert_eq!(account["user"]["email_verified"], json!(true));
++    // The earlier verification link was retired.
++    let resp = hub
++        .post(
++            "/api/auth/verify-email",
++            json!({"token": verification}),
++            None,
++        )
++        .await;
++    assert_eq!(error_of(resp).await.0, StatusCode::BAD_REQUEST);
++    assert!(hub.audited("auth.email_verified").await.is_empty());
++
++    // A later magic sign-in did not verify anything.
++    assert_accepted(hub.request(MAGIC, &email).await).await;
++    let second = mailed_tokens(&email, wipe_hub::mail::MAGIC_LINK_SUBJECT, "magic-link", 2)
++        .await
++        .pop()
++        .unwrap();
++    assert_eq!(
++        hub.magic_sign_in(&second, None).await.status(),
++        StatusCode::OK
++    );
++    let details: Vec<Value> = hub
++        .audit_details("auth.magic_link_sign_in")
++        .await
++        .into_iter()
++        .map(|(_, d)| d)
++        .collect();
++    assert_eq!(
++        details,
++        vec![
++            json!({"rotated": false, "email_verified": true, "peer": "ip:127.0.0.1"}),
++            json!({"rotated": false, "email_verified": false, "peer": "ip:127.0.0.1"}),
++        ]
++    );
++}
++
++#[tokio::test]
++async fn a_magic_sign_in_rotates_the_incoming_session() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    let (_, a) = hub.sign_up(&email).await;
++    assert_accepted(hub.request(MAGIC, &email).await).await;
++    let resp = hub
++        .magic_sign_in(&magic_token(&email).await, Some(&a))
++        .await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let b = cookie_pair(&resp);
++    assert_eq!(hub.me(Some(&a)).await.0, StatusCode::UNAUTHORIZED);
++    assert_eq!(hub.me(Some(&b)).await.0, StatusCode::OK);
++    assert_eq!(
++        hub.audit_details("auth.magic_link_sign_in").await[0].1["rotated"],
++        json!(true)
++    );
++}
++
++#[tokio::test]
++async fn a_password_reset_ends_every_session_and_changes_the_password() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    let (body, first) = hub.sign_up(&email).await;
++    let second = cookie_pair(&hub.sign_in(&email, PASSWORD).await);
++    let (_, other) = hub.sign_up(&unique_address()).await;
++
++    assert_accepted(hub.request(RESET, &email).await).await;
++    let token = reset_token(&email).await;
++    let resp = hub.complete_reset(&token, NEW_PASSWORD).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let cleared = set_cookie(&resp);
++    assert!(cleared.starts_with("wipehub_session=;"), "{cleared}");
++    assert!(cleared.contains("Max-Age=0"), "{cleared}");
++    assert_eq!(
++        resp.json::<Value>().await.unwrap(),
++        json!({"password_reset": true})
++    );
++
++    for c in [&first, &second] {
++        assert_eq!(hub.me(Some(c)).await.0, StatusCode::UNAUTHORIZED);
++    }
++    assert_eq!(hub.me(Some(&other)).await.0, StatusCode::OK);
++    assert_eq!(
++        hub.sign_in(&email, PASSWORD).await.status(),
++        StatusCode::UNAUTHORIZED
++    );
++    let resp = hub.sign_in(&email, NEW_PASSWORD).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let account: Value = resp.json().await.unwrap();
++    assert_eq!(account["user"]["email_verified"], json!(true));
++
++    let who = user_of(&body);
++    assert_eq!(
++        hub.audited("auth.password_reset_requested").await,
++        vec![("anonymous".to_string(), who.clone())]
++    );
++    assert_eq!(
++        hub.audited("auth.password_reset").await,
++        vec![(who.clone(), who)]
++    );
++    assert_eq!(
++        hub.audit_details("auth.password_reset").await[0].1,
++        json!({"sessions": 2, "email_verified": true, "peer": "ip:127.0.0.1"})
++    );
++    let hours: f64 = sqlx::query_scalar(
++        "SELECT extract(epoch FROM expires_at - created_at)::float8 / 3600 FROM auth_tokens \
++         WHERE purpose = 'password_reset'",
++    )
++    .fetch_one(&hub.db.pool)
++    .await
++    .unwrap();
++    assert!((hours - 1.0).abs() < 1e-6, "{hours}");
++}
++
++#[tokio::test]
++async fn a_weak_reset_password_does_not_burn_the_token() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    hub.sign_up(&email).await;
++    assert_accepted(hub.request(RESET, &email).await).await;
++    let token = reset_token(&email).await;
++    let resp = hub.complete_reset(&token, "elevenchars").await;
++    assert_eq!(
++        error_of(resp).await,
++        (
++            StatusCode::BAD_REQUEST,
++            "password must be at least 12 characters".into()
++        )
++    );
++    // An invalid password with a bad token is still the password's 400.
++    let resp = hub.complete_reset("garbage", "short").await;
++    assert_eq!(
++        error_of(resp).await.1,
++        "password must be at least 12 characters"
++    );
++    assert_eq!(
++        hub.complete_reset(&token, NEW_PASSWORD).await.status(),
++        StatusCode::OK
++    );
++}
++
++#[tokio::test]
++async fn a_bad_reset_token_changes_nothing() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    let (body, session) = hub.sign_up(&email).await;
++    let user_id = body["user"]["id"].as_str().unwrap();
++
++    // Used.
++    assert_accepted(hub.request(RESET, &email).await).await;
++    let used = reset_token(&email).await;
++    assert_eq!(
++        hub.complete_reset(&used, NEW_PASSWORD).await.status(),
++        StatusCode::OK
++    );
++    let hash = hub.password_hash(user_id).await;
++    // Expired.
++    assert_accepted(hub.request(RESET, &email).await).await;
++    let expired = mailed_tokens(
++        &email,
++        wipe_hub::mail::PASSWORD_RESET_SUBJECT,
++        "reset-password",
++        2,
++    )
++    .await
++    .pop()
++    .unwrap();
++    sqlx::query("UPDATE auth_tokens SET expires_at = now() - interval '1 second'")
++        .execute(&hub.db.pool)
++        .await
++        .unwrap();
++    // A fresh session that a bad reset must not end.
++    let fresh = cookie_pair(&hub.sign_in(&email, NEW_PASSWORD).await);
++    let audit_rows = hub.count("audit_log").await;
++
++    let garbage_43 = "A".repeat(43);
++    for t in [
++        used.as_str(),
++        expired.as_str(),
++        "garbage",
++        garbage_43.as_str(),
++    ] {
++        let resp = hub.complete_reset(t, "yet another passphrase").await;
++        assert!(resp.headers().get(SET_COOKIE).is_none());
++        assert_eq!(
++            error_of(resp).await,
++            (StatusCode::BAD_REQUEST, BAD_RESET.into()),
++            "{t}"
++        );
++    }
++    assert_eq!(hub.password_hash(user_id).await, hash);
++    assert_eq!(hub.count("audit_log").await, audit_rows);
++    assert_eq!(hub.me(Some(&fresh)).await.0, StatusCode::OK);
++    // The successful reset ended the sign-up session.
++    assert_eq!(hub.me(Some(&session)).await.0, StatusCode::UNAUTHORIZED);
++}
++
++#[tokio::test]
++async fn completing_a_reset_retires_outstanding_links() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    hub.sign_up(&email).await;
++    assert_accepted(hub.request(MAGIC, &email).await).await;
++    assert_accepted(hub.request(RESET, &email).await).await;
++    assert_accepted(hub.request(RESET, &email).await).await;
++    let magic = magic_token(&email).await;
++    let resets = mailed_tokens(
++        &email,
++        wipe_hub::mail::PASSWORD_RESET_SUBJECT,
++        "reset-password",
++        2,
++    )
++    .await;
++
++    // Tokens only work for their own purpose.
++    let resp = hub.complete_reset(&magic, NEW_PASSWORD).await;
++    assert_eq!(error_of(resp).await.1, BAD_RESET);
++    let resp = hub.magic_sign_in(&resets[0], None).await;
++    assert_eq!(error_of(resp).await.1, BAD_MAGIC);
++
++    assert_eq!(
++        hub.complete_reset(&resets[1], NEW_PASSWORD).await.status(),
++        StatusCode::OK
++    );
++    let resp = hub
++        .complete_reset(&resets[0], "yet another passphrase")
++        .await;
++    assert_eq!(
++        error_of(resp).await,
++        (StatusCode::BAD_REQUEST, BAD_RESET.into())
++    );
++    let resp = hub.magic_sign_in(&magic, None).await;
++    assert_eq!(
++        error_of(resp).await,
++        (StatusCode::BAD_REQUEST, BAD_MAGIC.into())
++    );
++}
++
++#[tokio::test]
++async fn creating_a_token_purges_that_users_expired_tokens() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    hub.sign_up(&email).await;
++    hub.sign_up(&unique_address()).await;
++    sqlx::query("UPDATE auth_tokens SET expires_at = now() - interval '1 second'")
++        .execute(&hub.db.pool)
++        .await
++        .unwrap();
++    assert_accepted(hub.request(MAGIC, &email).await).await;
++    // This user's expired verification token is gone; the other user's stays.
++    assert_eq!(hub.count("auth_tokens").await, 2);
++    let purposes: Vec<String> =
++        sqlx::query_scalar("SELECT purpose FROM auth_tokens ORDER BY purpose")
++            .fetch_all(&hub.db.pool)
++            .await
++            .unwrap();
++    assert_eq!(purposes, vec!["magic_link", "verify_email"]);
++}
++
++#[tokio::test]
++async fn five_emails_per_address_then_a_one_hour_lock() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    hub.sign_up(&email).await;
++    verification_token(&email).await;
++    // Start the address's count from zero.
++    sqlx::query("DELETE FROM auth_throttle")
++        .execute(&hub.db.pool)
++        .await
++        .unwrap();
++    let key = format!("mail:to:{}", email.to_lowercase());
++
++    for i in 1..=5 {
++        let resp = hub.request(MAGIC, &email).await;
++        assert_eq!(resp.status(), StatusCode::ACCEPTED, "request {i}");
++    }
++    mailed_tokens(&email, wipe_hub::mail::MAGIC_LINK_SUBJECT, "magic-link", 5).await;
++    let before = hub.counts().await;
++    let retry = assert_mail_locked(hub.request(MAGIC, &email).await).await;
++    assert!((3590..=3600).contains(&retry), "{retry}");
++    assert_eq!(hub.counts().await, before);
++    assert_eq!(hub.throttle_refused(&key).await, Some(1));
++    // The refused request's IP charge was given back.
++    assert_eq!(hub.throttle_failures("mail:ip:127.0.0.1").await, Some(5));
++
++    let locked = hub.audit_details("auth.mail_locked").await;
++    assert_eq!(locked.len(), 1, "{locked:?}");
++    assert_eq!(locked[0].0, key);
++    assert!(locked[0].1["until"].as_str().unwrap().ends_with('Z'));
++    assert_eq!(locked[0].1["peer"], "ip:127.0.0.1");
++    assert_eq!(hub.audited("auth.mail_locked").await[0].0, "anonymous");
++
++    tokio::time::sleep(Duration::from_millis(500)).await;
++    assert_eq!(
++        messages_with_subject(&email, wipe_hub::mail::MAGIC_LINK_SUBJECT)
++            .await
++            .len(),
++        5
++    );
++
++    // Once the lock elapses, requests are accepted again.
++    hub.expire_locks().await;
++    assert_accepted(hub.request(MAGIC, &email).await).await;
++    assert_eq!(hub.throttle_failures(&key).await, Some(1));
++    assert_eq!(hub.throttle_until(&key).await, None);
++    let summary = hub.audit_details("auth.mail_lock_summary").await;
++    assert_eq!(summary.len(), 1, "{summary:?}");
++    assert_eq!(summary[0].0, key);
++    assert_eq!(summary[0].1["refused"], 1);
++}
++
++#[tokio::test]
++async fn every_email_sending_route_shares_the_address_limit() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    let (_, session) = hub.sign_up(&email).await;
++    let sign_up = || {
++        json!({
++            "email": email.to_uppercase(),
++            "password": PASSWORD,
++            "name": "Again",
++            "organization_name": "Again Ltd",
++        })
++    };
++    let resp = hub.post("/api/auth/sign-up", sign_up(), None).await;
++    assert_eq!(resp.status(), StatusCode::CONFLICT);
++    let resp = hub
++        .post_empty("/api/auth/verification-email", Some(&session))
++        .await;
++    assert_eq!(resp.status(), StatusCode::ACCEPTED);
++    assert_accepted(hub.request(RESET, &email).await).await;
++    assert_accepted(hub.request(MAGIC, &email).await).await;
++    // Verification, resend, reset and magic link.
++    let mailpit = Mailpit::new();
++    let deadline = std::time::Instant::now() + MAIL_WAIT;
++    while mailpit.messages_to(&email).await.len() < 4 {
++        assert!(std::time::Instant::now() < deadline, "mail did not arrive");
++        tokio::time::sleep(Duration::from_millis(100)).await;
++    }
++
++    // The 6th email-sending request, on any route, is refused and writes nothing.
++    let before = hub.counts().await;
++    let orgs = hub.count("organizations").await;
++    assert_mail_locked(hub.post("/api/auth/sign-up", sign_up(), None).await).await;
++    assert_mail_locked(
++        hub.post_empty("/api/auth/verification-email", Some(&session))
++            .await,
++    )
++    .await;
++    assert_mail_locked(hub.request(RESET, &email).await).await;
++    assert_mail_locked(hub.request(MAGIC, &email).await).await;
++    assert_eq!(hub.counts().await, before);
++    assert_eq!(hub.count("organizations").await, orgs);
++    assert_eq!(
++        hub.throttle_refused(&format!("mail:to:{}", email.to_lowercase()))
++            .await,
++        Some(4)
++    );
++    tokio::time::sleep(Duration::from_millis(500)).await;
++    assert_eq!(mailpit.messages_to(&email).await.len(), 4);
++}
++
++#[tokio::test]
++async fn twenty_emails_from_one_ip_then_a_lock() {
++    let hub = spawn_hub().await;
++    for i in 1..=20 {
++        let resp = hub.request(MAGIC, &unique_address()).await;
++        assert_eq!(resp.status(), StatusCode::ACCEPTED, "request {i}");
++    }
++    let fresh = unique_address();
++    assert_mail_locked(hub.request(RESET, &fresh).await).await;
++    let locked = hub.audit_details("auth.mail_locked").await;
++    assert_eq!(locked.len(), 1, "{locked:?}");
++    assert_eq!(locked[0].0, "mail:ip:127.0.0.1");
++    // The IP key refused first: the address key was never touched.
++    assert_eq!(
++        hub.throttle_failures(&format!("mail:to:{fresh}")).await,
++        None
++    );
++    assert_eq!(hub.throttle_refused("mail:ip:127.0.0.1").await, Some(1));
++    // Sign-in has its own keys and is unaffected.
++    assert_eq!(
++        hub.sign_in(&fresh, PASSWORD).await.status(),
++        StatusCode::UNAUTHORIZED
++    );
++}
++
++#[tokio::test]
++async fn a_throttled_sign_up_creates_nothing() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    for _ in 0..5 {
++        assert_accepted(hub.request(MAGIC, &email).await).await;
++    }
++    // An invalid body is still a 400 first.
++    let resp = hub
++        .post(
++            "/api/auth/sign-up",
++            json!({"email": email, "password": "elevenchars", "name": "A", "organization_name": "O"}),
++            None,
++        )
++        .await;
++    assert_eq!(error_of(resp).await.0, StatusCode::BAD_REQUEST);
++    let resp = hub
++        .post(
++            "/api/auth/sign-up",
++            json!({"email": email, "password": PASSWORD, "name": "A", "organization_name": "O"}),
++            None,
++        )
++        .await;
++    assert_mail_locked(resp).await;
++    for table in ["organizations", "users", "sessions", "auth_tokens"] {
++        assert_eq!(hub.count(table).await, 0, "{table}");
++    }
++    assert!(hub.audited("auth.sign_up").await.is_empty());
++}
++
++#[tokio::test]
++async fn hammering_a_mail_lock_is_counted_then_summarised_once() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    let key = format!("mail:to:{email}");
++    for _ in 0..5 {
++        assert_accepted(hub.request(RESET, &email).await).await;
++    }
++    let audit_rows = hub.count("audit_log").await;
++    for _ in 0..50 {
++        assert_mail_locked(hub.request(RESET, &email).await).await;
++    }
++    assert_eq!(hub.count("audit_log").await, audit_rows);
++    assert_eq!(hub.throttle_refused(&key).await, Some(50));
++    assert_eq!(hub.throttle_failures(&key).await, Some(5));
++
++    hub.expire_locks().await;
++    assert_accepted(hub.request(RESET, &email).await).await;
++    let summary = hub.audit_details("auth.mail_lock_summary").await;
++    assert_eq!(summary.len(), 1, "{summary:?}");
++    assert_eq!(summary[0].0, key);
++    assert_eq!(summary[0].1["refused"], 50);
++    assert_eq!(summary[0].1["peer"], "ip:127.0.0.1");
++    assert_eq!(hub.audited("auth.mail_locked").await.len(), 1);
++    assert!(hub.audited("auth.sign_in_lock_summary").await.is_empty());
++}
++
++#[tokio::test]
++async fn purged_rows_are_summarised_under_their_keys_action() {
++    let hub = spawn_hub().await;
++    sqlx::query(
++        "INSERT INTO auth_throttle (key, failures, refused, window_started_at, locked_until) VALUES \
++         ('mail:to:stale@example.com', 5, 4, now() - interval '2 days', now() - interval '1 day'), \
++         ('email:stale@example.com', 5, 3, now() - interval '2 days', now() - interval '1 day')",
++    )
++    .execute(&hub.db.pool)
++    .await
++    .unwrap();
++    // A mail charge purges both stale rows.
++    assert_accepted(hub.request(MAGIC, &unique_address()).await).await;
++    let mail = hub.audit_details("auth.mail_lock_summary").await;
++    assert_eq!(mail.len(), 1, "{mail:?}");
++    assert_eq!(mail[0].0, "mail:to:stale@example.com");
++    assert_eq!(mail[0].1["refused"], 4);
++    assert!(mail[0].1.get("peer").is_none());
++    let sign_in = hub.audit_details("auth.sign_in_lock_summary").await;
++    assert_eq!(sign_in.len(), 1, "{sign_in:?}");
++    assert_eq!(sign_in[0].0, "email:stale@example.com");
++}
+diff --git a/crates/wipe-hub/tests/migrations.rs b/crates/wipe-hub/tests/migrations.rs
+index 5eb99c6..393bb9b 100644
+--- a/crates/wipe-hub/tests/migrations.rs
++++ b/crates/wipe-hub/tests/migrations.rs
+@@ -110,3 +110,51 @@ async fn unreachable_postgres_panics_with_the_compose_hint() {
+     ))
+     .await;
+ }
++
++#[tokio::test]
++async fn auth_tokens_accept_the_story_3_purposes_only() {
++    let t = TestDb::migrated().await;
++    let org: uuid::Uuid =
++        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ('Org') RETURNING id")
++            .fetch_one(&t.pool)
++            .await
++            .unwrap();
++    let user: uuid::Uuid = sqlx::query_scalar(
++        "INSERT INTO users (organization_id, email, name, password_hash, role) \
++         VALUES ($1, 'a@example.com', 'A', 'x', 'owner') RETURNING id",
++    )
++    .bind(org)
++    .fetch_one(&t.pool)
++    .await
++    .unwrap();
++    let insert = |n: u8, purpose: &'static str| {
++        let pool = t.pool.clone();
++        async move {
++            sqlx::query(
++                "INSERT INTO auth_tokens (token_hash, user_id, purpose, expires_at) \
++                 VALUES ($1, $2, $3, now())",
++            )
++            .bind(vec![n; 32])
++            .bind(user)
++            .bind(purpose)
++            .execute(&pool)
++            .await
++        }
++    };
++    for (n, purpose) in [
++        (1, "verify_email"),
++        (2, "magic_link"),
++        (3, "password_reset"),
++    ] {
++        insert(n, purpose)
++            .await
++            .unwrap_or_else(|e| panic!("{purpose}: {e}"));
++    }
++    let err = insert(4, "other").await.unwrap_err();
++    match err {
++        sqlx::Error::Database(d) => {
++            assert_eq!(d.constraint(), Some("auth_tokens_purpose_check"))
++        }
++        other => panic!("expected a CHECK violation, got {other:?}"),
++    }
++}

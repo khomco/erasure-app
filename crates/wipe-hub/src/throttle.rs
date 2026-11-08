@@ -1,7 +1,10 @@
 //! Attempt throttles (ADR-0007 §3): shared, restart-proof counters in the
-//! `auth_throttle` table, keyed by what is throttled (`email:<address>`,
-//! `ip:<peer>`). Story 3 (reset and magic link) reuses this module with its
-//! own keys and limits.
+//! `auth_throttle` table, keyed by what is throttled. Password sign-in
+//! (portal-accounts story 2) uses `email:<address>` and `ip:<peer>`; the
+//! email-send throttle on every route that sends mail (story 3) uses
+//! `mail:to:<address>` and `mail:ip:<peer>` ([`MAIL_KEY_PREFIX`]), with its
+//! own limits. Email sends are always final, so their charges are confirmed
+//! in the same transaction instead of waiting for a check.
 //!
 //! The protocol, per key, around one expensive check (e.g. Argon2):
 //!
@@ -39,6 +42,18 @@ pub const SIGN_IN_IP_LIMIT: i32 = 20;
 pub const SIGN_IN_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// How long a sign-in lock lasts once engaged.
 pub const SIGN_IN_LOCKOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Emails sent per recipient address per window, across every route that
+/// sends mail.
+pub const MAIL_ADDRESS_LIMIT: i32 = 5;
+/// Email-sending requests per client IP (or IPv6 /64) per window.
+pub const MAIL_IP_LIMIT: i32 = 20;
+/// The fixed window email sends are counted in.
+pub const MAIL_WINDOW: Duration = Duration::from_secs(60 * 60);
+/// How long an email-send lock lasts once engaged.
+pub const MAIL_LOCKOUT: Duration = Duration::from_secs(60 * 60);
+/// Every email-send throttle key starts with this; no sign-in key does.
+pub const MAIL_KEY_PREFIX: &str = "mail:";
 
 /// Rows whose window started longer ago than this, and whose lock (if any)
 /// has elapsed, are deleted by [`purge_stale`]. Every window passed to
@@ -292,6 +307,13 @@ mod tests {
         assert_eq!(SIGN_IN_WINDOW.as_secs(), 900);
         assert_eq!(SIGN_IN_LOCKOUT.as_secs(), 900);
         assert!(SIGN_IN_WINDOW <= PURGE_AFTER);
+        assert_eq!(MAIL_ADDRESS_LIMIT, 5);
+        assert_eq!(MAIL_IP_LIMIT, 20);
+        assert_eq!(MAIL_WINDOW.as_secs(), 3600);
+        assert_eq!(MAIL_LOCKOUT.as_secs(), 3600);
+        assert!(MAIL_WINDOW <= PURGE_AFTER);
+        assert_eq!(MAIL_KEY_PREFIX, "mail:");
+        assert!(!"email:a@b.co".starts_with(MAIL_KEY_PREFIX));
     }
 
     #[test]
@@ -319,5 +341,7 @@ mod tests {
     fn sign_in_arguments_pass_the_checks() {
         check_charge_args(SIGN_IN_EMAIL_LIMIT, SIGN_IN_WINDOW);
         check_charge_args(SIGN_IN_IP_LIMIT, PURGE_AFTER);
+        check_charge_args(MAIL_ADDRESS_LIMIT, MAIL_WINDOW);
+        check_charge_args(MAIL_IP_LIMIT, MAIL_WINDOW);
     }
 }

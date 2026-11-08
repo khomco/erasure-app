@@ -46,6 +46,18 @@ export function SignInPage() {
         <FormError error={mutation.error} describe={signInErrorMessage} />
         <SubmitButton pending={mutation.isPending}>Sign in</SubmitButton>
       </form>
+      <ul className="space-y-1 text-sm">
+        <li>
+          <Link to="/sign-in-link" className="text-indigo-400 hover:underline">
+            Email me a sign-in link
+          </Link>
+        </li>
+        <li>
+          <Link to="/forgot-password" className="text-indigo-400 hover:underline">
+            Forgot your password?
+          </Link>
+        </li>
+      </ul>
       <p className="text-sm text-slate-400">
         New here?{" "}
         <Link to="/sign-up" className="text-indigo-400 hover:underline">

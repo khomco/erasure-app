@@ -2,11 +2,16 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   CSRF_ERROR,
   HubError,
+  emailRequestErrorMessage,
   fetchMe,
+  requestMagicLink,
+  requestPasswordReset,
   resendVerification,
   resetCsrfCache,
+  resetPassword,
   signIn,
   signInErrorMessage,
+  signInWithMagicLink,
   signOut,
   signOutEverywhere,
   signUp,
@@ -304,6 +309,10 @@ describe("CSRF token", () => {
     ["sign-out-everywhere", (f) => signOutEverywhere(f)],
     ["verify-email", (f) => verifyEmail("tok", f)],
     ["verification-email", (f) => resendVerification(f)],
+    ["magic-link", (f) => requestMagicLink("a@b.co", f)],
+    ["magic-link/sign-in", (f) => signInWithMagicLink("tok", f)],
+    ["password-reset", (f) => requestPasswordReset("a@b.co", f)],
+    ["password-reset/complete", (f) => resetPassword("tok", "pw", f)],
   ];
 
   it.each(posts)("%s sends X-CSRF-Token from /api/auth/csrf", async (_, call) => {
@@ -368,5 +377,125 @@ describe("CSRF token", () => {
     fail = false;
     await signOut(impl);
     expect(calls).toEqual(["/api/auth/csrf", "/api/auth/csrf", "/api/auth/sign-out"]);
+  });
+});
+
+describe("requestMagicLink and requestPasswordReset", () => {
+  it.each([
+    ["/api/auth/magic-link", requestMagicLink],
+    ["/api/auth/password-reset", requestPasswordReset],
+  ])("%s posts the email and resolves on 202", async (url, call) => {
+    const f = respond(202, "{}");
+    await expect(call("ada@example.com", f.impl)).resolves.toBeUndefined();
+    expect(f.calls).toEqual([
+      { url, method: "POST", body: { email: "ada@example.com" }, csrf: "csrf-1" },
+    ]);
+  });
+
+  it.each([requestMagicLink, requestPasswordReset])(
+    "surfaces the email-send limit with its Retry-After",
+    async (call) => {
+      const f = fakeHub(() => ({
+        status: 429,
+        body: JSON.stringify({ error: "too many emails requested; try again later" }),
+        headers: { "Retry-After": "3600" },
+      }));
+      const err = await call("a@b.co", f.impl).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect((err as HubError).status).toBe(429);
+      expect((err as HubError).retryAfterSecs).toBe(3600);
+      expect(emailRequestErrorMessage(err)).toBe(
+        "Too many emails requested. Try again in 60 minutes.",
+      );
+    },
+  );
+
+  it("surfaces a 400 for an invalid email", async () => {
+    const f = hubError(400, "email is not a valid email address");
+    await expectHubError(
+      requestMagicLink("nope", f.impl),
+      400,
+      "email is not a valid email address",
+    );
+  });
+});
+
+describe("signInWithMagicLink", () => {
+  it("posts the token and returns the account", async () => {
+    const f = respond(200, JSON.stringify(account));
+    expect(await signInWithMagicLink("tok", f.impl)).toEqual(account);
+    expect(f.calls).toEqual([
+      {
+        url: "/api/auth/magic-link/sign-in",
+        method: "POST",
+        body: { token: "tok" },
+        csrf: "csrf-1",
+      },
+    ]);
+  });
+
+  it("surfaces an invalid or expired link", async () => {
+    const f = hubError(400, "this sign-in link is invalid or has expired");
+    await expectHubError(
+      signInWithMagicLink("tok", f.impl),
+      400,
+      "this sign-in link is invalid or has expired",
+    );
+  });
+
+  it("rejects a body that is not an account", async () => {
+    const f = respond(200, JSON.stringify({ ok: true }));
+    await expect(signInWithMagicLink("tok", f.impl)).rejects.toThrow(/unexpected body/);
+  });
+});
+
+describe("resetPassword", () => {
+  it("posts the token and new password", async () => {
+    const f = respond(200, JSON.stringify({ password_reset: true }));
+    await expect(resetPassword("tok", "a new passphrase", f.impl)).resolves.toBeUndefined();
+    expect(f.calls).toEqual([
+      {
+        url: "/api/auth/password-reset/complete",
+        method: "POST",
+        body: { token: "tok", password: "a new passphrase" },
+        csrf: "csrf-1",
+      },
+    ]);
+  });
+
+  it.each([
+    "this password reset link is invalid or has expired",
+    "password must be at least 12 characters",
+  ])("surfaces the 400 %s", async (message) => {
+    await expectHubError(resetPassword("tok", "x", hubError(400, message).impl), 400, message);
+  });
+
+  it("rejects an unexpected success body", async () => {
+    const f = respond(200, JSON.stringify({}));
+    await expect(resetPassword("tok", "x", f.impl)).rejects.toThrow(/unexpected body/);
+  });
+});
+
+describe("emailRequestErrorMessage", () => {
+  it("rounds the wait up to whole minutes", () => {
+    const limited = (secs: number) => new HubError(429, "too many emails requested", secs);
+    expect(emailRequestErrorMessage(limited(1))).toBe(
+      "Too many emails requested. Try again in 1 minute.",
+    );
+    expect(emailRequestErrorMessage(limited(3590))).toBe(
+      "Too many emails requested. Try again in 60 minutes.",
+    );
+  });
+
+  it("describes other errors by their message", () => {
+    expect(emailRequestErrorMessage(new HubError(429, "too many emails requested"))).toBe(
+      "too many emails requested",
+    );
+    expect(emailRequestErrorMessage(new HubError(409, "an account with this email already exists"))).toBe(
+      "an account with this email already exists",
+    );
+    expect(emailRequestErrorMessage(undefined)).toBe("Something went wrong");
   });
 });

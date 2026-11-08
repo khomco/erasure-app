@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
+  emailRequestErrorMessage,
   fetchMe,
   resendVerification,
   signOut,
@@ -122,7 +123,7 @@ function SignedIn({ account }: { account: Account }) {
           {resend.isSuccess && <p className="mt-1 text-emerald-400">Sent. Check your inbox.</p>}
           {resend.isError && (
             <p role="alert" className="mt-1 text-rose-400">
-              {resend.error instanceof Error ? resend.error.message : "Could not send"}
+              {emailRequestErrorMessage(resend.error)}
             </p>
           )}
         </div>

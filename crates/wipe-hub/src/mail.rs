@@ -15,6 +15,8 @@ use url::Url;
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub const VERIFICATION_SUBJECT: &str = "Verify your Wipestation email address";
+pub const MAGIC_LINK_SUBJECT: &str = "Your Wipestation sign-in link";
+pub const PASSWORD_RESET_SUBJECT: &str = "Reset your Wipestation password";
 
 #[derive(Debug, thiserror::Error)]
 pub enum MailError {
@@ -52,6 +54,31 @@ impl Mailer {
              If you did not create a Wipestation account, ignore this email.\n"
         );
         self.send(to, VERIFICATION_SUBJECT, body).await
+    }
+
+    /// The magic (sign-in) link message: plain text containing `link`.
+    pub async fn send_magic_link(&self, to: &str, link: &Url) -> Result<(), MailError> {
+        let body = format!(
+            "Sign in to the Wipestation portal by opening the link below. \
+             It works once and expires in 15 minutes.\n\n\
+             {link}\n\n\
+             If you did not ask for a sign-in link, ignore this email. \
+             Your account is unchanged.\n"
+        );
+        self.send(to, MAGIC_LINK_SUBJECT, body).await
+    }
+
+    /// The password reset message: plain text containing `link`.
+    pub async fn send_password_reset(&self, to: &str, link: &Url) -> Result<(), MailError> {
+        let body = format!(
+            "Choose a new password for your Wipestation account by opening the link below. \
+             It works once and expires in 1 hour. \
+             Resetting your password signs you out everywhere.\n\n\
+             {link}\n\n\
+             If you did not ask to reset your password, ignore this email. \
+             Your password is unchanged.\n"
+        );
+        self.send(to, PASSWORD_RESET_SUBJECT, body).await
     }
 
     async fn send(&self, to: &str, subject: &str, body: String) -> Result<(), MailError> {

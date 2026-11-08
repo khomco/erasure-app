@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { signUp, type Account } from "@/api/auth";
+import { emailRequestErrorMessage, signUp, type Account } from "@/api/auth";
 import { Field, FormError, SubmitButton } from "./AuthForm";
 
 export function SignUpPage() {
@@ -55,7 +55,7 @@ export function SignUpPage() {
           value={password}
           onChange={setPassword}
         />
-        <FormError error={mutation.error} />
+        <FormError error={mutation.error} describe={emailRequestErrorMessage} />
         <SubmitButton pending={mutation.isPending}>Create account</SubmitButton>
       </form>
       <p className="text-sm text-slate-400">

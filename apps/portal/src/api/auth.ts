@@ -1,4 +1,5 @@
-// Mirrors the `/api/auth/*` shapes in crates/wipe-hub/src/auth.rs and
+// Mirrors the `/api/auth/*` shapes in crates/wipe-hub/src/auth.rs (sign-up,
+// sign-in, verification, sessions, magic links and password reset) and
 // `wipe_hub::accounts::{Account, User, Organization, Role}`
 // (crates/wipe-hub/src/accounts.rs). Change both together.
 
@@ -54,17 +55,38 @@ function retryAfter(res: Response): number | null {
   return v && /^\d+$/.test(v) ? Number(v) : null;
 }
 
+/** A 429's `Retry-After` as "N minute(s)", rounded up; `null` for anything else. */
+function waitFor(error: unknown): string | null {
+  if (error instanceof HubError && error.status === 429 && error.retryAfterSecs !== null) {
+    const minutes = Math.max(1, Math.ceil(error.retryAfterSecs / 60));
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+  return null;
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : "Something went wrong";
+}
+
 /**
  * What the sign-in form shows for an error: a sign-in lockout (429) says
  * how long to wait, rounded up to whole minutes; anything else is the
  * error's own message.
  */
 export function signInErrorMessage(error: unknown): string {
-  if (error instanceof HubError && error.status === 429 && error.retryAfterSecs !== null) {
-    const minutes = Math.max(1, Math.ceil(error.retryAfterSecs / 60));
-    return `Too many failed sign-in attempts. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`;
-  }
-  return error instanceof Error ? error.message : "Something went wrong";
+  const wait = waitFor(error);
+  return wait ? `Too many failed sign-in attempts. Try again in ${wait}.` : messageOf(error);
+}
+
+/**
+ * What a form that makes the hub send email (sign-up, resend verification,
+ * magic link, password reset) shows for an error: the email-send limit (429)
+ * says how long to wait, rounded up to whole minutes; anything else is the
+ * error's own message.
+ */
+export function emailRequestErrorMessage(error: unknown): string {
+  const wait = waitFor(error);
+  return wait ? `Too many emails requested. Try again in ${wait}.` : messageOf(error);
 }
 
 type Fetch = typeof fetch;
@@ -217,6 +239,55 @@ export async function verifyEmail(token: string, fetchImpl: Fetch = fetch): Prom
 /** `POST /api/auth/verification-email` (202): email a new verification link. */
 export async function resendVerification(fetchImpl: Fetch = fetch): Promise<void> {
   await ensureOk(await request(fetchImpl, "POST", "/api/auth/verification-email"));
+}
+
+/**
+ * `POST /api/auth/magic-link` (202): email a sign-in link to `email` if an
+ * account has it. The hub answers the same whether or not one does.
+ */
+export async function requestMagicLink(email: string, fetchImpl: Fetch = fetch): Promise<void> {
+  await ensureOk(await request(fetchImpl, "POST", "/api/auth/magic-link", { email }));
+}
+
+/**
+ * `POST /api/auth/magic-link/sign-in` with the token from the emailed link:
+ * signs in and returns the account. A used, expired or unknown link is a 400
+ * `HubError`.
+ */
+export async function signInWithMagicLink(token: string, fetchImpl: Fetch = fetch): Promise<Account> {
+  const res = await ensureOk(
+    await request(fetchImpl, "POST", "/api/auth/magic-link/sign-in", { token }),
+  );
+  return json(res, isAccount, "magic-link sign-in");
+}
+
+/**
+ * `POST /api/auth/password-reset` (202): email a password reset link to
+ * `email` if an account has it. The hub answers the same whether or not one
+ * does.
+ */
+export async function requestPasswordReset(email: string, fetchImpl: Fetch = fetch): Promise<void> {
+  await ensureOk(await request(fetchImpl, "POST", "/api/auth/password-reset", { email }));
+}
+
+/**
+ * `POST /api/auth/password-reset/complete`: set a new password with the
+ * token from the emailed link. Every session of the account ends, this
+ * browser's included: the user then signs in with the new password.
+ */
+export async function resetPassword(
+  token: string,
+  password: string,
+  fetchImpl: Fetch = fetch,
+): Promise<void> {
+  const res = await ensureOk(
+    await request(fetchImpl, "POST", "/api/auth/password-reset/complete", { token, password }),
+  );
+  await json(
+    res,
+    (v): v is { password_reset: true } => isObject(v) && v.password_reset === true,
+    "password reset",
+  );
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {

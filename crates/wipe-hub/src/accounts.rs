@@ -39,9 +39,21 @@ pub const EMAIL_MAX_CHARS: usize = 254;
 pub const SESSION_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 /// How long an email-verification token is valid.
 pub const VERIFY_EMAIL_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long a magic (sign-in) link is valid.
+pub const MAGIC_LINK_TTL: Duration = Duration::from_secs(15 * 60);
+/// How long a password reset link is valid.
+pub const PASSWORD_RESET_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// Purpose of an `auth_tokens` row (the migration's CHECK list).
+/// Purposes of an `auth_tokens` row (the CHECK list, widened by 0005).
 pub const PURPOSE_VERIFY_EMAIL: &str = "verify_email";
+pub const PURPOSE_MAGIC_LINK: &str = "magic_link";
+pub const PURPOSE_PASSWORD_RESET: &str = "password_reset";
+
+/// A `password_hash` that is not a PHC string, so it never verifies: password
+/// sign-in fails until a reset sets a real hash. Set when a magic link is what
+/// verifies an account whose password was chosen by someone who never proved
+/// they own the mailbox (a pre-registered account).
+pub const UNUSABLE_PASSWORD_HASH: &str = "!unusable";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -210,7 +222,12 @@ fn verify_blocking(password: &str, hash: &str) -> bool {
         Ok(parsed) => Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
             .is_ok(),
-        Err(_) => false,
+        // An unparseable hash (e.g. `UNUSABLE_PASSWORD_HASH`) still costs one
+        // Argon2 verification, so its timing matches a real account's.
+        Err(_) => {
+            let _ = verify_blocking(password, dummy_hash());
+            false
+        }
     }
 }
 
@@ -376,23 +393,178 @@ pub async fn account<'e, E: sqlx::PgExecutor<'e>>(
     .transpose()
 }
 
+/// A user found by email (any case): `(user_id, organization_id, stored email)`.
+pub async fn find_user_by_email<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    email: &str,
+) -> Result<Option<(Uuid, Uuid, String)>, sqlx::Error> {
+    sqlx::query_as("SELECT id, organization_id, email FROM users WHERE lower(email) = lower($1)")
+        .bind(email.trim())
+        .fetch_optional(executor)
+        .await
+}
+
+/// A user's `(organization_id, stored email)` by id.
+pub async fn find_user_by_id<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    user_id: Uuid,
+) -> Result<Option<(Uuid, String)>, sqlx::Error> {
+    sqlx::query_as("SELECT organization_id, email FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(executor)
+        .await
+}
+
+/// Replace a user's password hash.
+pub async fn set_password_hash<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    user_id: Uuid,
+    password_hash: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+        .bind(user_id)
+        .bind(password_hash)
+        .execute(executor)
+        .await?;
+    Ok(())
+}
+
+/// Issue a `purpose` token for `user_id`, valid for `ttl`; returns the raw
+/// token. The same statement deletes that user's already-expired tokens of
+/// any purpose.
+pub async fn create_token<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    user_id: Uuid,
+    purpose: &str,
+    ttl: Duration,
+) -> Result<String, sqlx::Error> {
+    let token = Token::generate();
+    sqlx::query(
+        "WITH purged AS (DELETE FROM auth_tokens WHERE user_id = $2 AND expires_at <= now()) \
+         INSERT INTO auth_tokens (token_hash, user_id, purpose, expires_at) \
+         VALUES ($1, $2, $3, now() + make_interval(secs => $4))",
+    )
+    .bind(&token.hash[..])
+    .bind(user_id)
+    .bind(purpose)
+    .bind(ttl.as_secs_f64())
+    .execute(executor)
+    .await?;
+    Ok(token.raw)
+}
+
 /// Issue an email-verification token for `user_id`; returns the raw token.
 pub async fn create_verification_token<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     user_id: Uuid,
 ) -> Result<String, sqlx::Error> {
-    let token = Token::generate();
-    sqlx::query(
-        "INSERT INTO auth_tokens (token_hash, user_id, purpose, expires_at) \
-         VALUES ($1, $2, $3, now() + make_interval(secs => $4))",
+    create_token(executor, user_id, PURPOSE_VERIFY_EMAIL, VERIFY_EMAIL_TTL).await
+}
+
+/// Consume an unused, unexpired `purpose` token: one atomic statement, so of
+/// any number of concurrent uses exactly one gets the user's id. `None` for
+/// an unknown, malformed, used or expired token (nothing changes then).
+pub async fn consume_token<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    raw: &str,
+    purpose: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let Some(hash) = hash_token(raw) else {
+        return Ok(None);
+    };
+    sqlx::query_scalar(
+        "UPDATE auth_tokens SET used_at = now() \
+         WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > now() \
+         RETURNING user_id",
     )
-    .bind(&token.hash[..])
+    .bind(&hash[..])
+    .bind(purpose)
+    .fetch_optional(executor)
+    .await
+}
+
+/// The user an unused, unexpired `purpose` token belongs to, without using
+/// it up.
+pub async fn peek_token<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    raw: &str,
+    purpose: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let Some(hash) = hash_token(raw) else {
+        return Ok(None);
+    };
+    sqlx::query_scalar(
+        "SELECT user_id FROM auth_tokens \
+         WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > now()",
+    )
+    .bind(&hash[..])
+    .bind(purpose)
+    .fetch_optional(executor)
+    .await
+}
+
+/// Why a `purpose` token that [`consume_token`] refused cannot be used:
+/// `(user_id, "used" | "expired")` the first time a failed use of a stored,
+/// used or expired token is reported, `None` for an unknown or malformed
+/// token or one already reported. One atomic statement marks the token
+/// (`failure_audited_at`), so each token's failure is audited at most once
+/// however often it is posted. A retired token counts as used.
+pub async fn token_failure<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    raw: &str,
+    purpose: &str,
+) -> Result<Option<(Uuid, &'static str)>, sqlx::Error> {
+    let Some(hash) = hash_token(raw) else {
+        return Ok(None);
+    };
+    let row: Option<(Uuid, bool)> = sqlx::query_as(
+        "UPDATE auth_tokens SET failure_audited_at = now() \
+         WHERE token_hash = $1 AND purpose = $2 AND failure_audited_at IS NULL \
+           AND (used_at IS NOT NULL OR expires_at <= now()) \
+         RETURNING user_id, used_at IS NOT NULL",
+    )
+    .bind(&hash[..])
+    .bind(purpose)
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.map(|(user_id, used)| (user_id, if used { "used" } else { "expired" })))
+}
+
+/// Mark every outstanding token of `user_id` with one of `purposes` used;
+/// returns how many.
+pub async fn retire_tokens<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    user_id: Uuid,
+    purposes: &[&str],
+) -> Result<u64, sqlx::Error> {
+    let purposes: Vec<String> = purposes.iter().map(|p| p.to_string()).collect();
+    let done = sqlx::query(
+        "UPDATE auth_tokens SET used_at = now() \
+         WHERE user_id = $1 AND purpose = ANY($2) AND used_at IS NULL",
+    )
     .bind(user_id)
-    .bind(PURPOSE_VERIFY_EMAIL)
-    .bind(VERIFY_EMAIL_TTL.as_secs_f64())
+    .bind(purposes)
     .execute(executor)
     .await?;
-    Ok(token.raw)
+    Ok(done.rows_affected())
+}
+
+/// Mark `user_id`'s email verified and retire their outstanding
+/// verification links, so none can verify or audit again. Returns whether
+/// this call verified it (`false` if it already was).
+pub async fn mark_email_verified(
+    conn: &mut sqlx::PgConnection,
+    user_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let done = sqlx::query(
+        "UPDATE users SET email_verified_at = now() \
+         WHERE id = $1 AND email_verified_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut *conn)
+    .await?;
+    retire_tokens(&mut *conn, user_id, &[PURPOSE_VERIFY_EMAIL]).await?;
+    Ok(done.rows_affected() > 0)
 }
 
 /// Consume an unused, unexpired verification token and mark its user's email
@@ -402,36 +574,9 @@ pub async fn consume_verification_token(
     conn: &mut sqlx::PgConnection,
     raw: &str,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    let Some(hash) = hash_token(raw) else {
-        return Ok(None);
-    };
-    let user_id: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE auth_tokens SET used_at = now() \
-         WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > now() \
-         RETURNING user_id",
-    )
-    .bind(&hash[..])
-    .bind(PURPOSE_VERIFY_EMAIL)
-    .fetch_optional(&mut *conn)
-    .await?;
+    let user_id = consume_token(&mut *conn, raw, PURPOSE_VERIFY_EMAIL).await?;
     if let Some(id) = user_id {
-        sqlx::query(
-            "UPDATE users SET email_verified_at = coalesce(email_verified_at, now()) \
-             WHERE id = $1",
-        )
-        .bind(id)
-        .execute(&mut *conn)
-        .await?;
-        // One verification per user: retire any other outstanding links
-        // (e.g. from a resend) so they cannot verify or audit again.
-        sqlx::query(
-            "UPDATE auth_tokens SET used_at = now() \
-             WHERE user_id = $1 AND purpose = $2 AND used_at IS NULL",
-        )
-        .bind(id)
-        .bind(PURPOSE_VERIFY_EMAIL)
-        .execute(&mut *conn)
-        .await?;
+        mark_email_verified(conn, id).await?;
     }
     Ok(user_id)
 }
@@ -523,6 +668,22 @@ mod tests {
     }
 
     #[test]
+    fn token_lifetimes_and_purposes() {
+        assert_eq!(MAGIC_LINK_TTL.as_secs(), 15 * 60);
+        assert_eq!(PASSWORD_RESET_TTL.as_secs(), 60 * 60);
+        assert_eq!(VERIFY_EMAIL_TTL.as_secs(), 24 * 60 * 60);
+        // The names in migration 0005's CHECK list.
+        assert_eq!(
+            [
+                PURPOSE_VERIFY_EMAIL,
+                PURPOSE_MAGIC_LINK,
+                PURPOSE_PASSWORD_RESET
+            ],
+            ["verify_email", "magic_link", "password_reset"]
+        );
+    }
+
+    #[test]
     fn password_bounds() {
         assert!(validate_password(&"a".repeat(11)).is_err());
         assert!(validate_password(&"a".repeat(12)).is_ok());
@@ -568,5 +729,19 @@ mod tests {
         assert!(verify_blocking("correct horse battery", &h));
         assert!(!verify_blocking("wrong horse battery", &h));
         assert!(!verify_blocking("anything", "not a phc string"));
+        assert!(!verify_blocking("!unusable", UNUSABLE_PASSWORD_HASH));
+        assert!(PasswordHash::new(UNUSABLE_PASSWORD_HASH).is_err());
+        // The unparseable branch runs one Argon2 verification (against the
+        // dummy hash) and is never fooled by the dummy's own password.
+        let start = std::time::Instant::now();
+        assert!(!verify_blocking(
+            "not a real password: timing equaliser",
+            UNUSABLE_PASSWORD_HASH
+        ));
+        let unusable = start.elapsed();
+        let start = std::time::Instant::now();
+        assert!(!verify_blocking("wrong horse battery", &h));
+        let real = start.elapsed();
+        assert!(unusable * 4 >= real, "{unusable:?} vs {real:?}");
     }
 }

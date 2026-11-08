@@ -1,4 +1,7 @@
-import type { ReactNode } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
+import { useMutation } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import { emailRequestErrorMessage } from "@/api/auth";
 
 /** Shared look for the sign-up and sign-in forms. */
 export function Field({
@@ -64,5 +67,66 @@ export function SubmitButton({ pending, children }: { pending: boolean; children
     >
       {children}
     </button>
+  );
+}
+
+/**
+ * Asks the hub to email a link (sign-in or password reset). The hub answers
+ * the same whether or not an account has the address, so the confirmation
+ * never says which.
+ */
+export function RequestLinkForm({
+  title,
+  intro,
+  submitLabel,
+  lifetime,
+  send,
+}: {
+  title: string;
+  intro: string;
+  submitLabel: string;
+  /** How long the emailed link lasts, e.g. "15 minutes". */
+  lifetime: string;
+  send: (email: string) => Promise<void>;
+}) {
+  const [email, setEmail] = useState("");
+  const mutation = useMutation({ mutationFn: (address: string) => send(address) });
+
+  function onSubmit(e: FormEvent) {
+    e.preventDefault();
+    mutation.mutate(email);
+  }
+
+  return (
+    <section className="max-w-sm space-y-4">
+      <h1 className="text-xl font-semibold">{title}</h1>
+      {mutation.isSuccess ? (
+        <p role="status" className="text-sm text-emerald-400">
+          If an account exists for {mutation.variables}, we've emailed it a link. The link works
+          once and expires in {lifetime}.
+        </p>
+      ) : (
+        <>
+          <p className="text-sm text-slate-400">{intro}</p>
+          <form onSubmit={onSubmit} className="space-y-3">
+            <Field
+              label="Email"
+              name="email"
+              type="email"
+              autoComplete="email"
+              value={email}
+              onChange={setEmail}
+            />
+            <FormError error={mutation.error} describe={emailRequestErrorMessage} />
+            <SubmitButton pending={mutation.isPending}>{submitLabel}</SubmitButton>
+          </form>
+        </>
+      )}
+      <p className="text-sm text-slate-400">
+        <Link to="/sign-in" className="text-indigo-400 hover:underline">
+          Back to sign in
+        </Link>
+      </p>
+    </section>
   );
 }

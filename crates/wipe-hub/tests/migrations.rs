@@ -110,3 +110,51 @@ async fn unreachable_postgres_panics_with_the_compose_hint() {
     ))
     .await;
 }
+
+#[tokio::test]
+async fn auth_tokens_accept_the_story_3_purposes_only() {
+    let t = TestDb::migrated().await;
+    let org: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ('Org') RETURNING id")
+            .fetch_one(&t.pool)
+            .await
+            .unwrap();
+    let user: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO users (organization_id, email, name, password_hash, role) \
+         VALUES ($1, 'a@example.com', 'A', 'x', 'owner') RETURNING id",
+    )
+    .bind(org)
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    let insert = |n: u8, purpose: &'static str| {
+        let pool = t.pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO auth_tokens (token_hash, user_id, purpose, expires_at) \
+                 VALUES ($1, $2, $3, now())",
+            )
+            .bind(vec![n; 32])
+            .bind(user)
+            .bind(purpose)
+            .execute(&pool)
+            .await
+        }
+    };
+    for (n, purpose) in [
+        (1, "verify_email"),
+        (2, "magic_link"),
+        (3, "password_reset"),
+    ] {
+        insert(n, purpose)
+            .await
+            .unwrap_or_else(|e| panic!("{purpose}: {e}"));
+    }
+    let err = insert(4, "other").await.unwrap_err();
+    match err {
+        sqlx::Error::Database(d) => {
+            assert_eq!(d.constraint(), Some("auth_tokens_purpose_check"))
+        }
+        other => panic!("expected a CHECK violation, got {other:?}"),
+    }
+}

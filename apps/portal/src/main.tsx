@@ -11,7 +11,11 @@ import {
 } from "@tanstack/react-router";
 
 import "./index.css";
+import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
 import { HomePage } from "./pages/HomePage";
+import { MagicLinkPage } from "./pages/MagicLinkPage";
+import { ResetPasswordPage } from "./pages/ResetPasswordPage";
+import { SignInLinkPage } from "./pages/SignInLinkPage";
 import { SignInPage } from "./pages/SignInPage";
 import { SignUpPage } from "./pages/SignUpPage";
 import { VerifyEmailPage } from "./pages/VerifyEmailPage";
@@ -82,7 +86,55 @@ const verifyEmailRoute = createRoute({
   },
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, signUpRoute, signInRoute, verifyEmailRoute]);
+/** `?token=` as a string, or nothing. */
+function tokenSearch(search: Record<string, unknown>): { token?: string } {
+  return typeof search.token === "string" ? { token: search.token } : {};
+}
+
+const signInLinkRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/sign-in-link",
+  component: SignInLinkPage,
+});
+
+const forgotPasswordRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/forgot-password",
+  component: ForgotPasswordPage,
+});
+
+// The hub emails `{public_base_url}/magic-link?token=…`.
+const magicLinkRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/magic-link",
+  validateSearch: tokenSearch,
+  component: function MagicLinkRoute() {
+    const { token } = magicLinkRoute.useSearch();
+    return <MagicLinkPage token={token} />;
+  },
+});
+
+// The hub emails `{public_base_url}/reset-password?token=…`.
+const resetPasswordRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/reset-password",
+  validateSearch: tokenSearch,
+  component: function ResetPasswordRoute() {
+    const { token } = resetPasswordRoute.useSearch();
+    return <ResetPasswordPage token={token} />;
+  },
+});
+
+const routeTree = rootRoute.addChildren([
+  indexRoute,
+  signUpRoute,
+  signInRoute,
+  verifyEmailRoute,
+  signInLinkRoute,
+  forgotPasswordRoute,
+  magicLinkRoute,
+  resetPasswordRoute,
+]);
 
 const router = createRouter({ routeTree });
 

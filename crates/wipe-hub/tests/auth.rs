@@ -1,5 +1,5 @@
 //! `/api/auth/*` over real HTTP against a migrated test database and
-//! Mailpit (portal-accounts stories 1 and 2). Needs `docker compose up -d`;
+//! Mailpit (portal-accounts stories 1, 2 and 3). Needs `docker compose up -d`;
 //! fails, never skips, when the compose services are down.
 //!
 //! `Hub::post`/`post_empty` send a valid CSRF token (fetched once per hub);
@@ -229,10 +229,15 @@ async fn error_of(resp: Response) -> (StatusCode, String) {
 
 /// The `token` query parameter of the verification link in `text`.
 fn token_from_mail(text: &str, base: &str) -> String {
-    let prefix = format!("{base}/verify-email?token=");
+    token_in(text, base, "verify-email")
+}
+
+/// The `token` query parameter of the `{base}/{page}?token=` link in `text`.
+fn token_in(text: &str, base: &str, page: &str) -> String {
+    let prefix = format!("{base}/{page}?token=");
     let start = text
         .find(&prefix)
-        .unwrap_or_else(|| panic!("no verification link in {text:?}"))
+        .unwrap_or_else(|| panic!("no {page} link in {text:?}"))
         + prefix.len();
     text[start..]
         .chars()
@@ -939,6 +944,16 @@ async fn mutating_api_requests_without_a_valid_csrf_token_are_403_and_write_noth
         ),
         ("/api/auth/verification-email", None),
         ("/api/auth/sign-out-everywhere", None),
+        ("/api/auth/magic-link", Some(json!({"email": email}))),
+        (
+            "/api/auth/magic-link/sign-in",
+            Some(json!({"token": "A".repeat(43)})),
+        ),
+        ("/api/auth/password-reset", Some(json!({"email": email}))),
+        (
+            "/api/auth/password-reset/complete",
+            Some(json!({"token": "A".repeat(43), "password": PASSWORD})),
+        ),
         ("/api/nope", None),
         ("/api", None),
         ("/api/health", None),
@@ -1587,4 +1602,1236 @@ async fn a_full_but_unlocked_key_answers_retry_after_one_second() {
     assert_eq!(hub.throttle_refused(&key).await, Some(1));
     // The IP charge was refunded.
     assert_eq!(hub.throttle_failures("ip:127.0.0.1").await, Some(0));
+}
+
+// ---------------------------------------------------------------------------
+// Story 3: magic links, password reset and the email-send throttle
+
+const BASE: &str = "http://127.0.0.1:7900";
+const MAGIC: &str = "/api/auth/magic-link";
+const MAGIC_SIGN_IN: &str = "/api/auth/magic-link/sign-in";
+const RESET: &str = "/api/auth/password-reset";
+const RESET_COMPLETE: &str = "/api/auth/password-reset/complete";
+const MAIL_LOCKED: &str = "too many emails requested; try again later";
+const BAD_MAGIC: &str = "this sign-in link is invalid or has expired";
+const BAD_RESET: &str = "this password reset link is invalid or has expired";
+const NEW_PASSWORD: &str = "a brand new passphrase";
+
+impl Hub {
+    /// `POST` `{email}` to one of the two request routes.
+    async fn request(&self, path: &str, email: &str) -> Response {
+        self.post(path, json!({ "email": email }), None).await
+    }
+
+    async fn magic_sign_in(&self, token: &str, cookie: Option<&str>) -> Response {
+        self.post(MAGIC_SIGN_IN, json!({ "token": token }), cookie)
+            .await
+    }
+
+    async fn complete_reset(&self, token: &str, password: &str) -> Response {
+        self.post(
+            RESET_COMPLETE,
+            json!({ "token": token, "password": password }),
+            None,
+        )
+        .await
+    }
+
+    async fn password_hash(&self, user_id: &str) -> String {
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1::uuid")
+            .bind(user_id)
+            .fetch_one(&self.db.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn throttle_until(&self, key: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT locked_until::text FROM auth_throttle WHERE key = $1")
+            .bind(key)
+            .fetch_optional(&self.db.pool)
+            .await
+            .unwrap()
+            .flatten()
+    }
+
+    /// Wait until `table` has `n` rows: the request routes write in a
+    /// background task after answering.
+    async fn wait_for_count(&self, table: &str, n: i64) {
+        let deadline = std::time::Instant::now() + MAIL_WAIT;
+        loop {
+            let got = self.count(table).await;
+            if got == n {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{table} has {got} rows, want {n}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Move every throttle lock into the past.
+    async fn expire_locks(&self) {
+        sqlx::query("UPDATE auth_throttle SET locked_until = now() - interval '1 second'")
+            .execute(&self.db.pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// The messages to `addr` with `subject`, newest first.
+async fn messages_with_subject(addr: &str, subject: &str) -> Vec<support::MessageSummary> {
+    Mailpit::new()
+        .messages_to(addr)
+        .await
+        .into_iter()
+        .filter(|m| m.subject == subject)
+        .collect()
+}
+
+/// Wait until at least `n` messages to `addr` have `subject`, then return the
+/// tokens of their `page` links, oldest first.
+async fn mailed_tokens(addr: &str, subject: &str, page: &str, n: usize) -> Vec<String> {
+    let mailpit = Mailpit::new();
+    let deadline = std::time::Instant::now() + MAIL_WAIT;
+    loop {
+        let msgs = messages_with_subject(addr, subject).await;
+        if msgs.len() >= n {
+            let mut out = Vec::new();
+            for m in msgs.iter().rev() {
+                out.push(token_in(&mailpit.message(&m.id).await.text, BASE, page));
+            }
+            return out;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "only {} of {n} {subject:?} messages to {addr}",
+            msgs.len()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn magic_token(addr: &str) -> String {
+    mailed_tokens(addr, wipe_hub::mail::MAGIC_LINK_SUBJECT, "magic-link", 1)
+        .await
+        .pop()
+        .unwrap()
+}
+
+async fn reset_token(addr: &str) -> String {
+    mailed_tokens(
+        addr,
+        wipe_hub::mail::PASSWORD_RESET_SUBJECT,
+        "reset-password",
+        1,
+    )
+    .await
+    .pop()
+    .unwrap()
+}
+
+/// Assert `resp` is exactly the 202 `{}` both request routes answer.
+async fn assert_accepted(resp: Response) {
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert!(resp.headers().get(SET_COOKIE).is_none());
+    assert_eq!(resp.text().await.unwrap(), "{}");
+}
+
+async fn assert_mail_locked(resp: Response) -> u64 {
+    let retry = retry_after(&resp);
+    assert!((1..=3600).contains(&retry), "{retry}");
+    assert!(resp.headers().get(SET_COOKIE).is_none());
+    assert_eq!(
+        error_of(resp).await,
+        (StatusCode::TOO_MANY_REQUESTS, MAIL_LOCKED.into())
+    );
+    retry
+}
+
+fn user_of(body: &Value) -> String {
+    format!("user:{}", body["user"]["id"].as_str().unwrap())
+}
+
+#[tokio::test]
+async fn magic_link_signs_in_once() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    let (body, _) = hub.sign_up(&email).await;
+    let who = user_of(&body);
+
+    // Any spelling of the address reaches the account.
+    assert_accepted(
+        hub.request(MAGIC, &format!(" {} ", email.to_uppercase()))
+            .await,
+    )
+    .await;
+    let token = magic_token(&email).await;
+    assert_eq!(token.len(), 43);
+
+    let resp = hub.magic_sign_in(&token, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cookie = cookie_pair(&resp);
+    let account: Value = resp.json().await.unwrap();
+    assert_eq!(account["user"]["id"], body["user"]["id"]);
+    assert_eq!(account["organization"], body["organization"]);
+    let (code, me) = hub.me(Some(&cookie)).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(me["user"]["id"], body["user"]["id"]);
+
+    assert_eq!(
+        hub.audited("auth.magic_link_requested").await,
+        vec![("anonymous".to_string(), who.clone())]
+    );
+    assert_eq!(
+        hub.audit_details("auth.magic_link_requested").await[0].1,
+        json!({"peer": "ip:127.0.0.1"})
+    );
+    assert_eq!(
+        hub.audited("auth.magic_link_sign_in").await,
+        vec![(who.clone(), who)]
+    );
+
+    // Reuse is rejected and signs nobody in.
+    let sessions = hub.count("sessions").await;
+    let resp = hub.magic_sign_in(&token, None).await;
+    assert!(resp.headers().get(SET_COOKIE).is_none());
+    assert_eq!(
+        error_of(resp).await,
+        (StatusCode::BAD_REQUEST, BAD_MAGIC.into())
+    );
+    assert_eq!(hub.count("sessions").await, sessions);
+    let garbage_43 = "A".repeat(43);
+    for garbage in ["garbage", "", garbage_43.as_str()] {
+        let resp = hub.magic_sign_in(garbage, None).await;
+        assert_eq!(
+            error_of(resp).await,
+            (StatusCode::BAD_REQUEST, BAD_MAGIC.into())
+        );
+    }
+    assert_eq!(hub.audited("auth.magic_link_sign_in").await.len(), 1);
+
+    // 15 minutes, and the raw token is in no audit row.
+    let minutes: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM expires_at - created_at)::float8 / 60 FROM auth_tokens \
+         WHERE purpose = 'magic_link'",
+    )
+    .fetch_one(&hub.db.pool)
+    .await
+    .unwrap();
+    assert!((minutes - 15.0).abs() < 1e-6, "{minutes}");
+    let leaked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE strpos(detail::text || subject, $1) > 0",
+    )
+    .bind(&token)
+    .fetch_one(&hub.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(leaked, 0);
+}
+
+/// Headers other than `Date`, as sorted `(name, value)` pairs.
+fn comparable_headers(resp: &Response) -> Vec<(String, String)> {
+    let mut h: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .filter(|(n, _)| *n != reqwest::header::DATE)
+        .map(|(n, v)| (n.to_string(), v.to_str().unwrap().to_string()))
+        .collect();
+    h.sort();
+    h
+}
+
+#[tokio::test]
+async fn request_routes_answer_known_and_unknown_emails_identically() {
+    let hub = spawn_hub().await;
+    let known = unique_address();
+    let (body, _) = hub.sign_up(&known).await;
+    let before = hub.counts().await;
+
+    for path in [MAGIC, RESET] {
+        let unknown = unique_address();
+        let u = hub.request(path, &unknown).await;
+        let k = hub.request(path, &known).await;
+        let (u_parts, k_parts) = (
+            (u.status(), comparable_headers(&u)),
+            (k.status(), comparable_headers(&k)),
+        );
+        assert_eq!(u_parts, k_parts, "{path}");
+        assert_eq!(u_parts.0, StatusCode::ACCEPTED);
+        assert_eq!(u.bytes().await.unwrap(), k.bytes().await.unwrap(), "{path}");
+
+        // The known address's mail arrives; the unknown one gets none.
+        let (subject, page) = if path == MAGIC {
+            (wipe_hub::mail::MAGIC_LINK_SUBJECT, "magic-link")
+        } else {
+            (wipe_hub::mail::PASSWORD_RESET_SUBJECT, "reset-password")
+        };
+        mailed_tokens(&known, subject, page, 1).await;
+        assert!(Mailpit::new().messages_to(&unknown).await.is_empty());
+    }
+    // Only the known address got tokens and audit rows.
+    let after = hub.counts().await;
+    assert_eq!(after[0], before[0] + 2, "audit_log");
+    assert_eq!(after[4], before[4] + 2, "auth_tokens");
+    let who = user_of(&body);
+    assert_eq!(
+        hub.audited("auth.password_reset_requested").await,
+        vec![("anonymous".to_string(), who)]
+    );
+
+    // A syntactically invalid email is 400 before any throttle charge.
+    let throttle_rows = hub.count("auth_throttle").await;
+    for path in [MAGIC, RESET] {
+        let resp = hub.request(path, "not-an-email").await;
+        assert_eq!(
+            error_of(resp).await,
+            (
+                StatusCode::BAD_REQUEST,
+                "email is not a valid email address".into()
+            )
+        );
+    }
+    assert_eq!(hub.count("auth_throttle").await, throttle_rows);
+}
+
+#[tokio::test]
+async fn request_routes_answer_202_when_smtp_is_down() {
+    let hub = spawn_hub_with(closed_port().await, BASE).await;
+    let email = unique_address();
+    hub.sign_up(&email).await;
+    for path in [MAGIC, RESET] {
+        assert_accepted(hub.request(path, &email).await).await;
+    }
+    // The tokens were still issued, in the background; only the send failed.
+    hub.wait_for_count("auth_tokens", 3).await;
+    hub.wait_for_count("audit_log", 3).await;
+}
+
+#[tokio::test]
+async fn an_expired_magic_link_is_rejected() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    hub.sign_up(&email).await;
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    let token = magic_token(&email).await;
+    sqlx::query("UPDATE auth_tokens SET expires_at = now() - interval '1 second'")
+        .execute(&hub.db.pool)
+        .await
+        .unwrap();
+    let sessions = hub.count("sessions").await;
+    let resp = hub.magic_sign_in(&token, None).await;
+    assert_eq!(
+        error_of(resp).await,
+        (StatusCode::BAD_REQUEST, BAD_MAGIC.into())
+    );
+    assert_eq!(hub.count("sessions").await, sessions);
+}
+
+#[tokio::test]
+async fn a_magic_link_used_concurrently_signs_in_exactly_once() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    hub.sign_up(&email).await;
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    let token = magic_token(&email).await;
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..10 {
+        let req = hub
+            .post_req(MAGIC_SIGN_IN, None)
+            .json(&json!({ "token": token }));
+        set.spawn(async move { req.send().await.unwrap().status() });
+    }
+    let mut ok = 0;
+    while let Some(status) = set.join_next().await {
+        match status.unwrap() {
+            StatusCode::OK => ok += 1,
+            StatusCode::BAD_REQUEST => {}
+            other => panic!("unexpected {other}"),
+        }
+    }
+    assert_eq!(ok, 1);
+    assert_eq!(hub.audited("auth.magic_link_sign_in").await.len(), 1);
+}
+
+#[tokio::test]
+async fn using_one_magic_link_retires_the_others() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    hub.sign_up(&email).await;
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    let tokens = mailed_tokens(&email, wipe_hub::mail::MAGIC_LINK_SUBJECT, "magic-link", 2).await;
+    assert_ne!(tokens[0], tokens[1]);
+    assert_eq!(
+        hub.magic_sign_in(&tokens[0], None).await.status(),
+        StatusCode::OK
+    );
+    let resp = hub.magic_sign_in(&tokens[1], None).await;
+    assert_eq!(
+        error_of(resp).await,
+        (StatusCode::BAD_REQUEST, BAD_MAGIC.into())
+    );
+}
+
+#[tokio::test]
+async fn a_magic_link_gets_a_locked_out_user_back_in() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    hub.sign_up(&email).await;
+    // Verified, so the magic link keeps the password (decision 8).
+    let verification = verification_token(&email).await;
+    let resp = hub
+        .post(
+            "/api/auth/verify-email",
+            json!({"token": verification}),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let key = format!("email:{}", email.to_lowercase());
+    for _ in 0..5 {
+        hub.sign_in(&email, "wrong password!!").await;
+    }
+    assert_locked(hub.sign_in(&email, PASSWORD).await).await;
+    assert_eq!(hub.throttle_refused(&key).await, Some(1));
+
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    let token = magic_token(&email).await;
+    let resp = hub.magic_sign_in(&token, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hub.throttle_failures(&key).await, None);
+    let summary = hub.audit_details("auth.sign_in_lock_summary").await;
+    assert_eq!(summary.len(), 1, "{summary:?}");
+    assert_eq!(summary[0].0, key);
+    assert_eq!(summary[0].1["refused"], 1);
+    assert_eq!(summary[0].1["peer"], "ip:127.0.0.1");
+    // The password works again at once.
+    assert_eq!(hub.sign_in(&email, PASSWORD).await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_magic_link_verifies_the_email() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    hub.sign_up(&email).await;
+    let verification = verification_token(&email).await;
+
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    let resp = hub.magic_sign_in(&magic_token(&email).await, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let account: Value = resp.json().await.unwrap();
+    assert_eq!(account["user"]["email_verified"], json!(true));
+    // The earlier verification link was retired.
+    let resp = hub
+        .post(
+            "/api/auth/verify-email",
+            json!({"token": verification}),
+            None,
+        )
+        .await;
+    assert_eq!(error_of(resp).await.0, StatusCode::BAD_REQUEST);
+    assert!(hub.audited("auth.email_verified").await.is_empty());
+
+    // A later magic sign-in did not verify anything.
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    let second = mailed_tokens(&email, wipe_hub::mail::MAGIC_LINK_SUBJECT, "magic-link", 2)
+        .await
+        .pop()
+        .unwrap();
+    assert_eq!(
+        hub.magic_sign_in(&second, None).await.status(),
+        StatusCode::OK
+    );
+    let details: Vec<Value> = hub
+        .audit_details("auth.magic_link_sign_in")
+        .await
+        .into_iter()
+        .map(|(_, d)| d)
+        .collect();
+    assert_eq!(
+        details,
+        vec![
+            json!({"rotated": false, "email_verified": true, "sessions_ended": 1,
+                   "password_cleared": true, "peer": "ip:127.0.0.1"}),
+            json!({"rotated": false, "email_verified": false, "sessions_ended": 0,
+                   "password_cleared": false, "peer": "ip:127.0.0.1"}),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_magic_sign_in_rotates_the_incoming_session() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    let (_, a) = hub.sign_up(&email).await;
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    let resp = hub
+        .magic_sign_in(&magic_token(&email).await, Some(&a))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let b = cookie_pair(&resp);
+    assert_eq!(hub.me(Some(&a)).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(hub.me(Some(&b)).await.0, StatusCode::OK);
+    assert_eq!(
+        hub.audit_details("auth.magic_link_sign_in").await[0].1["rotated"],
+        json!(true)
+    );
+}
+
+#[tokio::test]
+async fn a_password_reset_ends_every_session_and_changes_the_password() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    let (body, first) = hub.sign_up(&email).await;
+    let second = cookie_pair(&hub.sign_in(&email, PASSWORD).await);
+    let (_, other) = hub.sign_up(&unique_address()).await;
+
+    assert_accepted(hub.request(RESET, &email).await).await;
+    let token = reset_token(&email).await;
+    let resp = hub.complete_reset(&token, NEW_PASSWORD).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cleared = set_cookie(&resp);
+    assert!(cleared.starts_with("wipehub_session=;"), "{cleared}");
+    assert!(cleared.contains("Max-Age=0"), "{cleared}");
+    assert_eq!(
+        resp.json::<Value>().await.unwrap(),
+        json!({"password_reset": true})
+    );
+
+    for c in [&first, &second] {
+        assert_eq!(hub.me(Some(c)).await.0, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(hub.me(Some(&other)).await.0, StatusCode::OK);
+    assert_eq!(
+        hub.sign_in(&email, PASSWORD).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let resp = hub.sign_in(&email, NEW_PASSWORD).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let account: Value = resp.json().await.unwrap();
+    assert_eq!(account["user"]["email_verified"], json!(true));
+
+    let who = user_of(&body);
+    assert_eq!(
+        hub.audited("auth.password_reset_requested").await,
+        vec![("anonymous".to_string(), who.clone())]
+    );
+    assert_eq!(
+        hub.audited("auth.password_reset").await,
+        vec![(who.clone(), who)]
+    );
+    assert_eq!(
+        hub.audit_details("auth.password_reset").await[0].1,
+        json!({"sessions": 2, "email_verified": true, "peer": "ip:127.0.0.1"})
+    );
+    let hours: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM expires_at - created_at)::float8 / 3600 FROM auth_tokens \
+         WHERE purpose = 'password_reset'",
+    )
+    .fetch_one(&hub.db.pool)
+    .await
+    .unwrap();
+    assert!((hours - 1.0).abs() < 1e-6, "{hours}");
+}
+
+#[tokio::test]
+async fn a_weak_reset_password_does_not_burn_the_token() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    hub.sign_up(&email).await;
+    assert_accepted(hub.request(RESET, &email).await).await;
+    let token = reset_token(&email).await;
+    let resp = hub.complete_reset(&token, "elevenchars").await;
+    assert_eq!(
+        error_of(resp).await,
+        (
+            StatusCode::BAD_REQUEST,
+            "password must be at least 12 characters".into()
+        )
+    );
+    // An invalid password with a bad token is still the password's 400.
+    let resp = hub.complete_reset("garbage", "short").await;
+    assert_eq!(
+        error_of(resp).await.1,
+        "password must be at least 12 characters"
+    );
+    assert_eq!(
+        hub.complete_reset(&token, NEW_PASSWORD).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn a_bad_reset_token_changes_nothing() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    let (body, session) = hub.sign_up(&email).await;
+    let user_id = body["user"]["id"].as_str().unwrap();
+
+    // Used.
+    assert_accepted(hub.request(RESET, &email).await).await;
+    let used = reset_token(&email).await;
+    assert_eq!(
+        hub.complete_reset(&used, NEW_PASSWORD).await.status(),
+        StatusCode::OK
+    );
+    let hash = hub.password_hash(user_id).await;
+    // Expired.
+    assert_accepted(hub.request(RESET, &email).await).await;
+    let expired = mailed_tokens(
+        &email,
+        wipe_hub::mail::PASSWORD_RESET_SUBJECT,
+        "reset-password",
+        2,
+    )
+    .await
+    .pop()
+    .unwrap();
+    sqlx::query("UPDATE auth_tokens SET expires_at = now() - interval '1 second'")
+        .execute(&hub.db.pool)
+        .await
+        .unwrap();
+    // A fresh session that a bad reset must not end.
+    let fresh = cookie_pair(&hub.sign_in(&email, NEW_PASSWORD).await);
+    let audit_rows = hub.count("audit_log").await;
+
+    let garbage_43 = "A".repeat(43);
+    for t in [
+        used.as_str(),
+        expired.as_str(),
+        "garbage",
+        garbage_43.as_str(),
+    ] {
+        let resp = hub.complete_reset(t, "yet another passphrase").await;
+        assert!(resp.headers().get(SET_COOKIE).is_none());
+        assert_eq!(
+            error_of(resp).await,
+            (StatusCode::BAD_REQUEST, BAD_RESET.into()),
+            "{t}"
+        );
+    }
+    assert_eq!(hub.password_hash(user_id).await, hash);
+    // The used and expired tokens are real: one failure row each. The
+    // garbage ones write nothing.
+    assert_eq!(hub.count("audit_log").await, audit_rows + 2);
+    let failed = hub.audit_details("auth.password_reset_failed").await;
+    let who = format!("user:{user_id}");
+    assert_eq!(
+        failed,
+        vec![
+            (
+                who.clone(),
+                json!({"reason": "used", "peer": "ip:127.0.0.1"})
+            ),
+            (
+                who.clone(),
+                json!({"reason": "expired", "peer": "ip:127.0.0.1"})
+            ),
+        ]
+    );
+    assert_eq!(
+        hub.audited("auth.password_reset_failed").await[0].0,
+        "anonymous"
+    );
+    assert_eq!(hub.me(Some(&fresh)).await.0, StatusCode::OK);
+    // The successful reset ended the sign-up session.
+    assert_eq!(hub.me(Some(&session)).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn completing_a_reset_retires_outstanding_links() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    hub.sign_up(&email).await;
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    assert_accepted(hub.request(RESET, &email).await).await;
+    assert_accepted(hub.request(RESET, &email).await).await;
+    let magic = magic_token(&email).await;
+    let resets = mailed_tokens(
+        &email,
+        wipe_hub::mail::PASSWORD_RESET_SUBJECT,
+        "reset-password",
+        2,
+    )
+    .await;
+
+    // Tokens only work for their own purpose.
+    let resp = hub.complete_reset(&magic, NEW_PASSWORD).await;
+    assert_eq!(error_of(resp).await.1, BAD_RESET);
+    let resp = hub.magic_sign_in(&resets[0], None).await;
+    assert_eq!(error_of(resp).await.1, BAD_MAGIC);
+
+    assert_eq!(
+        hub.complete_reset(&resets[1], NEW_PASSWORD).await.status(),
+        StatusCode::OK
+    );
+    let resp = hub
+        .complete_reset(&resets[0], "yet another passphrase")
+        .await;
+    assert_eq!(
+        error_of(resp).await,
+        (StatusCode::BAD_REQUEST, BAD_RESET.into())
+    );
+    let resp = hub.magic_sign_in(&magic, None).await;
+    assert_eq!(
+        error_of(resp).await,
+        (StatusCode::BAD_REQUEST, BAD_MAGIC.into())
+    );
+}
+
+#[tokio::test]
+async fn creating_a_token_purges_that_users_expired_tokens() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    hub.sign_up(&email).await;
+    hub.sign_up(&unique_address()).await;
+    sqlx::query("UPDATE auth_tokens SET expires_at = now() - interval '1 second'")
+        .execute(&hub.db.pool)
+        .await
+        .unwrap();
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    magic_token(&email).await;
+    // This user's expired verification token is gone; the other user's stays.
+    hub.wait_for_count("auth_tokens", 2).await;
+    let purposes: Vec<String> =
+        sqlx::query_scalar("SELECT purpose FROM auth_tokens ORDER BY purpose")
+            .fetch_all(&hub.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(purposes, vec!["magic_link", "verify_email"]);
+}
+
+#[tokio::test]
+async fn five_emails_per_address_then_a_one_hour_lock() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    hub.sign_up(&email).await;
+    verification_token(&email).await;
+    // Start the address's count from zero.
+    sqlx::query("DELETE FROM auth_throttle")
+        .execute(&hub.db.pool)
+        .await
+        .unwrap();
+    let key = format!("mail:to:{}", email.to_lowercase());
+
+    for i in 1..=5 {
+        let resp = hub.request(MAGIC, &email).await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED, "request {i}");
+    }
+    mailed_tokens(&email, wipe_hub::mail::MAGIC_LINK_SUBJECT, "magic-link", 5).await;
+    let before = hub.counts().await;
+    let retry = assert_mail_locked(hub.request(MAGIC, &email).await).await;
+    assert!((3590..=3600).contains(&retry), "{retry}");
+    assert_eq!(hub.counts().await, before);
+    assert_eq!(hub.throttle_refused(&key).await, Some(1));
+    // The refused request's IP charge was given back.
+    assert_eq!(hub.throttle_failures("mail:ip:127.0.0.1").await, Some(5));
+
+    let locked = hub.audit_details("auth.mail_locked").await;
+    assert_eq!(locked.len(), 1, "{locked:?}");
+    assert_eq!(locked[0].0, key);
+    assert!(locked[0].1["until"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(locked[0].1["peer"], "ip:127.0.0.1");
+    assert_eq!(hub.audited("auth.mail_locked").await[0].0, "anonymous");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        messages_with_subject(&email, wipe_hub::mail::MAGIC_LINK_SUBJECT)
+            .await
+            .len(),
+        5
+    );
+
+    // Once the lock elapses, requests are accepted again.
+    hub.expire_locks().await;
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    assert_eq!(hub.throttle_failures(&key).await, Some(1));
+    assert_eq!(hub.throttle_until(&key).await, None);
+    let summary = hub.audit_details("auth.mail_lock_summary").await;
+    assert_eq!(summary.len(), 1, "{summary:?}");
+    assert_eq!(summary[0].0, key);
+    assert_eq!(summary[0].1["refused"], 1);
+}
+
+#[tokio::test]
+async fn every_email_sending_route_shares_the_address_limit() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    let (_, session) = hub.sign_up(&email).await;
+    let sign_up = || {
+        json!({
+            "email": email.to_uppercase(),
+            "password": PASSWORD,
+            "name": "Again",
+            "organization_name": "Again Ltd",
+        })
+    };
+    let resp = hub.post("/api/auth/sign-up", sign_up(), None).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let resp = hub
+        .post_empty("/api/auth/verification-email", Some(&session))
+        .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert_accepted(hub.request(RESET, &email).await).await;
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    // Verification, resend, reset and magic link.
+    let mailpit = Mailpit::new();
+    let deadline = std::time::Instant::now() + MAIL_WAIT;
+    while mailpit.messages_to(&email).await.len() < 4 {
+        assert!(std::time::Instant::now() < deadline, "mail did not arrive");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The 6th email-sending request, on any route, is refused and writes nothing.
+    let before = hub.counts().await;
+    let orgs = hub.count("organizations").await;
+    assert_mail_locked(hub.post("/api/auth/sign-up", sign_up(), None).await).await;
+    assert_mail_locked(
+        hub.post_empty("/api/auth/verification-email", Some(&session))
+            .await,
+    )
+    .await;
+    assert_mail_locked(hub.request(RESET, &email).await).await;
+    assert_mail_locked(hub.request(MAGIC, &email).await).await;
+    assert_eq!(hub.counts().await, before);
+    assert_eq!(hub.count("organizations").await, orgs);
+    assert_eq!(
+        hub.throttle_refused(&format!("mail:to:{}", email.to_lowercase()))
+            .await,
+        Some(4)
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(mailpit.messages_to(&email).await.len(), 4);
+}
+
+#[tokio::test]
+async fn twenty_emails_from_one_ip_then_a_lock() {
+    let hub = spawn_hub().await;
+    for i in 1..=20 {
+        let resp = hub.request(MAGIC, &unique_address()).await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED, "request {i}");
+    }
+    let fresh = unique_address();
+    assert_mail_locked(hub.request(RESET, &fresh).await).await;
+    let locked = hub.audit_details("auth.mail_locked").await;
+    assert_eq!(locked.len(), 1, "{locked:?}");
+    assert_eq!(locked[0].0, "mail:ip:127.0.0.1");
+    // The IP key refused first: the address key was never touched.
+    assert_eq!(
+        hub.throttle_failures(&format!("mail:to:{fresh}")).await,
+        None
+    );
+    assert_eq!(hub.throttle_refused("mail:ip:127.0.0.1").await, Some(1));
+    // Sign-in has its own keys and is unaffected.
+    assert_eq!(
+        hub.sign_in(&fresh, PASSWORD).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn a_throttled_sign_up_creates_nothing() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    for _ in 0..5 {
+        assert_accepted(hub.request(MAGIC, &email).await).await;
+    }
+    // An invalid body is still a 400 first.
+    let resp = hub
+        .post(
+            "/api/auth/sign-up",
+            json!({"email": email, "password": "elevenchars", "name": "A", "organization_name": "O"}),
+            None,
+        )
+        .await;
+    assert_eq!(error_of(resp).await.0, StatusCode::BAD_REQUEST);
+    let resp = hub
+        .post(
+            "/api/auth/sign-up",
+            json!({"email": email, "password": PASSWORD, "name": "A", "organization_name": "O"}),
+            None,
+        )
+        .await;
+    assert_mail_locked(resp).await;
+    for table in ["organizations", "users", "sessions", "auth_tokens"] {
+        assert_eq!(hub.count(table).await, 0, "{table}");
+    }
+    assert!(hub.audited("auth.sign_up").await.is_empty());
+}
+
+#[tokio::test]
+async fn hammering_a_mail_lock_is_counted_then_summarised_once() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    let key = format!("mail:to:{email}");
+    for _ in 0..5 {
+        assert_accepted(hub.request(RESET, &email).await).await;
+    }
+    let audit_rows = hub.count("audit_log").await;
+    for _ in 0..50 {
+        assert_mail_locked(hub.request(RESET, &email).await).await;
+    }
+    assert_eq!(hub.count("audit_log").await, audit_rows);
+    assert_eq!(hub.throttle_refused(&key).await, Some(50));
+    assert_eq!(hub.throttle_failures(&key).await, Some(5));
+
+    hub.expire_locks().await;
+    assert_accepted(hub.request(RESET, &email).await).await;
+    let summary = hub.audit_details("auth.mail_lock_summary").await;
+    assert_eq!(summary.len(), 1, "{summary:?}");
+    assert_eq!(summary[0].0, key);
+    assert_eq!(summary[0].1["refused"], 50);
+    assert_eq!(summary[0].1["peer"], "ip:127.0.0.1");
+    assert_eq!(hub.audited("auth.mail_locked").await.len(), 1);
+    assert!(hub.audited("auth.sign_in_lock_summary").await.is_empty());
+}
+
+#[tokio::test]
+async fn purged_rows_are_summarised_under_their_keys_action() {
+    let hub = spawn_hub().await;
+    sqlx::query(
+        "INSERT INTO auth_throttle (key, failures, refused, window_started_at, locked_until) VALUES \
+         ('mail:to:stale@example.com', 5, 4, now() - interval '2 days', now() - interval '1 day'), \
+         ('email:stale@example.com', 5, 3, now() - interval '2 days', now() - interval '1 day')",
+    )
+    .execute(&hub.db.pool)
+    .await
+    .unwrap();
+    // A mail charge purges both stale rows.
+    assert_accepted(hub.request(MAGIC, &unique_address()).await).await;
+    let mail = hub.audit_details("auth.mail_lock_summary").await;
+    assert_eq!(mail.len(), 1, "{mail:?}");
+    assert_eq!(mail[0].0, "mail:to:stale@example.com");
+    assert_eq!(mail[0].1["refused"], 4);
+    assert!(mail[0].1.get("peer").is_none());
+    let sign_in = hub.audit_details("auth.sign_in_lock_summary").await;
+    assert_eq!(sign_in.len(), 1, "{sign_in:?}");
+    assert_eq!(sign_in[0].0, "email:stale@example.com");
+}
+
+#[tokio::test]
+async fn a_reset_clears_the_sign_in_lock() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    hub.sign_up(&email).await;
+    let key = format!("email:{}", email.to_lowercase());
+    for _ in 0..5 {
+        hub.sign_in(&email, "wrong password!!").await;
+    }
+    assert_locked(hub.sign_in(&email, PASSWORD).await).await;
+
+    assert_accepted(hub.request(RESET, &email).await).await;
+    let token = reset_token(&email).await;
+    assert_eq!(
+        hub.complete_reset(&token, NEW_PASSWORD).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(hub.throttle_failures(&key).await, None);
+    assert_eq!(
+        hub.sign_in(&email, NEW_PASSWORD).await.status(),
+        StatusCode::OK
+    );
+    let summary = hub.audit_details("auth.sign_in_lock_summary").await;
+    assert_eq!(summary.len(), 1, "{summary:?}");
+    assert_eq!(summary[0].0, key);
+}
+
+#[tokio::test]
+async fn resend_when_verified_is_409_without_a_mail_charge() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    let (_, session) = hub.sign_up(&email).await;
+    let verification = verification_token(&email).await;
+    let resp = hub
+        .post(
+            "/api/auth/verify-email",
+            json!({"token": verification}),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let to_key = format!("mail:to:{}", email.to_lowercase());
+    // Sign-up's own charge.
+    assert_eq!(hub.throttle_failures(&to_key).await, Some(1));
+    assert_eq!(hub.throttle_failures("mail:ip:127.0.0.1").await, Some(1));
+
+    let resp = hub
+        .post_empty("/api/auth/verification-email", Some(&session))
+        .await;
+    assert_eq!(
+        error_of(resp).await,
+        (
+            StatusCode::CONFLICT,
+            "this email address is already verified".into()
+        )
+    );
+    assert_eq!(hub.throttle_failures(&to_key).await, Some(1));
+    assert_eq!(hub.throttle_failures("mail:ip:127.0.0.1").await, Some(1));
+}
+
+#[tokio::test]
+async fn a_reset_completed_concurrently_succeeds_once() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    let (body, _) = hub.sign_up(&email).await;
+    assert_accepted(hub.request(RESET, &email).await).await;
+    let token = reset_token(&email).await;
+    let mut set = tokio::task::JoinSet::new();
+    for i in 0..5 {
+        let req = hub
+            .post_req(RESET_COMPLETE, None)
+            .json(&json!({ "token": token, "password": format!("{NEW_PASSWORD} {i}") }));
+        set.spawn(async move { req.send().await.unwrap().status() });
+    }
+    let (mut ok, mut bad) = (0, 0);
+    while let Some(status) = set.join_next().await {
+        match status.unwrap() {
+            StatusCode::OK => ok += 1,
+            StatusCode::BAD_REQUEST => bad += 1,
+            other => panic!("unexpected {other}"),
+        }
+    }
+    assert_eq!((ok, bad), (1, 4));
+    assert_eq!(hub.audited("auth.password_reset").await.len(), 1);
+    // Every loser held the real, now-used token, which is audited once.
+    let failed = hub.audit_details("auth.password_reset_failed").await;
+    assert_eq!(
+        failed,
+        vec![(
+            user_of(&body),
+            json!({"reason": "used", "peer": "ip:127.0.0.1"})
+        )]
+    );
+}
+
+#[tokio::test]
+async fn a_magic_link_takes_a_pre_registered_account_back_from_its_creator() {
+    let hub = spawn_hub().await;
+    let victim = unique_address();
+    // The attacker signs up with the victim's address and keeps session S;
+    // they know the password P (`PASSWORD`).
+    let (body, attacker_session) = hub.sign_up(&victim).await;
+    let user_id = body["user"]["id"].as_str().unwrap().to_string();
+
+    // The victim gets in through their mailbox, in a fresh browser.
+    assert_accepted(hub.request(MAGIC, &victim).await).await;
+    let resp = hub.magic_sign_in(&magic_token(&victim).await, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let victim_session = cookie_pair(&resp);
+
+    assert_eq!(
+        hub.me(Some(&attacker_session)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(hub.me(Some(&victim_session)).await.0, StatusCode::OK);
+    assert_eq!(
+        hub.sign_in(&victim, PASSWORD).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(hub.password_hash(&user_id).await, "!unusable");
+    assert_eq!(
+        hub.audit_details("auth.magic_link_sign_in").await[0].1,
+        json!({"rotated": false, "email_verified": true, "sessions_ended": 1,
+               "password_cleared": true, "peer": "ip:127.0.0.1"})
+    );
+
+    // A reset then sets a working password.
+    assert_accepted(hub.request(RESET, &victim).await).await;
+    let token = reset_token(&victim).await;
+    assert_eq!(
+        hub.complete_reset(&token, NEW_PASSWORD).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        hub.sign_in(&victim, NEW_PASSWORD).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn a_magic_link_on_a_verified_account_keeps_its_password_and_sessions() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    let (_, session) = hub.sign_up(&email).await;
+    let verification = verification_token(&email).await;
+    let resp = hub
+        .post(
+            "/api/auth/verify-email",
+            json!({"token": verification}),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    let resp = hub.magic_sign_in(&magic_token(&email).await, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hub.me(Some(&session)).await.0, StatusCode::OK);
+    assert_eq!(hub.sign_in(&email, PASSWORD).await.status(), StatusCode::OK);
+    assert_eq!(
+        hub.audit_details("auth.magic_link_sign_in").await[0].1,
+        json!({"rotated": false, "email_verified": false, "sessions_ended": 0,
+               "password_cleared": false, "peer": "ip:127.0.0.1"})
+    );
+}
+
+#[tokio::test]
+async fn failed_uses_of_real_magic_links_are_audited() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    let (body, _) = hub.sign_up(&email).await;
+    let who = user_of(&body);
+
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    let used = magic_token(&email).await;
+    assert_eq!(
+        hub.magic_sign_in(&used, None).await.status(),
+        StatusCode::OK
+    );
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    let expired = mailed_tokens(&email, wipe_hub::mail::MAGIC_LINK_SUBJECT, "magic-link", 2)
+        .await
+        .pop()
+        .unwrap();
+    sqlx::query("UPDATE auth_tokens SET expires_at = now() - interval '1 second'")
+        .execute(&hub.db.pool)
+        .await
+        .unwrap();
+
+    let audit_rows = hub.count("audit_log").await;
+    let garbage_43 = "A".repeat(43);
+    for t in [
+        used.as_str(),
+        expired.as_str(),
+        "garbage",
+        garbage_43.as_str(),
+    ] {
+        let resp = hub.magic_sign_in(t, None).await;
+        assert_eq!(
+            error_of(resp).await,
+            (StatusCode::BAD_REQUEST, BAD_MAGIC.into()),
+            "{t}"
+        );
+    }
+    assert_eq!(hub.count("audit_log").await, audit_rows + 2);
+    assert_eq!(
+        hub.audit_details("auth.magic_link_failed").await,
+        vec![
+            (
+                who.clone(),
+                json!({"reason": "used", "peer": "ip:127.0.0.1"})
+            ),
+            (
+                who.clone(),
+                json!({"reason": "expired", "peer": "ip:127.0.0.1"})
+            ),
+        ]
+    );
+    assert_eq!(
+        hub.audited("auth.magic_link_failed").await[0].0,
+        "anonymous"
+    );
+    // A reset token posted to the magic route is not a magic link: no row.
+    assert_accepted(hub.request(RESET, &email).await).await;
+    let reset = reset_token(&email).await;
+    let resp = hub.magic_sign_in(&reset, None).await;
+    assert_eq!(error_of(resp).await.1, BAD_MAGIC);
+    assert_eq!(hub.audited("auth.magic_link_failed").await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_reset_in_another_users_browser_ends_that_session() {
+    let hub = spawn_hub().await;
+    let a = unique_address();
+    hub.sign_up(&a).await;
+    let (_, b_session) = hub.sign_up(&unique_address()).await;
+
+    assert_accepted(hub.request(RESET, &a).await).await;
+    let token = reset_token(&a).await;
+    let resp = hub
+        .post(
+            RESET_COMPLETE,
+            json!({ "token": token, "password": NEW_PASSWORD }),
+            Some(&b_session),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(set_cookie(&resp).starts_with("wipehub_session=;"));
+    assert_eq!(hub.me(Some(&b_session)).await.0, StatusCode::UNAUTHORIZED);
+    // Only A's own sessions are counted.
+    assert_eq!(
+        hub.audit_details("auth.password_reset").await[0].1["sessions"],
+        json!(1)
+    );
+}
+
+#[tokio::test]
+async fn a_refused_send_leaves_other_stale_rows_and_the_audit_log_alone() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    for _ in 0..5 {
+        assert_accepted(hub.request(MAGIC, &email).await).await;
+    }
+    sqlx::query(
+        "INSERT INTO auth_throttle (key, failures, refused, window_started_at, locked_until) VALUES \
+         ('mail:to:stale@example.com', 5, 4, now() - interval '2 days', now() - interval '1 day')",
+    )
+    .execute(&hub.db.pool)
+    .await
+    .unwrap();
+    let audit_rows = hub.count("audit_log").await;
+    assert_mail_locked(hub.request(MAGIC, &email).await).await;
+    assert_eq!(
+        hub.throttle_refused("mail:to:stale@example.com").await,
+        Some(4)
+    );
+    assert_eq!(hub.count("audit_log").await, audit_rows);
+}
+
+#[tokio::test]
+async fn a_used_link_posted_again_and_again_is_audited_once() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    hub.sign_up(&email).await;
+    assert_accepted(hub.request(MAGIC, &email).await).await;
+    let token = magic_token(&email).await;
+    assert_eq!(
+        hub.magic_sign_in(&token, None).await.status(),
+        StatusCode::OK
+    );
+    for _ in 0..3 {
+        let resp = hub.magic_sign_in(&token, None).await;
+        assert_eq!(
+            error_of(resp).await,
+            (StatusCode::BAD_REQUEST, BAD_MAGIC.into())
+        );
+    }
+    assert_eq!(hub.audited("auth.magic_link_failed").await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_ip_window_restart_is_summarised_even_when_the_address_refuses() {
+    let hub = spawn_hub().await;
+    let email = unique_address();
+    let to_key = format!("mail:to:{email}");
+    sqlx::query(
+        "INSERT INTO auth_throttle (key, failures, refused, window_started_at, locked_until) VALUES \
+         ('mail:ip:127.0.0.1', 20, 7, now() - interval '2 hours', now() - interval '1 hour'), \
+         ($1, 5, 0, now(), now() + interval '1 hour')",
+    )
+    .bind(&to_key)
+    .execute(&hub.db.pool)
+    .await
+    .unwrap();
+
+    assert_mail_locked(hub.request(MAGIC, &email).await).await;
+    let summary = hub.audit_details("auth.mail_lock_summary").await;
+    assert_eq!(summary.len(), 1, "{summary:?}");
+    assert_eq!(summary[0].0, "mail:ip:127.0.0.1");
+    assert_eq!(summary[0].1["refused"], 7);
+    // The restarted IP window's charge was given back.
+    assert_eq!(hub.throttle_failures("mail:ip:127.0.0.1").await, Some(0));
+    assert_eq!(hub.throttle_refused(&to_key).await, Some(1));
 }
