@@ -1,0 +1,240 @@
+diff --git a/apps/desktop/src/pages/BenchSetupPage.tsx b/apps/desktop/src/pages/BenchSetupPage.tsx
+index 8677a3d..2deaed0 100644
+--- a/apps/desktop/src/pages/BenchSetupPage.tsx
++++ b/apps/desktop/src/pages/BenchSetupPage.tsx
+@@ -7,7 +7,6 @@ import {
+   ChevronRight,
+   Database,
+   Download,
+-  HardDrive,
+   Plus,
+   Save,
+   Trash2,
+@@ -580,12 +579,8 @@ function StoreBanner({
+               {status.detail}
+             </p>
+             <p className="max-w-3xl leading-relaxed text-amber-100/80">
+-              Point the station at a control plane with{" "}
+-              <code className="rounded bg-slate-900/60 px-1">
+-                --control-plane-url
+-              </code>{" "}
+-              to keep layouts centrally, or continue without persistence — the
+-              bench will work normally until this station reboots.
++              Continue without saving and the bench works normally until this
++              station reboots. Use Export to keep a copy of the layout.
+             </p>
+             <button
+               className="btn btn-ghost text-xs"
+@@ -1211,10 +1206,6 @@ function BayInspector({
+             ))}
+           </select>
+         )}
+-        <div className="flex items-center gap-2 rounded border border-slate-800 bg-slate-950/60 px-2 py-1.5 text-[10px] text-slate-500">
+-          <HardDrive className="h-3 w-3" />
+-          Learn by hot-swap and SES auto-detect land next — see ADR-0002.
+-        </div>
+       </div>
+     </div>
+   );
+diff --git a/crates/wipe-server/src/app.rs b/crates/wipe-server/src/app.rs
+index b4e0701..a009909 100644
+--- a/crates/wipe-server/src/app.rs
++++ b/crates/wipe-server/src/app.rs
+@@ -41,8 +41,9 @@ pub struct AppState {
+     /// Where saved configuration goes, and whether it survives reboot
+     /// (ADR-0003). Detected at startup, never guessed by the operator.
+     pub topology_store: Arc<dyn crate::store::TopologyStore>,
+-    /// Present only when the backend can fake hot-plug. Gates the
+-    /// `/api/sim/*` routes so a real hardware station never exposes them.
++    /// A hot-plug simulator, `Some` only when the host calls
++    /// [`AppState::with_simulator`]. The `/api/sim/*` routes are always
++    /// mounted; their handlers answer 404 while this is `None`.
+     pub simulator: Option<Arc<dyn wipe_engine::DeviceSimulator>>,
+     /// Known enclosure models (ADR-0004). Bundled data, optionally corrected
+     /// by a site-local overlay, served to the UI so the builder and the bay
+@@ -162,7 +163,8 @@ impl AppState {
+         self.license.read().clone()
+     }
+ 
+-    /// Attach a hot-plug simulator, enabling the `/api/sim/*` routes.
++    /// Attach a hot-plug simulator, so the always-mounted `/api/sim/*` routes
++    /// answer instead of returning 404.
+     pub fn with_simulator(mut self, sim: Arc<dyn wipe_engine::DeviceSimulator>) -> Self {
+         self.simulator = Some(sim);
+         self
+diff --git a/crates/wipe-server/src/handlers.rs b/crates/wipe-server/src/handlers.rs
+index 6219278..876cf2c 100644
+--- a/crates/wipe-server/src/handlers.rs
++++ b/crates/wipe-server/src/handlers.rs
+@@ -523,10 +523,11 @@ impl JobLatestErasureExt for wipe_common::ErasureEvent {
+ 
+ // ---- Simulated hot-plug -------------------------------------------------
+ //
+-// Only mounted when the backend implements `DeviceSimulator` — i.e. the mock.
+-// These exist so identify mode can be driven end to end without touching real
+-// hardware; a station running a real backend returns 404 from `with_simulator`
+-// never having been called.
++// Always mounted. They answer only when the host called
++// `AppState::with_simulator`, and return 404 otherwise — including in the
++// desktop shell, which runs the mock backend but never attaches it as a
++// simulator. These exist so identify mode can be driven end to end without
++// touching real hardware.
+ 
+ #[derive(Debug, Deserialize)]
+ pub struct SimDeviceRequest {
+diff --git a/docs/design/bench-setup-builder.md b/docs/design/bench-setup-builder.md
+index 03c51d3..625747f 100644
+--- a/docs/design/bench-setup-builder.md
++++ b/docs/design/bench-setup-builder.md
+@@ -1,7 +1,10 @@
+ # Bench setup — customer-facing bay layout builder
+ 
+ **Status:** accepted (2026-08-06). The core builder and identify mode are
+-built; SES auto-detect waits on `wipe-engine-linux`.
++built in `wipestation serve`. Not built: SES auto-detect, custom labels, and
++the Devices-page entry links (see the dated notes below). In the Tauri shell,
++identify mode does nothing useful: the shell attaches no simulator, so
++`/api/sim/devices` answers 404 there (`apps/desktop/src-tauri/src/lib.rs`).
+ 
+ Companion to [ADR-0002](../adr/0002-configurable-bay-topology.md) (the model)
+ and [ADR-0003](../adr/0003-station-config-persistence.md) (where a saved layout
+@@ -35,6 +38,13 @@ New route `/bench-setup`, reached from:
+ - the "Bench not configured" banner the bay map already shows,
+ - the "N attached devices not on the map" warning (deep-links to bindings).
+ 
++> **As built (2026-11-08).** None of the three entry links is built. The route
++> is reached only from the **Bench setup** sidebar item (`Layout.tsx`). The
++> Devices page has no **Configure bench** header button; its "Bench not
++> configured" banner names the `--bay-profile` / `--bay-topology` flags with no
++> link; and the unplaced-devices warning says "Switch to Cards" with no deep
++> link to bindings (`DevicesPage.tsx`).
++
+ ## Screen
+ 
+ Two panes. Left is structure, right is the live bay map.
+@@ -95,6 +105,11 @@ against the metal without counting squares in the preview.
+ `[Custom labels…]` is the escape hatch for benches that follow no run at all —
+ a textarea, one label per line, applied in grid order.
+ 
++> **As built (2026-11-08).** Custom labels are not built: there is no
++> `[Custom labels…]` control and no bulk-label code in `BenchSetupPage.tsx` or
++> `topologyEdit.ts`. A bench that follows no run is labelled bay by bay in the
++> inspector's **Label** field.
++
+ ## Binding: how a bay learns which drive is in it
+ 
+ This is where the product either earns trust or loses it. Positional guessing
+@@ -134,6 +149,12 @@ Four modes, in increasing order of trustworthiness:
+    this ships disabled with an explanatory tooltip rather than being hidden;
+    the `BayBinding::SesSlot` variant is already in the model for it.
+ 
++   > **As built (2026-11-08).** Not built, and not shown disabled either: the
++   > inspector offers only Auto, by path and by serial (`BenchSetupPage.tsx`),
++   > with no SES (SCSI Enclosure Services) option, button or tooltip. Nothing
++   > in the product detects slots through SES; only the
++   > `BayBinding::SesSlot` variant exists (`crates/wipe-common/src/bay.rs`).
++
+ ### As built
+ 
+ Identify mode watches the station's own device list (polled hard, 1s, while
+@@ -149,9 +170,12 @@ that claimed the same path — two bays claiming one port would make the map
+ ambiguous, and the most recent answer is the one the operator just gave with
+ their hands.
+ 
+-Because the mock backend has no hands, `DeviceSimulator` (`/api/sim/*`, mounted
+-only when the backend implements it) stands in for them, and the panel says so
+-rather than pretending the drives are real.
++Because the mock backend has no hands, `DeviceSimulator` stands in for them,
++and the panel says so rather than pretending the drives are real. The
++`/api/sim/*` routes are always mounted (`crates/wipe-server/src/app.rs`); they
++answer only when the host has called `AppState::with_simulator`, and return 404
++otherwise. `wipestation serve` attaches its mock backend that way; the Tauri
++shell does not, so identify mode has no simulator there.
+ 
+ ## Templates
+ 
+@@ -161,6 +185,13 @@ Picking one seeds the editor and everything stays editable. The menu says so:
+ > Templates are starting points, not a hardware compatibility list. Pick the
+ > closest one and change it, or start empty.
+ 
++> **As built (2026-11-08).** The menu (`TemplateMenu` in `BenchSetupPage.tsx`)
++> is its own list built in TypeScript — Empty bench, Rackmount 24 bay (4 × 6),
++> Hot-swap dock 2 bay, NVMe carrier 8 socket — not the Rust built-in presets
++> (`preset_names()` in `bay.rs`: `arma-4u-32`, `dock-2bay`, `nvme-carrier-8`).
++> The two lists differ; the 32-bay reference chassis is not offered as a
++> template. The "starting points" copy is shown as designed.
++
+ ## Validation
+ 
+ Shown live in the preview pane, never blocking typing, blocking only **Save**:
+@@ -170,6 +201,17 @@ Shown live in the preview pane, never blocking typing, blocking only **Save**:
+ | Error | Duplicate bay label within a bank; duplicate bay id; bank with 0 rows or 0 columns; unparseable custom-label list |
+ | Warning | Bay bound to a device that is not currently attached; attached device no bay claims; bench has zero bays; auto-fill on for a bench larger than ~8 bays (the point where unverified positions start to mislead) |
+ 
++> **As built (2026-11-08).** The builder runs a client-side subset
++> (`validateLocal` in `apps/desktop/src/bench/topologyEdit.ts`: duplicate
++> enclosure id, empty grid, duplicate bay label within a bank, zero bays,
++> auto-fill on more than 8 bays) plus a server dry run. The full rule set is
++> Rust `BayTopology::validate` (`bay.rs`), which also checks schema version,
++> duplicate bay id and a bay outside its bank's grid. Not built: the
++> custom-label parse error (there are no custom labels) and both
++> device-attachment warnings (bound device not attached; attached device no bay
++> claims). Unclaimed devices surface only as the Devices page's "not on the
++> map" warning, not as a validation problem.
++
+ ## Persistence
+ 
+ Per ADR-0003: **Save** does `PUT /api/bay-topology`, which validates, writes the
+@@ -177,30 +219,47 @@ JSON atomically, and hot-reloads without a restart. **Export** downloads the sam
+ document — the path for read-only/PXE stations and for rolling one layout out to
+ a fleet of identical benches. **Import** accepts it back.
+ 
+-## Model changes this needs
++> **As built (2026-11-08).** `PUT /api/bay-topology` goes through
++> `AppState::save_bay_topology`. The file store writes beside the target and
++> renames (`LocalFileStore::save` in `crates/wipe-server/src/store.rs`), so the
++> write is atomic within one filesystem. It persists only when the station has
++> a writable store tier; otherwise the save holds until restart and the page
++> says so.
++
++## Model changes this needed (all four done)
++
++When this was written, the model rendered a topology but could not round-trip
++one through an editor. Four gaps, all confirmed against the code at the time.
+ 
+-The current model renders a topology but cannot round-trip one through an
+-editor. Four gaps, all confirmed against the code:
++> **As built (2026-11-08).** All four are done; each item below names the
++> symbol that closed it.
+ 
+ 1. **Banks do not remember their numbering run.** `order`, `origin` and
+    `label_start` are arguments to `grid_bank()` and are discarded once bays are
+    generated. Re-open a saved topology and the editor cannot show — let alone
+    change — how it was numbered. Add `Bank.numbering: Option<NumberingRun>` and
+    keep the expanded `bays` authoritative so per-bay overrides survive
+-   regeneration.
++   regeneration. **Done:** `Bank.numbering: Option<NumberingRun>` (`bay.rs`).
+ 2. **`BayId` embeds the label** — `"chassis.left.7"`. Renaming a bay changes its
+    identity, silently orphaning anything that referenced it. Bay ids should be
+-   opaque and stable; the label becomes free text.
++   opaque and stable; the label becomes free text. **Done:** `grid_bank` mints
++   `"{enclosure}.{bank}.r{row}c{col}"`, independent of the label (`bay.rs`;
++   mirrored in `topologyEdit.ts`).
+ 3. **The renderer ignores per-bay form factor.** The model stores
+    `Bay.form_factor`, and `BayMap.cellSize()` reads only `Bank.form_factor` —
+    verified live: a bay overridden to `2.5in` in a `3.5in` bank draws at full
+    size. Fix: cell geometry from the bank, tray drawn inset per bay.
++   **Done:** `traySize` in `apps/desktop/src/bench/BayMap.tsx`.
+ 4. **No `revision` field** for the concurrent-edit guard ADR-0003 wants.
++   **Done:** `BayTopology.revision` (`bay.rs`), checked by
++   `AppState::save_bay_topology`.
+ 
+ Two rendering issues also want attention, neither blocking:
+ 
+ - Enclosures stack vertically, one SVG each, so a three-enclosure bench is a
+   tall column with dead space beside it. They should flow and wrap.
++  **Done (as built 2026-11-08):** enclosures sit in a `flex-wrap` row in
++  `BayMap.tsx`.
+ - Bay labels get cramped at `m2` size.
+ 
+ ## Deliberately out of scope

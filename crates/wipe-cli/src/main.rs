@@ -493,8 +493,8 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         .with_license(Arc::new(license_ctx))
         .with_topology_store(store)
         // The mock can fake hot-plug, which is what identify mode is driven
-        // by. A real backend will not implement DeviceSimulator and the
-        // /api/sim/* routes stay unavailable.
+        // by. The /api/sim/* routes are always mounted; without this call
+        // they answer 404.
         .with_simulator(backend);
     // A --bay-topology file or --bay-profile seeds the bench only when the
     // store had nothing; a saved layout is the operator's and outranks it.

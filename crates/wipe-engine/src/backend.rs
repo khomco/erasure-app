@@ -85,8 +85,9 @@ pub fn backend_err<E: std::fmt::Display>(e: E) -> WipeError {
 ///
 /// Deliberately *not* part of [`DeviceBackend`]: attaching a drive is
 /// something an operator's hands do, not something a sanitization backend
-/// offers. A real backend will never implement this, and the server only
-/// mounts the `/api/sim/*` routes when something does.
+/// offers. A real backend will never implement this. The server's
+/// `/api/sim/*` routes are always mounted and answer 404 unless a host calls
+/// `AppState::with_simulator`.
 pub trait DeviceSimulator: Send + Sync {
     /// Plug a previously-detached device back in, or the next spare from the
     /// catalog. Returns the device that appeared.

@@ -523,10 +523,9 @@ impl JobLatestErasureExt for wipe_common::ErasureEvent {
 
 // ---- Simulated hot-plug -------------------------------------------------
 //
-// Only mounted when the backend implements `DeviceSimulator` — i.e. the mock.
-// These exist so identify mode can be driven end to end without touching real
-// hardware; a station running a real backend returns 404 from `with_simulator`
-// never having been called.
+// Always mounted. They answer only when the host called
+// `AppState::with_simulator`, and return 404 otherwise. These exist so identify
+// mode can be driven end to end without touching real hardware.
 
 #[derive(Debug, Deserialize)]
 pub struct SimDeviceRequest {

@@ -79,9 +79,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(topology),
     }),
-  // Simulated hot-plug. Only present when the station runs the mock backend;
-  // a real-hardware station returns 404 and identify mode falls back to the
-  // operator physically inserting drives.
+  // Simulated hot-plug. The routes are always mounted but return 404 whenever
+  // the host attached no simulator — on real hardware and in the mock-backed
+  // desktop shell alike — and identify mode falls back to the operator
+  // physically inserting drives.
   simAttach: (device_id?: string) =>
     jsonFetch<Device>("/api/sim/devices/attach", {
       method: "POST",

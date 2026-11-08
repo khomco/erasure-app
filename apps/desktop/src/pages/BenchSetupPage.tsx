@@ -7,7 +7,6 @@ import {
   ChevronRight,
   Database,
   Download,
-  HardDrive,
   Plus,
   Save,
   Trash2,
@@ -134,8 +133,10 @@ export function BenchSetupPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["bay-topology-store"] }),
   });
 
-  // Only the mock backend simulates hot-plug; a real station 404s here and
-  // identify mode just waits for the operator's actual hands.
+  // /api/sim/* is always mounted but 404s unless the host attached a
+  // simulator (`wipestation serve` does; the desktop shell, though mock-backed,
+  // does not). Any failed query, a 404 included, hides the simulated controls
+  // and identify mode waits for the operator's actual hands.
   const detached = useQuery({
     queryKey: ["sim-detached"],
     queryFn: api.simDetached,
@@ -580,12 +581,8 @@ function StoreBanner({
               {status.detail}
             </p>
             <p className="max-w-3xl leading-relaxed text-amber-100/80">
-              Point the station at a control plane with{" "}
-              <code className="rounded bg-slate-900/60 px-1">
-                --control-plane-url
-              </code>{" "}
-              to keep layouts centrally, or continue without persistence — the
-              bench will work normally until this station reboots.
+              Continue without persistence — the bench will work normally until
+              this station reboots.
             </p>
             <button
               className="btn btn-ghost text-xs"
@@ -1211,10 +1208,6 @@ function BayInspector({
             ))}
           </select>
         )}
-        <div className="flex items-center gap-2 rounded border border-slate-800 bg-slate-950/60 px-2 py-1.5 text-[10px] text-slate-500">
-          <HardDrive className="h-3 w-3" />
-          Learn by hot-swap and SES auto-detect land next — see ADR-0002.
-        </div>
       </div>
     </div>
   );

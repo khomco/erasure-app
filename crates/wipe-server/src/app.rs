@@ -41,8 +41,9 @@ pub struct AppState {
     /// Where saved configuration goes, and whether it survives reboot
     /// (ADR-0003). Detected at startup, never guessed by the operator.
     pub topology_store: Arc<dyn crate::store::TopologyStore>,
-    /// Present only when the backend can fake hot-plug. Gates the
-    /// `/api/sim/*` routes so a real hardware station never exposes them.
+    /// A hot-plug simulator, `Some` only when the host calls
+    /// [`AppState::with_simulator`]. The `/api/sim/*` routes are always
+    /// mounted; their handlers answer 404 while this is `None`.
     pub simulator: Option<Arc<dyn wipe_engine::DeviceSimulator>>,
     /// Known enclosure models (ADR-0004). Bundled data, optionally corrected
     /// by a site-local overlay, served to the UI so the builder and the bay
@@ -162,7 +163,8 @@ impl AppState {
         self.license.read().clone()
     }
 
-    /// Attach a hot-plug simulator, enabling the `/api/sim/*` routes.
+    /// Attach a hot-plug simulator, so the always-mounted `/api/sim/*` routes
+    /// answer instead of returning 404.
     pub fn with_simulator(mut self, sim: Arc<dyn wipe_engine::DeviceSimulator>) -> Self {
         self.simulator = Some(sim);
         self
