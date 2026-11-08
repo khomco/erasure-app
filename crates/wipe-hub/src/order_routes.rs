@@ -1,11 +1,15 @@
-//! Customer catalog, checkout, orders, billing and payment-event routes
-//! (offerings-and-payments stories 2 and 3, CAP-2, CAP-3 and CAP-5):
+//! Customer catalog, checkout, orders, entitlements, billing and
+//! payment-event routes (offerings-and-payments stories 2 to 4, CAP-2 to
+//! CAP-5):
 //!
 //! - `GET /api/offerings` — any signed-in user: published offerings.
 //! - `POST /api/checkout {offering_id}` — a verified owner starts a
 //!   checkout: 201 `{order, checkout_url}` with the order `pending`.
 //! - `GET /api/orders`, `GET /api/orders/:id` — any role: the
 //!   organization's orders, newest first, or one.
+//! - `GET /api/entitlements` — any role: `{entitlements, available_seats}`,
+//!   the organization's entitlements, newest first, and the seats of those
+//!   that are current (not refunded, term not ended).
 //! - `POST /api/billing/portal` — an owner: `{url}` of the provider's
 //!   billing page for the organization's stored customer; 409
 //!   [`MSG_NO_BILLING_ACCOUNT`] before the first Stripe payment.
@@ -15,14 +19,22 @@
 //!   The event goes through [`payment_events::receive`] in one transaction
 //!   and the answer is 200 `{"received":true}`, or 503
 //!   [`MSG_EVENT_NOT_READY`] (rolled back, so the provider retries) for a
-//!   paid event whose order is not committed yet.
+//!   paid event whose order is not committed yet, or a subscription event
+//!   whose entitlement does not exist yet.
 //! - The Fake provider's hosted-page stand-in, owners only, 404 under any
 //!   other provider: `GET /api/payments/fake/sessions/:id` reads the
 //!   checkout's order; `POST …/:id/pay` and `POST …/:id/abandon` sign a
 //!   `checkout.completed` / `checkout.expired` event, run it through
 //!   `verify_event` and [`payment_events::receive`] in one transaction, and
-//!   answer the order. Pay and abandon refuse a hub whose public base URL is
-//!   not local (503).
+//!   answer the order. The session read also answers the order's
+//!   auto-renewal notice (`renewal_notice`, `null` for a one-off). Paying an
+//!   annual order starts a Fake subscription (`fake_sub_<uuid>`).
+//!   `POST /api/payments/fake/entitlements/:id/renew` and `…/cancel` sign a
+//!   `subscription.renewed` (a new `fake_in_<uuid>` invoice) /
+//!   `subscription.cancelled` event for the organization's renewing
+//!   entitlement and run it the same way; 409 [`MSG_NOT_RENEWING`] unless it
+//!   is active, renewing and has a subscription. Pay, abandon, renew and
+//!   cancel refuse a hub whose public base URL is not local (503).
 //!
 //! The organization is always the session's ([`CurrentUser`]). Another
 //! organization's order or session id is a 404 like an unknown one, and
@@ -42,10 +54,13 @@ use uuid::Uuid;
 
 use crate::accounts::{self, Role};
 use crate::auth::{is_local_host, ApiError, CurrentUser, JsonBody, MSG_NOT_SIGNED_IN};
+use crate::entitlements;
 use crate::orders::{self, ApplyError, ApplyOutcome, OrderError};
 use crate::payment_events::{self, Receipt};
 use crate::payments::{
-    Fake, ProviderError, FAKE_CHECKOUT_COMPLETED, FAKE_CHECKOUT_EXPIRED, MSG_FAKE_LOCAL_ONLY,
+    Fake, ProviderError, VerifiedEvent, FAKE_CHECKOUT_COMPLETED, FAKE_CHECKOUT_EXPIRED,
+    FAKE_INVOICE_PREFIX, FAKE_SUBSCRIPTION_CANCELLED, FAKE_SUBSCRIPTION_PREFIX,
+    FAKE_SUBSCRIPTION_RENEWED, MSG_FAKE_LOCAL_ONLY,
 };
 use crate::AppState;
 
@@ -59,6 +74,8 @@ pub const MSG_CHECKOUT_ENDED: &str = "this checkout has already ended";
 pub const MSG_PROVIDER_FAILED: &str = "the payment provider could not be reached; try again later";
 pub const MSG_NO_BILLING_ACCOUNT: &str = "billing opens after your first payment";
 pub const MSG_EVENT_NOT_READY: &str = "this payment event cannot be applied yet; retry later";
+pub const MSG_NO_ENTITLEMENT: &str = "no such entitlement";
+pub const MSG_NOT_RENEWING: &str = "this subscription is not renewing";
 
 /// The provider webhook: the one mutating `/api` route without a CSRF token.
 pub const PAYMENT_WEBHOOK_PATH: &str = "/api/payments/webhook";
@@ -69,6 +86,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/checkout", post(checkout))
         .route("/api/orders", get(list_orders))
         .route("/api/orders/:id", get(order_detail))
+        .route("/api/entitlements", get(list_entitlements))
         .route("/api/billing/portal", post(billing_portal))
         .route(PAYMENT_WEBHOOK_PATH, post(webhook))
         .route("/api/payments/fake/sessions/:id", get(fake_session))
@@ -76,6 +94,14 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/payments/fake/sessions/:id/abandon",
             post(fake_abandon),
+        )
+        .route(
+            "/api/payments/fake/entitlements/:id/renew",
+            post(fake_renew),
+        )
+        .route(
+            "/api/payments/fake/entitlements/:id/cancel",
+            post(fake_cancel),
         )
 }
 
@@ -209,6 +235,15 @@ async fn order_detail(
     Ok(Json(json!({ "order": order })))
 }
 
+async fn list_entitlements(
+    State(state): State<AppState>,
+    user: CurrentUser,
+) -> Result<Json<entitlements::Seats>, ApiError> {
+    Ok(Json(
+        entitlements::list(&state.pool, user.organization_id).await?,
+    ))
+}
+
 async fn billing_portal(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -244,8 +279,9 @@ async fn webhook(
             event_id = event.id(),
             session_id = event.session_id().unwrap_or("-"),
             order_ref = ?event.order_ref(),
-            "a paid payment event names a hub order that has no such checkout session yet; \
-             answering 503 so the provider retries"
+            event_type = event.event_type(),
+            "a payment event names a hub order whose checkout session or entitlement does \
+             not exist yet; answering 503 so the provider retries"
         );
         return Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -293,7 +329,58 @@ async fn fake_session(
     let order = orders::by_session(&mut conn, user.organization_id, "fake", &session_id)
         .await?
         .ok_or_else(|| not_found(MSG_NO_CHECKOUT))?;
-    Ok(Json(json!({ "order": order })))
+    let renewal_notice =
+        entitlements::renewal_notice_now(&order.interval, order.price_minor, &order.currency);
+    Ok(Json(
+        json!({ "order": order, "renewal_notice": renewal_notice }),
+    ))
+}
+
+/// Run a freshly signed Fake event through `verify_event` and
+/// [`payment_events::receive`] in `tx`; anything but `Applied` is a 500 (the
+/// caller holds the row lock that makes it applicable).
+async fn receive_fake(
+    state: &AppState,
+    tx: &mut sqlx::PgConnection,
+    body: &[u8],
+    signature: &str,
+) -> Result<orders::Order, ApiError> {
+    let event: VerifiedEvent = state
+        .payments
+        .verify_event(&Fake::signature_headers(signature), body)?;
+    match payment_events::receive(tx, &event, body).await? {
+        Receipt::Recorded(outcome) => match *outcome {
+            ApplyOutcome::Applied(order) => Ok(order),
+            other => Err(format!("{other:?}")),
+        },
+        other => Err(format!("{other:?}")),
+    }
+    .map_err(|got| {
+        ApiError::internal(format!(
+            "a fresh Fake event on a locked row was not applied: {got}"
+        ))
+    })
+}
+
+/// The Fake routes that sign events: owners only, under the Fake provider
+/// (else 404), on a local hub (else 503).
+fn fake_event_access(
+    state: &AppState,
+    user: &CurrentUser,
+    owner_message: &str,
+    not_found_message: &str,
+) -> Result<(), ApiError> {
+    require_owner(user, owner_message)?;
+    if state.payments.name() != "fake" {
+        return Err(not_found(not_found_message));
+    }
+    if !is_local_host(&state.config.public_base_url) {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            MSG_FAKE_LOCAL_ONLY,
+        ));
+    }
+    Ok(())
 }
 
 /// Sign a Fake `event_type` event for the organization's pending checkout
@@ -306,13 +393,7 @@ async fn fake_finish(
     session_id: &str,
     event_type: &str,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    fake_checkout_access(state, user)?;
-    if !is_local_host(&state.config.public_base_url) {
-        return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            MSG_FAKE_LOCAL_ONLY,
-        ));
-    }
+    fake_event_access(state, user, MSG_OWNER_ONLY_BUY, MSG_NO_CHECKOUT)?;
     let mut tx = state.pool.begin().await?;
     let order = orders::by_session(&mut tx, user.organization_id, "fake", session_id)
         .await?
@@ -320,22 +401,12 @@ async fn fake_finish(
     if order.status != "pending" {
         return Err(ApiError::new(StatusCode::CONFLICT, MSG_CHECKOUT_ENDED));
     }
-    let (body, signature) = Fake::signed_event(event_type, session_id);
-    let event = state
-        .payments
-        .verify_event(&Fake::signature_headers(&signature), &body)?;
-    let order = match payment_events::receive(&mut tx, &event, &body).await? {
-        Receipt::Recorded(outcome) => match *outcome {
-            ApplyOutcome::Applied(order) => Ok(order),
-            other => Err(format!("{other:?}")),
-        },
-        other => Err(format!("{other:?}")),
-    }
-    .map_err(|got| {
-        ApiError::internal(format!(
-            "a fresh Fake event on a locked pending order was not applied: {got}"
-        ))
-    })?;
+    // Paying an annual order starts a (Fake) subscription, as Stripe does.
+    let subscription = (event_type == FAKE_CHECKOUT_COMPLETED && order.interval == "annual")
+        .then(|| format!("{FAKE_SUBSCRIPTION_PREFIX}{}", Uuid::new_v4().simple()));
+    let (body, signature) =
+        Fake::signed_event_with(event_type, Some(session_id), subscription.as_deref(), None);
+    let order = receive_fake(state, &mut tx, &body, &signature).await?;
     tx.commit().await?;
     Ok(Json(json!({ "order": order })))
 }
@@ -354,4 +425,57 @@ async fn fake_abandon(
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     fake_finish(&state, &user, &session_id, FAKE_CHECKOUT_EXPIRED).await
+}
+
+/// Sign a Fake `event_type` subscription event for the organization's
+/// renewing entitlement `id` (a renewal names a new invoice), verify it and
+/// store and apply it through [`payment_events::receive`], all in one
+/// transaction holding the entitlement's row lock. Answers the entitlement
+/// after the change.
+async fn fake_subscription_event(
+    state: &AppState,
+    user: &CurrentUser,
+    id: &str,
+    event_type: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    fake_event_access(state, user, MSG_OWNER_ONLY_BILLING, MSG_NO_ENTITLEMENT)?;
+    let id = Uuid::parse_str(id).map_err(|_| not_found(MSG_NO_ENTITLEMENT))?;
+    let mut tx = state.pool.begin().await?;
+    let locked = entitlements::lock_for_organization(&mut tx, user.organization_id, id)
+        .await?
+        .ok_or_else(|| not_found(MSG_NO_ENTITLEMENT))?;
+    let subscription = match (
+        &locked.subscription_id,
+        locked.status.as_str(),
+        locked.renews,
+    ) {
+        (Some(s), "active", true) if locked.provider == "fake" => s.clone(),
+        _ => return Err(ApiError::new(StatusCode::CONFLICT, MSG_NOT_RENEWING)),
+    };
+    let invoice = (event_type == FAKE_SUBSCRIPTION_RENEWED)
+        .then(|| format!("{FAKE_INVOICE_PREFIX}{}", Uuid::new_v4().simple()));
+    let (body, signature) =
+        Fake::signed_event_with(event_type, None, Some(&subscription), invoice.as_deref());
+    receive_fake(state, &mut tx, &body, &signature).await?;
+    let entitlement = entitlements::get(&mut *tx, user.organization_id, id)
+        .await?
+        .ok_or_else(|| ApiError::internal("a locked entitlement vanished".to_string()))?;
+    tx.commit().await?;
+    Ok(Json(json!({ "entitlement": entitlement })))
+}
+
+async fn fake_renew(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    fake_subscription_event(&state, &user, &id, FAKE_SUBSCRIPTION_RENEWED).await
+}
+
+async fn fake_cancel(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    fake_subscription_event(&state, &user, &id, FAKE_SUBSCRIPTION_CANCELLED).await
 }

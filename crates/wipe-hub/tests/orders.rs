@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use support::hub::{assert_error, bootstrap_admin, spawn_hub, spawn_hub_args, Hub, Who};
 use support::stripe_mock::{spawn_stripe_hub, StripeMock};
 use uuid::Uuid;
+use wipe_hub::entitlements::renewal_notice_now;
 use wipe_hub::order_routes::{
     MSG_CHECKOUT_ENDED, MSG_NOT_FOR_SALE, MSG_NO_CHECKOUT, MSG_NO_ORDER, MSG_OWNER_ONLY_BILLING,
     MSG_OWNER_ONLY_BUY, MSG_PROVIDER_FAILED, MSG_UNVERIFIED_BUYER,
@@ -142,6 +143,7 @@ async fn the_catalog_lists_published_offerings_to_signed_in_users() {
     let f = fixture().await;
     let zeta = f.hub.published_offering("zeta plan").await;
     let alpha = f.hub.published_offering("Alpha plan").await;
+    let one_off = f.hub.published_one_off_offering("Middle plan", 24).await;
     insert_offering(&f.hub, "Retired plan", "retired").await;
     insert_offering(&f.hub, "Draft plan", "draft").await;
 
@@ -152,7 +154,16 @@ async fn the_catalog_lists_published_offerings_to_signed_in_users() {
         let v = ok_json(f.hub.get("/api/offerings", Some(&who.cookie)).await).await;
         let list = v["offerings"].as_array().unwrap();
         let ids: Vec<&str> = list.iter().map(|o| o["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, [alpha.as_str(), zeta.as_str()]);
+        assert_eq!(ids, [alpha.as_str(), one_off.as_str(), zeta.as_str()]);
+        // An annual offering carries the auto-renewal notice, dated today; a
+        // one-off carries none (story 4).
+        let notice = renewal_notice_now("annual", 120000, "USD").unwrap();
+        assert_eq!(
+            notice.headline,
+            "Renews automatically every year at 1,200.00 USD until you cancel."
+        );
+        assert_eq!(list[1]["renewal_notice"], Value::Null);
+        assert_eq!(list[1]["interval"], "one_off");
         assert_eq!(
             list[0],
             json!({
@@ -168,7 +179,8 @@ async fn the_catalog_lists_published_offerings_to_signed_in_users() {
                     "quota_erasures": null,
                     "features": ["hub_sync", "pdf_certificates"],
                     "term_months": 12
-                }
+                },
+                "renewal_notice": {"headline": notice.headline, "detail": notice.detail},
             })
         );
     }
@@ -209,6 +221,7 @@ async fn a_verified_owner_checks_out_and_the_terms_are_snapshotted() {
             "paid_at",
             "price_minor",
             "provider",
+            "refunded_at",
             "status",
             "updated_at"
         ]
@@ -481,7 +494,25 @@ async fn the_fake_page_reads_the_owners_checkout_only() {
     let (order, session) = f.bought(&offering).await;
     let path = format!("/api/payments/fake/sessions/{session}");
     let v = ok_json(f.hub.get(&path, Some(&f.owner.cookie)).await).await;
-    assert_eq!(v, json!({ "order": order }));
+    let notice = renewal_notice_now("annual", 120000, "USD").unwrap();
+    assert_eq!(
+        v,
+        json!({ "order": order, "renewal_notice": {"headline": notice.headline, "detail": notice.detail} })
+    );
+    // A one-off checkout has no notice.
+    let one_off = f.hub.published_one_off_offering("Station once", 24).await;
+    let (_, once) = f.bought(&one_off).await;
+    let v = ok_json(
+        f.hub
+            .get(
+                &format!("/api/payments/fake/sessions/{once}"),
+                Some(&f.owner.cookie),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(v["renewal_notice"], Value::Null);
+    assert_eq!(v["order"]["interval"], "one_off");
 
     let resp = f.hub.get(&path, Some(&f.member.cookie)).await;
     assert_error(resp, StatusCode::FORBIDDEN, MSG_OWNER_ONLY_BUY).await;
@@ -812,8 +843,9 @@ async fn events_that_do_not_apply_change_and_audit_nothing() {
     };
     assert_eq!(paid.status, "paid");
     assert_eq!(paid.id.to_string(), order["id"].as_str().unwrap());
+    // `order.paid` and `entitlement.granted`.
     let after_pay = f.audit_count().await;
-    assert_eq!(after_pay, before + 1);
+    assert_eq!(after_pay, before + 2);
     for kind in [FAKE_CHECKOUT_COMPLETED, FAKE_CHECKOUT_EXPIRED] {
         let again = wipe_hub::payments::apply_event(&mut conn, &verified(kind, &session))
             .await
@@ -827,16 +859,15 @@ async fn events_that_do_not_apply_change_and_audit_nothing() {
     assert_eq!(f.hub.count("billing_customers").await, 0);
 }
 
-/// The only write of `orders.status` is `orders::apply_event`.
-#[test]
-fn only_apply_event_updates_an_orders_status() {
+/// `src/*.rs` lines containing `needle`, as `file:line`.
+fn source_lines_with(needle: &str) -> Vec<String> {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
     let mut found = Vec::new();
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         let source = std::fs::read_to_string(&path).unwrap();
         for (i, line) in source.lines().enumerate() {
-            if line.contains("UPDATE orders") {
+            if line.contains(needle) {
                 found.push(format!(
                     "{}:{}",
                     path.file_name().unwrap().to_string_lossy(),
@@ -845,6 +876,14 @@ fn only_apply_event_updates_an_orders_status() {
             }
         }
     }
+    found
+}
+
+/// The only write of `orders.status` is `orders::apply_event`.
+#[test]
+fn only_apply_event_updates_an_orders_status() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let found = source_lines_with("UPDATE orders");
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].starts_with("orders.rs:"), "{found:?}");
     let source = std::fs::read_to_string(format!("{dir}/orders.rs")).unwrap();
@@ -861,6 +900,35 @@ fn only_apply_event_updates_an_orders_status() {
         .min()
         .map_or(source.len(), |i| apply + 1 + i);
     assert!(at < next_fn, "the UPDATE is not inside apply_event");
+}
+
+/// Entitlements are written only by `entitlements.rs` (story 4), and inserted
+/// only by `entitlements::grant`.
+#[test]
+fn only_the_entitlements_module_writes_entitlements() {
+    for needle in [
+        "UPDATE entitlements",
+        "INSERT INTO entitlements",
+        "INSERT INTO entitlement_renewals",
+    ] {
+        let found = source_lines_with(needle);
+        assert!(!found.is_empty(), "{needle}");
+        assert!(
+            found.iter().all(|f| f.starts_with("entitlements.rs:")),
+            "{needle}: {found:?}"
+        );
+    }
+    assert_eq!(source_lines_with("INSERT INTO entitlements ").len(), 1);
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let source = std::fs::read_to_string(format!("{dir}/entitlements.rs")).unwrap();
+    let at = source.find("INSERT INTO entitlements ").unwrap();
+    let grant = source.find("pub(crate) async fn grant").unwrap();
+    let next = source[grant + 1..].find("\npub(crate) async fn ").unwrap() + grant + 1;
+    assert!(grant < at && at < next, "the INSERT is not inside grant");
+    // `grant` is called only from `apply_event`.
+    let calls = source_lines_with("entitlements::grant(");
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].starts_with("orders.rs:"), "{calls:?}");
 }
 
 /// `apply_event` is called only from `payment_events::receive`, so every

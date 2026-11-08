@@ -8,6 +8,7 @@ import { FormError } from "./AuthForm";
 import { VerifyEmailNotice } from "./HomePage";
 import { INTERVAL_LABELS } from "./OfferingForm";
 import { grantsText } from "./OrdersPage";
+import { RenewalNoticeText } from "./RenewalNoticeText";
 
 /**
  * `/buy`: the offerings for sale. Owners with a verified email get a Buy
@@ -58,7 +59,7 @@ function Catalog({ account }: { account: Account }) {
   );
 }
 
-function OfferingCard({ offering, canBuy }: { offering: CatalogOffering; canBuy: boolean }) {
+export function OfferingCard({ offering, canBuy }: { offering: CatalogOffering; canBuy: boolean }) {
   const buy = useMutation({
     mutationFn: () => startCheckout(offering.id),
     onSuccess: ({ checkout_url }) => {
@@ -77,6 +78,7 @@ function OfferingCard({ offering, canBuy }: { offering: CatalogOffering; canBuy:
         <span className="text-slate-400">({INTERVAL_LABELS[offering.interval].toLowerCase()})</span>
       </p>
       <p className="text-slate-400">{grantsText(offering.grants)}</p>
+      {offering.renewal_notice && <RenewalNoticeText notice={offering.renewal_notice} />}
       {canBuy && (
         <button
           type="button"

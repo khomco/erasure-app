@@ -62,7 +62,7 @@
         "wipehub_organization_id": "__ORGANIZATION_ID__"
       },
       "mode": "payment",
-      "payment_intent": "pi_test_1",
+      "payment_intent": "__PAYMENT_INTENT__",
       "payment_method_types": [
         "card",
         "us_bank_account"

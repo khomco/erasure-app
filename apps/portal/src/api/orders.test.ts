@@ -2,19 +2,35 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { HubError, resetCsrfCache } from "./auth";
 import {
   abandonFakeCheckout,
+  cancelFakeEntitlement,
   fetchCatalog,
   fetchFakeCheckout,
   fetchOrder,
   fetchOrders,
+  fetchSeats,
   isCatalogOffering,
+  isEntitlement,
   isHttpUrl,
   isOrder,
+  isRenewalNotice,
+  isSeats,
   openBillingPortal,
   payFakeCheckout,
+  renewFakeEntitlement,
   startCheckout,
   type CatalogOffering,
+  type Entitlement,
   type Order,
+  type RenewalNotice,
 } from "./orders";
+
+const notice: RenewalNotice = {
+  headline: "Renews automatically every year at 1,200.00 USD until you cancel.",
+  detail:
+    "Your first year runs to 8 November 2027. Cancel any time from Billing in your account: " +
+    "your current year still runs to its end, and you will not be charged again. " +
+    "We email you before each renewal.",
+};
 
 const offering: CatalogOffering = {
   id: "0f8fad5b-d9cb-469f-a165-70867728950e",
@@ -30,6 +46,7 @@ const offering: CatalogOffering = {
     features: ["pdf_certificates"],
     term_months: 12,
   },
+  renewal_notice: notice,
 };
 
 const order: Order = {
@@ -46,6 +63,22 @@ const order: Order = {
   updated_at: "2026-11-08T10:00:00Z",
   paid_at: null,
   expired_at: null,
+  refunded_at: null,
+};
+
+const entitlement: Entitlement = {
+  id: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+  order_id: order.id,
+  offering_name: offering.name,
+  interval: "annual",
+  grants: offering.grants,
+  term_start: "2026-11-08T10:01:00Z",
+  term_end: "2027-11-08T10:01:00Z",
+  status: "active",
+  renews: true,
+  current: true,
+  cancelled_at: null,
+  refunded_at: null,
 };
 
 interface Call {
@@ -96,10 +129,45 @@ describe("guards", () => {
     expect(isCatalogOffering(offering)).toBe(true);
     expect(isOrder(order)).toBe(true);
     expect(isOrder({ ...order, status: "paid", paid_at: "2026-11-08T10:01:00Z" })).toBe(true);
+    expect(
+      isOrder({
+        ...order,
+        status: "refunded",
+        paid_at: "2026-11-08T10:01:00Z",
+        refunded_at: "2026-11-09T10:01:00Z",
+      }),
+    ).toBe(true);
+    expect(isCatalogOffering({ ...offering, interval: "one_off", renewal_notice: null })).toBe(true);
+    expect(isRenewalNotice(notice)).toBe(true);
+    expect(isEntitlement(entitlement)).toBe(true);
+    expect(
+      isEntitlement({
+        ...entitlement,
+        status: "cancelled",
+        renews: false,
+        cancelled_at: "2026-12-01T00:00:00Z",
+      }),
+    ).toBe(true);
+    expect(isSeats({ entitlements: [entitlement], available_seats: 1 })).toBe(true);
+    expect(isSeats({ entitlements: [], available_seats: 0 })).toBe(true);
+  });
+
+  it("reject malformed notices, entitlements and seat counts", () => {
+    expect(isCatalogOffering({ ...offering, renewal_notice: undefined })).toBe(false);
+    expect(isCatalogOffering({ ...offering, renewal_notice: "Renews" })).toBe(false);
+    expect(isRenewalNotice({ headline: notice.headline })).toBe(false);
+    expect(isEntitlement({ ...entitlement, status: "expired" })).toBe(false);
+    expect(isEntitlement({ ...entitlement, renews: "yes" })).toBe(false);
+    expect(isEntitlement({ ...entitlement, current: undefined })).toBe(false);
+    expect(isEntitlement({ ...entitlement, refunded_at: undefined })).toBe(false);
+    expect(isSeats({ entitlements: [entitlement], available_seats: 1.5 })).toBe(false);
+    expect(isSeats({ entitlements: [{ ...entitlement, id: 1 }], available_seats: 1 })).toBe(false);
+    expect(isSeats({ available_seats: 1 })).toBe(false);
   });
 
   it("reject unknown statuses, providers, intervals and float prices", () => {
-    expect(isOrder({ ...order, status: "refunded" })).toBe(false);
+    expect(isOrder({ ...order, status: "cancelled" })).toBe(false);
+    expect(isOrder({ ...order, refunded_at: undefined })).toBe(false);
     expect(isOrder({ ...order, provider: "paypal" })).toBe(false);
     expect(isOrder({ ...order, interval: "monthly" })).toBe(false);
     expect(isOrder({ ...order, price_minor: 12.5 })).toBe(false);
@@ -146,13 +214,20 @@ describe("calls", () => {
     const one = respond(200, { order });
     expect(await fetchOrder("a/b", one.impl)).toEqual(order);
     expect(one.calls).toEqual([{ url: "/api/orders/a%2Fb", method: "GET", body: undefined, csrf: null }]);
-    const bad = respond(200, { orders: [{ ...order, status: "refunded" }] });
+    const bad = respond(200, { orders: [{ ...order, status: "cancelled" }] });
     expect(await rejection(fetchOrders(bad.impl))).toBeInstanceOf(Error);
   });
 
   it("drives the test checkout page", async () => {
-    const read = respond(200, { order });
-    expect(await fetchFakeCheckout("fake_cs_1", read.impl)).toEqual(order);
+    const read = respond(200, { order, renewal_notice: notice });
+    expect(await fetchFakeCheckout("fake_cs_1", read.impl)).toEqual({
+      order,
+      renewal_notice: notice,
+    });
+    const oneOff = respond(200, { order: { ...order, interval: "one_off" }, renewal_notice: null });
+    expect((await fetchFakeCheckout("fake_cs_2", oneOff.impl)).renewal_notice).toBeNull();
+    const noNotice = respond(200, { order });
+    expect(await rejection(fetchFakeCheckout("fake_cs_3", noNotice.impl))).toBeInstanceOf(Error);
     expect(read.calls).toEqual([
       { url: "/api/payments/fake/sessions/fake_cs_1", method: "GET", body: undefined, csrf: null },
     ]);
@@ -184,5 +259,45 @@ describe("calls", () => {
     expect(f.calls).toEqual([
       { url: "/api/billing/portal", method: "POST", body: {}, csrf: "csrf-1" },
     ]);
+  });
+
+  it("reads licence seats with a GET", async () => {
+    const seats = { entitlements: [entitlement], available_seats: 1 };
+    const f = respond(200, seats);
+    expect(await fetchSeats(f.impl)).toEqual(seats);
+    expect(f.calls).toEqual([
+      { url: "/api/entitlements", method: "GET", body: undefined, csrf: null },
+    ]);
+    const bad = respond(200, { entitlements: [entitlement] });
+    expect(await rejection(fetchSeats(bad.impl))).toBeInstanceOf(Error);
+  });
+
+  it("drives the test billing page's renew and cancel", async () => {
+    const renewed = { ...entitlement, term_end: "2028-11-08T10:01:00Z" };
+    const renew = respond(200, { entitlement: renewed });
+    expect(await renewFakeEntitlement("a/b", renew.impl)).toEqual(renewed);
+    expect(renew.calls).toEqual([
+      {
+        url: "/api/payments/fake/entitlements/a%2Fb/renew",
+        method: "POST",
+        body: {},
+        csrf: "csrf-1",
+      },
+    ]);
+    const stopped = { ...entitlement, renews: false };
+    const cancel = respond(200, { entitlement: stopped });
+    expect(await cancelFakeEntitlement(entitlement.id, cancel.impl)).toEqual(stopped);
+    expect(cancel.calls).toEqual([
+      {
+        url: `/api/payments/fake/entitlements/${entitlement.id}/cancel`,
+        method: "POST",
+        body: {},
+        csrf: "csrf-1",
+      },
+    ]);
+    const refused = respond(409, { error: "this subscription is not renewing" });
+    const err = await rejection(renewFakeEntitlement(entitlement.id, refused.impl));
+    expect((err as HubError).status).toBe(409);
+    expect((err as HubError).message).toBe("this subscription is not renewing");
   });
 });

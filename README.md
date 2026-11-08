@@ -45,9 +45,9 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
 | `wipe-fleet` | mDNS service advertise / browse + deterministic lead election |
 | `wipe-server` | Axum REST API + WebSocket event stream; auto-signs certs when a Job reaches `Erased` or `PendingCoSign`; destruction-manifest assembly and co-sign |
 | `wipe-cli` | `wipestation serve / inspect / verify-cert` binary |
-| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, profile and password change, organization rename and team management (owners invite by emailed single-use link, change roles between `owner` and `member`, and remove members; an organization always keeps an owner), a per-address and per-IP limit on every email it sends (5 per address, 20 per IP per hour; invitations also 20 per organization per hour), every auth event audited, and `wipe-hub admin create --email <address>`, which creates a vendor admin in the one vendor organization and emails them a set-password link (never a password on the command line), for an admin area under `/api/admin/*` (search customer organizations and users, view one organization, and list, view, set the status of, annotate, export as CSV and erase sales leads, and create, edit, publish and retire offerings (price in integer minor units, one-off or annual, and grants: licence scope, seats, erasure quota, `wipe_license::Feature` entitlements, term), whose price and grants freeze once published; vendor admins with a verified email only, and every search, view, export and change audited, with ids only and never a sales lead's personal data), and sales leads from the marketing site's forms (`POST /api/leads` behind credentialed CORS for the one `--site-origin` and the usual CSRF token, with a per-IP limit of 10 an hour, a honeypot, one lead per address, the exact consent text stored with every submission, a confirmation email whose link unsubscribes via the portal's `/unsubscribe` page, and lead audit rows that hold no personal data). `tests/isolation.rs` checks that one organization's owner and member never see or change another organization's records through any customer route, and fails when a new `/api` route is left unclassified. Customers buy through a `PaymentProvider` seam (`--payment-provider fake|stripe`): a signed-in catalog of published offerings (`GET /api/offerings`), checkout by an organization owner with a verified email (`POST /api/checkout`, creating a `pending` order that snapshots the offering's terms), orders for every role (`GET /api/orders[/{id}]`) and billing for owners (`POST /api/billing/portal`); an order becomes `paid` or `expired` only by applying a provider event whose signature the provider verified, and every order state change is audited. The `fake` provider (the default) works only on a local `--public-base-url` and drives the portal's test checkout page; `stripe` (which needs `WIPE_HUB_STRIPE_SECRET_KEY` and `WIPE_HUB_STRIPE_WEBHOOK_SECRET`) creates Stripe Checkout Sessions (a single payment; no email or other personal data sent) and opens the Stripe billing portal once the organization's first payment has told the hub its billing customer (its Stripe customer; 409 before that). Provider events arrive at `POST /api/payments/webhook` (no CSRF token: the `Stripe-Signature`, or Fake's signature on a local hub, is the credential); each is stored once by provider and event id in an append-only `payment_events` table (metadata and the payload's SHA-256 only, never the payload) and applied in the same transaction, so a replayed event changes nothing, and a paid event that disagrees with its order's price, currency or order id leaves the order pending. See [Stripe test mode](#stripe-test-mode). Fulfilment and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
+| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, profile and password change, organization rename and team management (owners invite by emailed single-use link, change roles between `owner` and `member`, and remove members; an organization always keeps an owner), a per-address and per-IP limit on every email it sends (5 per address, 20 per IP per hour; invitations also 20 per organization per hour), every auth event audited, and `wipe-hub admin create --email <address>`, which creates a vendor admin in the one vendor organization and emails them a set-password link (never a password on the command line), for an admin area under `/api/admin/*` (search customer organizations and users, view one organization, and list, view, set the status of, annotate, export as CSV and erase sales leads, and create, edit, publish and retire offerings (price in integer minor units, one-off or annual, and grants: licence scope, seats, erasure quota, `wipe_license::Feature` entitlements, term), whose price and grants freeze once published; vendor admins with a verified email only, and every search, view, export and change audited, with ids only and never a sales lead's personal data), and sales leads from the marketing site's forms (`POST /api/leads` behind credentialed CORS for the one `--site-origin` and the usual CSRF token, with a per-IP limit of 10 an hour, a honeypot, one lead per address, the exact consent text stored with every submission, a confirmation email whose link unsubscribes via the portal's `/unsubscribe` page, and lead audit rows that hold no personal data). `tests/isolation.rs` checks that one organization's owner and member never see or change another organization's records through any customer route, and fails when a new `/api` route is left unclassified. Customers buy through a `PaymentProvider` seam (`--payment-provider fake|stripe`): a signed-in catalog of published offerings (`GET /api/offerings`), checkout by an organization owner with a verified email (`POST /api/checkout`, creating a `pending` order that snapshots the offering's terms), orders for every role (`GET /api/orders[/{id}]`) and billing for owners (`POST /api/billing/portal`); an order becomes `paid` or `expired` only by applying a provider event whose signature the provider verified, and every order state change is audited. The `fake` provider (the default) works only on a local `--public-base-url` and drives the portal's test checkout page; `stripe` (which needs `WIPE_HUB_STRIPE_SECRET_KEY` and `WIPE_HUB_STRIPE_WEBHOOK_SECRET`) creates Stripe Checkout Sessions (a single payment for a one-off offering, a yearly subscription for an annual one; no email or other personal data sent) and opens the Stripe billing portal once the organization's first payment has told the hub its billing customer (its Stripe customer; 409 before that). Provider events arrive at `POST /api/payments/webhook` (no CSRF token: the `Stripe-Signature`, or Fake's signature on a local hub, is the credential); each is stored once by provider and event id in an append-only `payment_events` table (metadata and the payload's SHA-256 only, never the payload) and applied in the same transaction, so a replayed event changes nothing, and a paid event that disagrees with its order's price, currency or order id leaves the order pending. Fulfilment: the paid transition creates the order's one **entitlement** in the same transaction (its seats, scope, quota and features read from the order's snapshot, a term from the payment for the offering's term), listed with the organization's available licence seats at `GET /api/entitlements` (any role; seats of entitlements not refunded and whose term has not ended). An annual offering is a subscription: each paid renewal invoice (`invoice.paid`, `subscription_cycle`) extends the term by 12 months, once per invoice; an owner cancelling at period end in the billing portal stops renewal (`customer.subscription.updated`), Stripe ending the subscription marks the entitlement `cancelled` with its term running to its end (`customer.subscription.deleted`), and a full refund (`charge.refunded`) marks the entitlement and its order `refunded`, which withdraws its seats; none of these touches an issued licence. The owner-approved auto-renewal notice is built by the hub and shown on `/buy`, the test checkout and Stripe's checkout page. The Fake provider adds owner-only test actions, `POST /api/payments/fake/entitlements/{id}/renew` and `/cancel`. See [Stripe test mode](#stripe-test-mode). Licence delivery is not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
 | `apps/desktop` | Vite + React + TanStack Router + Tailwind frontend, plus Tauri 2 shell |
-| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in, email-verification, sign-in-link (magic link), password-reset, accept-invitation and sales-lead unsubscribe (`/unsubscribe`, acting only on a button press) pages, an account page (name, password change), an organization page (rename, members, invitations, roles and removal for owners), an admin area for vendor admins (`/admin`: organization and user search, run only on submit since each is audited; `/admin/organizations/$id`: one organization and its users; `/admin/leads`: sales leads filtered by segment, status and submission date, with CSV export; `/admin/leads/$id`: one sales lead's submissions and consent text, status, notes and erasure; `/admin/offerings`: every offering and a new-draft form; `/admin/offerings/$id`: edit, publish and retire one offering), buying (`/buy`, the offerings for sale with a Buy button for verified owners; `/orders` with Billing for owners; `/orders/$id`, re-read every 3 s while pending; the test provider's `/checkout/fake`, labelled "Test payment: no money moves", and `/billing/fake`), and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere, and a link to the admin area for vendor admins); its API client sends the hub's CSRF token on every POST |
+| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in, email-verification, sign-in-link (magic link), password-reset, accept-invitation and sales-lead unsubscribe (`/unsubscribe`, acting only on a button press) pages, an account page (name, password change), an organization page (rename, members, invitations, roles and removal for owners), an admin area for vendor admins (`/admin`: organization and user search, run only on submit since each is audited; `/admin/organizations/$id`: one organization and its users; `/admin/leads`: sales leads filtered by segment, status and submission date, with CSV export; `/admin/leads/$id`: one sales lead's submissions and consent text, status, notes and erasure; `/admin/offerings`: every offering and a new-draft form; `/admin/offerings/$id`: edit, publish and retire one offering), buying (`/buy`, the offerings for sale with a Buy button for verified owners and an annual offering's auto-renewal notice; `/orders` with Billing for owners; `/orders/$id`, re-read every 3 s while pending; `/seats`, "Licence seats": the organization's available seats and entitlements; the test provider's `/checkout/fake`, labelled "Test payment: no money moves", and `/billing/fake`, which lists renewing subscriptions with "Renew now (test)" and "Cancel (test)"), and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere, and a link to the admin area for vendor admins); its API client sends the hub's CSRF token on every POST |
 | `sites/www` | Static Astro + Tailwind marketing site (pre-launch): landing, product, standards, segment (ITAD, enterprise IT, government), pricing, contact, privacy and terms pages, `/capabilities`, and early-access/contact forms that stay closed (no script, disabled button) unless the build is given `PUBLIC_HUB_ORIGIN`, when a small script posts them to the hub's `POST /api/leads` (`astro build` refuses that while the privacy notice is a placeholder); a build-time check fails `astro build` on any capability overclaim, missing meta/OG tag, missing sitemap, or resource loaded from another origin (ADR-0006 §2). See [`sites/www/README.md`](sites/www/README.md) |
 
 ## Quick start
@@ -112,7 +112,18 @@ stripe listen --forward-to localhost:7900/api/payments/webhook
 
 Buy an offering from the portal's `/buy` as a verified owner, pay on Stripe's
 page with a test card (`4242 4242 4242 4242`), and the order turns `paid` when
-`checkout.session.completed` arrives, not when the browser returns.
+`checkout.session.completed` arrives, not when the browser returns; `/seats`
+then shows its seats. An annual offering is a Stripe subscription; cancel it
+from Billing to see renewal stop. To see a renewal without waiting a year,
+either use the Fake provider's "Renew now (test)" on `/billing/fake`, or use a
+[test clock](https://docs.stripe.com/billing/testing/test-clocks). A test clock
+moves only customers created on it, and the hub checks out with the
+organization's stored billing customer (or a new one), never a clock's. So
+create a customer on a clock in the Dashboard, make it the organization's
+billing customer in your local database after one purchase (`UPDATE
+billing_customers SET customer_id = 'cus_…', updated_at = now() WHERE
+organization_id = '…' AND provider = 'stripe'`), buy the annual offering again,
+then advance the clock past a year.
 `--stripe-api-base` / `WIPE_HUB_STRIPE_API_BASE` (default
 `https://api.stripe.com`) accepts only https, or http on a local host.
 
@@ -123,10 +134,12 @@ checkout as not its own (stored as `unmatched` and acknowledged). Give each hub
 a distinct public origin.
 
 **Production webhook.** In the Stripe Dashboard, register
-`https://<hub>/api/payments/webhook` as an endpoint, enable only the four
+`https://<hub>/api/payments/webhook` as an endpoint, enable only the eight
 events the hub reads (`checkout.session.completed`,
 `checkout.session.async_payment_succeeded`,
-`checkout.session.async_payment_failed`, `checkout.session.expired`), set the
+`checkout.session.async_payment_failed`, `checkout.session.expired`,
+`invoice.paid`, `customer.subscription.updated`,
+`customer.subscription.deleted`, `charge.refunded`), set the
 endpoint's API version to `2024-06-20` (the version the hub pins and parses),
 and give the hub that endpoint's own `whsec_…` signing secret as
 `WIPE_HUB_STRIPE_WEBHOOK_SECRET`. Other event types are stored as `ignored` and
@@ -136,12 +149,65 @@ decision (`.scratch/DECISIONS.md` D14, ADR-0007 "Not decided here").
 **Billing portal.** Save the billing portal's default configuration in the
 Stripe Dashboard (Settings → Billing → Customer portal), once in test mode and
 once in live mode, before anyone presses Billing: until then Stripe refuses
-`POST /v1/billing_portal/sessions` and Billing answers 502.
+`POST /v1/billing_portal/sessions` and Billing answers 502. In that
+configuration, allow cancelling subscriptions **at the end of the billing
+period only** (never immediately, which would end a year the customer paid
+for), and do not allow switching plans or changing quantities: the hub grants
+exactly what the order bought.
+
+**Renewal reminders.** The auto-renewal notice customers see promises "We
+email you before each renewal". Turn on Settings → Billing → Subscriptions and
+emails → "Send emails about upcoming renewals" in both modes; the hub sends no
+such email itself. Leave Stripe's retries and failed-payment emails on: a
+failed renewal charge is handled by Stripe, and if Stripe then cancels the
+subscription the hub records it like a cancellation.
+
+**Failed payments.** Under Settings → Billing → Subscriptions and emails →
+"Manage failed payments", set what happens after all retries fail to **cancel
+the subscription**, in both modes. Otherwise the subscription stays `past_due`
+or `unpaid`, no `customer.subscription.deleted` arrives, and the hub keeps
+showing the entitlement as renewing although nobody pays for it.
+
+**Mismatched checkouts.** A paid subscription checkout whose amount, currency
+or order disagrees with the hub's order is stored `mismatch` (logged at error)
+and grants nothing, but Stripe has already started the subscription. Cancel
+that subscription in the Dashboard (and refund it if appropriate), or it keeps
+charging; each later renewal is logged at error as a paid renewal that matches
+no entitlement.
+
+**Refunds.** Refund in the Stripe Dashboard. Only a full refund of a charge
+(`refunded=true`) is acted on: it marks the entitlement and its order
+`refunded` and withdraws its seats, while a partial refund is a goodwill credit
+the hub ignores. Refunding any one payment of a subscription (its first
+payment or any renewal) refunds the whole entitlement and its order. When
+refunding any payment of a subscription, also cancel the subscription:
+otherwise Stripe keeps charging, and the hub logs each later renewal of a
+refunded or cancelled entitlement at error without extending it, for you to
+refund. A lost dispute (chargeback) is not read by the hub: after losing one,
+refund or cancel in Stripe yourself. No refund or cancellation ever revokes or
+shortens a licence already issued.
+
+**Known gaps.**
+- A renewing entitlement is not current (its seats are not counted) between
+  its `term_end` and Stripe's renewal charge: about an hour after the new
+  period starts, longer while Stripe retries a failed charge.
+- Orders paid before migration 0013 have no entitlement (no backfill; no hub
+  took live payments before it).
+- Renewals are read in both invoice shapes: API version `2024-06-20`
+  (`invoice.subscription`) and newer ones
+  (`invoice.parent.subscription_details`). Refund matching of subscription
+  payments needs `charge.invoice`, which newer versions drop, so keep the
+  webhook endpoint at `2024-06-20` as above, and run `stripe listen` on an
+  account whose default API version is `2024-06-20` (pass `--latest` only
+  knowing that subscription refunds will then be stored `unmatched`).
 
 The fixtures in `crates/wipe-hub/tests/fixtures/stripe/` are hand-built from
 Stripe's documented event shapes (API version `2024-06-20`) with `__EVENT_ID__`,
-`__SESSION_ID__`, `__ORDER_ID__`, `__ORGANIZATION_ID__`, `__HUB__`, `__AMOUNT__`
-and `__CURRENCY__` placeholders. To re-record one, run `stripe listen --print-json`
+`__SESSION_ID__`, `__ORDER_ID__`, `__ORGANIZATION_ID__`, `__HUB__`, `__AMOUNT__`,
+`__CURRENCY__`, `__SUBSCRIPTION_ID__`, `__INVOICE_ID__`, `__PAYMENT_INTENT__`,
+`__CANCEL_AT_PERIOD_END__`, `__CREATED__`, `__REFUNDED__` and
+`__AMOUNT_REFUNDED__` placeholders (`invoice.paid.parent.json` is a renewal
+invoice in the newer `parent.subscription_details` shape). To re-record one, run `stripe listen --print-json`
 while completing a test checkout (or `stripe trigger checkout.session.completed`),
 copy the event, and replace those values with the placeholders. Remove anything
 else that identifies a real account.

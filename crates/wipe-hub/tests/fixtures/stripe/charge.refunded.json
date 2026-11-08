@@ -1,0 +1,47 @@
+{
+  "id": "__EVENT_ID__",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": __CREATED__,
+  "data": {
+    "object": {
+      "id": "ch_test_1",
+      "object": "charge",
+      "amount": __AMOUNT__,
+      "amount_captured": __AMOUNT__,
+      "amount_refunded": __AMOUNT_REFUNDED__,
+      "billing_details": {
+        "email": "buyer@example.com",
+        "name": "Test Buyer",
+        "address": null,
+        "phone": null
+      },
+      "captured": true,
+      "created": 1731024000,
+      "currency": "__CURRENCY__",
+      "customer": "cus_test_1",
+      "invoice": "__INVOICE_ID__",
+      "livemode": false,
+      "metadata": {},
+      "paid": true,
+      "payment_intent": "__PAYMENT_INTENT__",
+      "payment_method_details": {
+        "card": {
+          "brand": "visa",
+          "last4": "4242"
+        },
+        "type": "card"
+      },
+      "receipt_email": "buyer@example.com",
+      "refunded": __REFUNDED__,
+      "status": "succeeded"
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "charge.refunded"
+}

@@ -1,19 +1,25 @@
 //! The Stripe payment provider (ADR-0007 §4; offerings-and-payments story 3).
 //!
-//! - **Checkout**: `POST /v1/checkout/sessions` in `mode=payment` (annual
-//!   offerings are charged once; renewal is story 4), one line item priced
+//! - **Checkout**: `POST /v1/checkout/sessions` in `mode=payment` for a
+//!   one-off offering, or `mode=subscription` with a yearly price for an
+//!   annual one (story 4, owner decision D15), one line item priced
 //!   from the order's snapshot, `client_reference_id` and
 //!   `metadata[wipehub_order_id]` naming the hub's order (only the metadata
 //!   is read back from events, decision 9), `metadata[wipehub_hub]` naming
 //!   this hub's public origin (decision 11), and either the
-//!   organization's stored `customer` or `customer_creation=always`. No email
+//!   organization's stored `customer` or, for a one-off,
+//!   `customer_creation=always` (Stripe refuses it in subscription mode,
+//!   where it always creates a customer). A subscription also carries
+//!   `subscription_data[metadata]` (the same three values, so its invoices
+//!   and subscription events name the order) and the owner-approved
+//!   auto-renewal notice as `custom_text[submit][message]`. No email
 //!   or other personal data is sent. It carries `Idempotency-Key:
 //!   wipehub-checkout-<order id>`, so a repeated identical request returns
 //!   the same session rather than a second one. The hub itself does not
 //!   retry, with one exception: when Stripe answers that a stored customer
 //!   is missing (`resource_missing` on `customer`, for example after the
 //!   vendor deleted it), the request is sent once more with
-//!   `customer_creation=always` and the key
+//!   no `customer` (and `customer_creation=always` for a one-off) and the key
 //!   `wipehub-checkout-<order id>-new-customer`. The paid event then names the
 //!   new customer, which replaces the stored one.
 //! - **Billing**: `POST /v1/billing_portal/sessions` for the stored customer,
@@ -23,10 +29,11 @@
 //!   the first paid event and never creates empty Stripe customers.
 //! - **Events**: `Stripe-Signature` is verified with Stripe's documented
 //!   scheme ([`verify_signature`]) before the body is parsed. Only `id`,
-//!   `type` and a few `data.object` fields of a Checkout Session are read
-//!   ([`EventKind`] mapping in [`Stripe::verify_event`]). An event names one
-//!   of this hub's orders only when its `wipehub_hub` is this hub's origin,
-//!   so several hubs can share one Stripe account.
+//!   `type`, `created` and a few `data.object` fields of a Checkout Session,
+//!   an Invoice, a Subscription or a Charge are read ([`EventKind`] mapping
+//!   in [`parse_event`]). An event names one of this hub's orders only when
+//!   its `wipehub_hub` is this hub's origin, so several hubs can share one
+//!   Stripe account.
 //!
 //! Every API call sends `Authorization: Bearer <key>`, `Stripe-Version:
 //! 2024-06-20` and a form body, over one `reqwest` client with a 5 s connect
@@ -47,7 +54,7 @@ use uuid::Uuid;
 
 use crate::csrf::constant_time_eq;
 use crate::payments::{
-    page_url, CheckoutOrder, CheckoutSession, EventKind, HmacSha256, PaymentProvider,
+    page_url, CheckoutOrder, CheckoutSession, EventFields, EventKind, HmacSha256, PaymentProvider,
     ProviderError, VerifiedEvent, MAX_EVENT_FIELD,
 };
 
@@ -67,6 +74,12 @@ pub const CHECKOUT_SESSION_COMPLETED: &str = "checkout.session.completed";
 pub const CHECKOUT_SESSION_ASYNC_SUCCEEDED: &str = "checkout.session.async_payment_succeeded";
 pub const CHECKOUT_SESSION_ASYNC_FAILED: &str = "checkout.session.async_payment_failed";
 pub const CHECKOUT_SESSION_EXPIRED: &str = "checkout.session.expired";
+pub const INVOICE_PAID: &str = "invoice.paid";
+pub const CUSTOMER_SUBSCRIPTION_UPDATED: &str = "customer.subscription.updated";
+pub const CUSTOMER_SUBSCRIPTION_DELETED: &str = "customer.subscription.deleted";
+pub const CHARGE_REFUNDED: &str = "charge.refunded";
+/// The `billing_reason` of a subscription's renewal invoice.
+pub const BILLING_REASON_CYCLE: &str = "subscription_cycle";
 
 /// The Stripe provider.
 pub struct Stripe {
@@ -143,6 +156,78 @@ impl Stripe {
     /// `{api_base}/{path}`, keeping any base path.
     fn api_url(&self, path: &str) -> Url {
         page_url(&self.api_base, path)
+    }
+
+    /// The Checkout Session form for `order`: `mode=payment` for a one-off,
+    /// or `mode=subscription` with a yearly price, `subscription_data`
+    /// metadata and the auto-renewal notice for an annual offering. With
+    /// `customer`, it is sent; without, a one-off asks Stripe to create one
+    /// (`customer_creation=always`, which Stripe refuses in subscription
+    /// mode, where it always creates one).
+    fn checkout_form(
+        &self,
+        order: &CheckoutOrder,
+        customer: Option<&str>,
+    ) -> Vec<(&'static str, String)> {
+        let page = page_url(&self.public_base_url, &format!("orders/{}", order.order_id));
+        let annual = order.is_annual();
+        let mut form: Vec<(&'static str, String)> = vec![
+            (
+                "mode",
+                if annual { "subscription" } else { "payment" }.into(),
+            ),
+            ("client_reference_id", order.order_id.to_string()),
+            ("success_url", page.to_string()),
+            ("cancel_url", page.to_string()),
+            ("line_items[0][quantity]", "1".into()),
+            (
+                "line_items[0][price_data][currency]",
+                order.currency.to_ascii_lowercase(),
+            ),
+            (
+                "line_items[0][price_data][unit_amount]",
+                order.price_minor.to_string(),
+            ),
+            (
+                "line_items[0][price_data][product_data][name]",
+                order.offering_name.clone(),
+            ),
+            ("metadata[wipehub_order_id]", order.order_id.to_string()),
+            (
+                "metadata[wipehub_organization_id]",
+                order.organization_id.to_string(),
+            ),
+            ("metadata[wipehub_hub]", self.hub_origin.clone()),
+        ];
+        if annual {
+            form.extend([
+                (
+                    "line_items[0][price_data][recurring][interval]",
+                    "year".to_string(),
+                ),
+                (
+                    "subscription_data[metadata][wipehub_order_id]",
+                    order.order_id.to_string(),
+                ),
+                (
+                    "subscription_data[metadata][wipehub_organization_id]",
+                    order.organization_id.to_string(),
+                ),
+                (
+                    "subscription_data[metadata][wipehub_hub]",
+                    self.hub_origin.clone(),
+                ),
+            ]);
+            if let Some(notice) = &order.renewal_notice {
+                form.push(("custom_text[submit][message]", notice.one_line()));
+            }
+        }
+        match customer {
+            Some(customer) => form.push(("customer", customer.to_string())),
+            None if !annual => form.push(("customer_creation", "always".into())),
+            None => {}
+        }
+        form
     }
 
     /// POST a form to the Stripe API and return its JSON reply.
@@ -249,52 +334,21 @@ impl PaymentProvider for Stripe {
         order: &CheckoutOrder,
     ) -> Result<CheckoutSession, ProviderError> {
         const PATH: &str = "v1/checkout/sessions";
-        let page = page_url(&self.public_base_url, &format!("orders/{}", order.order_id));
-        let form: Vec<(&'static str, String)> = vec![
-            ("mode", "payment".into()),
-            ("client_reference_id", order.order_id.to_string()),
-            ("success_url", page.to_string()),
-            ("cancel_url", page.to_string()),
-            ("line_items[0][quantity]", "1".into()),
-            (
-                "line_items[0][price_data][currency]",
-                order.currency.to_ascii_lowercase(),
-            ),
-            (
-                "line_items[0][price_data][unit_amount]",
-                order.price_minor.to_string(),
-            ),
-            (
-                "line_items[0][price_data][product_data][name]",
-                order.offering_name.clone(),
-            ),
-            ("metadata[wipehub_order_id]", order.order_id.to_string()),
-            (
-                "metadata[wipehub_organization_id]",
-                order.organization_id.to_string(),
-            ),
-            ("metadata[wipehub_hub]", self.hub_origin.clone()),
-        ];
-        let new_customer = |mut form: Vec<(&'static str, String)>| {
-            form.push(("customer_creation", "always".into()));
-            form
-        };
+        let new_customer = |customer: Option<&str>| self.checkout_form(order, customer);
         let reply = match &order.customer_id {
             None => {
                 self.post(
                     PATH,
-                    &new_customer(form),
+                    &new_customer(None),
                     Some(format!("wipehub-checkout-{}", order.order_id)),
                 )
                 .await?
             }
             Some(customer) => {
-                let mut with_customer = form.clone();
-                with_customer.push(("customer", customer.clone()));
                 match self
                     .post(
                         PATH,
-                        &with_customer,
+                        &new_customer(Some(customer)),
                         Some(format!("wipehub-checkout-{}", order.order_id)),
                     )
                     .await
@@ -313,7 +367,7 @@ impl PaymentProvider for Stripe {
                         );
                         self.post(
                             PATH,
-                            &new_customer(form),
+                            &new_customer(None),
                             Some(format!("wipehub-checkout-{}-new-customer", order.order_id)),
                         )
                         .await?
@@ -381,7 +435,7 @@ impl PaymentProvider for Stripe {
     }
 }
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -461,6 +515,8 @@ struct StripeEvent {
     #[serde(rename = "type")]
     event_type: String,
     #[serde(default)]
+    created: Option<i64>,
+    #[serde(default)]
     data: Option<StripeData>,
 }
 
@@ -470,95 +526,173 @@ struct StripeData {
     object: Value,
 }
 
-/// The `data.object` fields of a Checkout Session the hub reads; anything
-/// else in it is ignored.
-struct Session {
-    id: Option<String>,
-    payment_status: Option<String>,
-    amount_subtotal: Option<i64>,
-    currency: Option<String>,
-    customer: Option<String>,
-    metadata_order_id: Option<String>,
-    metadata_hub: Option<String>,
+/// A non-blank string field, or the `id` of an expanded object in its place.
+fn id_of(v: &Value) -> Option<String> {
+    v.as_str()
+        .or_else(|| v["id"].as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
 }
 
-impl Session {
-    fn from_object(o: &Value) -> Self {
-        let text = |v: &Value| v.as_str().map(str::to_string);
-        Self {
-            id: text(&o["id"]).filter(|s| !s.trim().is_empty()),
-            payment_status: text(&o["payment_status"]),
-            amount_subtotal: o["amount_subtotal"].as_i64(),
-            currency: text(&o["currency"]),
-            // A string id; an expanded customer object carries it as `id`.
-            customer: text(&o["customer"]).or_else(|| text(&o["customer"]["id"])),
-            metadata_order_id: text(&o["metadata"]["wipehub_order_id"]),
-            metadata_hub: text(&o["metadata"]["wipehub_hub"]),
-        }
+/// The hub order a `metadata` object names: `wipehub_order_id`, when it is a
+/// UUID and `wipehub_hub` is `hub_origin` (this hub).
+/// `client_reference_id` is sent but never read back (decision 9):
+/// another app on a shared Stripe account may put its own UUIDs there,
+/// and reading them would make its paid events look like the hub's own
+/// order that is not committed yet (503 and days of Stripe retries).
+/// Another hub's session (decision 11) has the same problem, hence the
+/// origin check.
+fn order_ref_of(metadata: &Value, hub_origin: &str) -> Option<Uuid> {
+    if metadata["wipehub_hub"].as_str() != Some(hub_origin) {
+        return None;
     }
+    metadata["wipehub_order_id"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+}
 
-    /// The hub order named by `metadata[wipehub_order_id]`, when it is a
-    /// UUID and `metadata[wipehub_hub]` is `hub_origin` (this hub).
-    /// `client_reference_id` is sent but never read back (decision 9):
-    /// another app on a shared Stripe account may put its own UUIDs there,
-    /// and reading them would make its paid events look like the hub's own
-    /// order that is not committed yet (503 and days of Stripe retries).
-    /// Another hub's session (decision 11) has the same problem, hence the
-    /// origin check.
-    fn order_ref(&self, hub_origin: &str) -> Option<Uuid> {
-        if self.metadata_hub.as_deref() != Some(hub_origin) {
-            return None;
-        }
-        self.metadata_order_id
-            .as_deref()
-            .and_then(|s| Uuid::parse_str(s).ok())
-    }
+/// `(minor, upper-case currency)` from an amount field and `currency`.
+fn amount_of(minor: &Value, currency: &Value) -> Option<(i64, String)> {
+    Some((minor.as_i64()?, currency.as_str()?.to_ascii_uppercase()))
 }
 
 /// Map a verified Stripe event body to a [`VerifiedEvent`] for the hub whose
-/// origin is `hub_origin`.
+/// origin is `hub_origin`. Only the fields named here are read:
+///
+/// - `checkout.session.*` (the object must have an `id`): `completed` with
+///   `payment_status=paid`, or `async_payment_succeeded`, is
+///   [`EventKind::CheckoutCompleted`]; `expired` or `async_payment_failed` is
+///   [`EventKind::CheckoutExpired`]; anything else is ignored. Also
+///   `amount_subtotal`/`currency`, `customer`, `subscription`, and the
+///   payment reference (`payment_intent`, else `invoice`).
+/// - `invoice.paid` with `billing_reason=subscription_cycle` and a
+///   subscription (`subscription`, else `parent.subscription_details
+///   .subscription` in API versions after 2024-06-20, decision 9) is
+///   [`EventKind::RenewalPaid`] (the invoice must have an `id`), with
+///   `subtotal`/`currency` and the order from `subscription_details.metadata`,
+///   else `parent.subscription_details.metadata`. A renewal invoice with
+///   neither subscription is ignored and logged at error; any other
+///   `invoice.paid` is ignored (the first invoice is paid through the
+///   checkout).
+/// - `customer.subscription.updated` is [`EventKind::RenewalChanged`], renewing
+///   unless `cancel_at_period_end` or `cancel_at` is set, at the event's
+///   `created`; `customer.subscription.deleted` is
+///   [`EventKind::SubscriptionEnded`]. Both need the subscription's `id` and
+///   read the order from its `metadata`.
+/// - `charge.refunded` with `refunded=true` (a full refund) is
+///   [`EventKind::Refunded`] naming the charge's `payment_intent` and
+///   `invoice`; a full refund naming neither is ignored and logged at warn
+///   (decision 11), and a partial refund is ignored.
+/// - Every other type is ignored.
 fn parse_event(body: &[u8], hub_origin: &str) -> Result<VerifiedEvent, ProviderError> {
     let event: StripeEvent = serde_json::from_slice(body)
         .map_err(|_| ProviderError::Rejected("the event is not a Stripe event"))?;
-    if !event.event_type.starts_with("checkout.session.") {
-        let kind = EventKind::Ignored {
-            event_type: event.event_type.clone(),
-        };
-        return VerifiedEvent::new(event.id, "stripe", event.event_type, kind, None, None, None);
-    }
-    let object = event.data.map(|d| d.object).unwrap_or(Value::Null);
-    let session = Session::from_object(&object);
-    let Some(session_id) = session.id.clone() else {
-        return Err(ProviderError::Rejected(
-            "the checkout session event has no data.object.id",
-        ));
+    let o = event.data.map(|d| d.object).unwrap_or(Value::Null);
+    let mut fields = EventFields::default();
+    let ignored = || EventKind::Ignored {
+        event_type: event.event_type.clone(),
     };
     let kind = match event.event_type.as_str() {
-        CHECKOUT_SESSION_COMPLETED if session.payment_status.as_deref() == Some("paid") => {
-            EventKind::CheckoutCompleted { session_id }
+        t if t.starts_with("checkout.session.") => {
+            let Some(session_id) = id_of(&o["id"]) else {
+                return Err(ProviderError::Rejected(
+                    "the checkout session event has no data.object.id",
+                ));
+            };
+            fields.amount = amount_of(&o["amount_subtotal"], &o["currency"]);
+            fields.customer_id = id_of(&o["customer"]);
+            fields.order_ref = order_ref_of(&o["metadata"], hub_origin);
+            fields.subscription_id = id_of(&o["subscription"]);
+            fields.payment_ref = id_of(&o["payment_intent"]).or_else(|| id_of(&o["invoice"]));
+            match t {
+                CHECKOUT_SESSION_COMPLETED if o["payment_status"].as_str() == Some("paid") => {
+                    EventKind::CheckoutCompleted { session_id }
+                }
+                CHECKOUT_SESSION_ASYNC_SUCCEEDED => EventKind::CheckoutCompleted { session_id },
+                CHECKOUT_SESSION_EXPIRED | CHECKOUT_SESSION_ASYNC_FAILED => {
+                    EventKind::CheckoutExpired { session_id }
+                }
+                _ => ignored(),
+            }
         }
-        CHECKOUT_SESSION_ASYNC_SUCCEEDED => EventKind::CheckoutCompleted { session_id },
-        CHECKOUT_SESSION_EXPIRED | CHECKOUT_SESSION_ASYNC_FAILED => {
-            EventKind::CheckoutExpired { session_id }
+        INVOICE_PAID if o["billing_reason"].as_str() == Some(BILLING_REASON_CYCLE) => {
+            // API 2024-06-20 puts the subscription at the top level; newer
+            // versions under `parent.subscription_details` (decision 9).
+            let parent = &o["parent"]["subscription_details"];
+            let Some(subscription_id) =
+                id_of(&o["subscription"]).or_else(|| id_of(&parent["subscription"]))
+            else {
+                tracing::error!(
+                    event_id = %event.id,
+                    invoice_id = ?id_of(&o["id"]),
+                    "a paid renewal invoice names no subscription (neither `subscription` nor \
+                     `parent.subscription_details.subscription`); the renewal is ignored and \
+                     its year not granted"
+                );
+                return VerifiedEvent::new(
+                    event.id.clone(),
+                    "stripe",
+                    event.event_type.clone(),
+                    ignored(),
+                    fields,
+                );
+            };
+            let Some(invoice_id) = id_of(&o["id"]) else {
+                return Err(ProviderError::Rejected(
+                    "the renewal invoice event has no data.object.id",
+                ));
+            };
+            fields.amount = amount_of(&o["subtotal"], &o["currency"]);
+            fields.customer_id = id_of(&o["customer"]);
+            fields.order_ref = order_ref_of(&o["subscription_details"]["metadata"], hub_origin)
+                .or_else(|| order_ref_of(&parent["metadata"], hub_origin));
+            EventKind::RenewalPaid {
+                subscription_id,
+                invoice_id,
+            }
         }
-        other => EventKind::Ignored {
-            event_type: other.to_string(),
-        },
+        CUSTOMER_SUBSCRIPTION_UPDATED | CUSTOMER_SUBSCRIPTION_DELETED => {
+            let Some(subscription_id) = id_of(&o["id"]) else {
+                return Err(ProviderError::Rejected(
+                    "the subscription event has no data.object.id",
+                ));
+            };
+            fields.order_ref = order_ref_of(&o["metadata"], hub_origin);
+            fields.occurred_at = event.created;
+            if event.event_type == CUSTOMER_SUBSCRIPTION_UPDATED {
+                let at_period_end = o["cancel_at_period_end"].as_bool() == Some(true);
+                let cancel_at = !o["cancel_at"].is_null();
+                EventKind::RenewalChanged {
+                    subscription_id,
+                    renews: !(at_period_end || cancel_at),
+                }
+            } else {
+                EventKind::SubscriptionEnded { subscription_id }
+            }
+        }
+        CHARGE_REFUNDED if o["refunded"].as_bool() == Some(true) => {
+            let payment_refs: Vec<String> = [id_of(&o["payment_intent"]), id_of(&o["invoice"])]
+                .into_iter()
+                .flatten()
+                .collect();
+            if payment_refs.is_empty() {
+                // Every hub checkout produces a payment intent or an invoice,
+                // so this is another app's legacy charge on a shared account:
+                // acknowledge it rather than have Stripe retry (decision 11).
+                tracing::warn!(
+                    event_id = %event.id,
+                    charge_id = ?id_of(&o["id"]),
+                    "a fully refunded charge names no payment intent or invoice, so it \
+                     cannot be one of this hub's payments; the refund is ignored"
+                );
+                ignored()
+            } else {
+                EventKind::Refunded { payment_refs }
+            }
+        }
+        _ => ignored(),
     };
-    let amount = match (session.amount_subtotal, &session.currency) {
-        (Some(minor), Some(currency)) => Some((minor, currency.to_ascii_uppercase())),
-        _ => None,
-    };
-    let order_ref = session.order_ref(hub_origin);
-    VerifiedEvent::new(
-        event.id,
-        "stripe",
-        event.event_type,
-        kind,
-        session.customer,
-        amount,
-        order_ref,
-    )
+    VerifiedEvent::new(event.id, "stripe", event.event_type, kind, fields)
 }
 
 #[cfg(test)]
@@ -959,6 +1093,7 @@ mod tests {
             currency: "USD".into(),
             interval: "annual".into(),
             customer_id: None,
+            renewal_notice: None,
         };
         let started = std::time::Instant::now();
         match p.create_checkout(&order).await {
@@ -971,5 +1106,374 @@ mod tests {
             Err(ProviderError::Failed(_))
         ));
         drop(silent);
+    }
+
+    // -----------------------------------------------------------------------
+    // Story 4: subscriptions, renewals and refunds
+
+    fn event_at(
+        event_type: &str,
+        created: i64,
+        object: Value,
+    ) -> Result<VerifiedEvent, ProviderError> {
+        let body = json!({
+            "id": "evt_test_2",
+            "object": "event",
+            "type": event_type,
+            "created": created,
+            "data": {"object": object},
+        })
+        .to_string()
+        .into_bytes();
+        stripe().verify_event(&signed(&body), &body)
+    }
+
+    const ORDER: &str = "7f0c1e2a-0000-4000-8000-000000000001";
+
+    fn ours() -> Value {
+        json!({"wipehub_order_id": ORDER, "wipehub_hub": HUB, "wipehub_organization_id": "x"})
+    }
+
+    fn renewal_invoice() -> Value {
+        json!({
+            "id": "in_test_1",
+            "object": "invoice",
+            "billing_reason": "subscription_cycle",
+            "subscription": "sub_test_1",
+            "subtotal": 120000,
+            "total": 120000,
+            "currency": "usd",
+            "customer": "cus_test_1",
+            "subscription_details": {"metadata": ours()},
+            "metadata": {},
+        })
+    }
+
+    fn subscription(cancel_at_period_end: bool, cancel_at: Value) -> Value {
+        json!({
+            "id": "sub_test_1",
+            "object": "subscription",
+            "status": "active",
+            "cancel_at_period_end": cancel_at_period_end,
+            "cancel_at": cancel_at,
+            "metadata": ours(),
+        })
+    }
+
+    fn charge(refunded: bool, payment_intent: Value, invoice: Value) -> Value {
+        json!({
+            "id": "ch_test_1",
+            "object": "charge",
+            "amount": 120000,
+            "amount_refunded": if refunded { 120000 } else { 100 },
+            "refunded": refunded,
+            "payment_intent": payment_intent,
+            "invoice": invoice,
+        })
+    }
+
+    #[test]
+    fn a_subscription_checkout_carries_its_subscription_and_first_invoice() {
+        let mut s = paid_session();
+        s["mode"] = json!("subscription");
+        s["subscription"] = json!("sub_test_1");
+        s["invoice"] = json!("in_test_0");
+        s["payment_intent"] = Value::Null;
+        let ev = kind_of(CHECKOUT_SESSION_COMPLETED, s.clone()).unwrap();
+        assert_eq!(ev.subscription_id(), Some("sub_test_1"));
+        assert_eq!(ev.payment_ref(), Some("in_test_0"));
+        // A one-off payment's reference is its payment intent.
+        s["subscription"] = Value::Null;
+        s["payment_intent"] = json!({"id": "pi_test_1", "object": "payment_intent"});
+        let ev = kind_of(CHECKOUT_SESSION_ASYNC_SUCCEEDED, s).unwrap();
+        assert_eq!(ev.subscription_id(), None);
+        assert_eq!(ev.payment_ref(), Some("pi_test_1"));
+        let ev = kind_of(CHECKOUT_SESSION_COMPLETED, paid_session()).unwrap();
+        assert_eq!(ev.subscription_id(), None);
+        assert_eq!(ev.payment_ref(), None);
+    }
+
+    #[test]
+    fn a_renewal_invoice_is_renewal_paid() {
+        let ev = event_at(INVOICE_PAID, 1_800_000_000, renewal_invoice()).unwrap();
+        assert_eq!(
+            ev.kind(),
+            &EventKind::RenewalPaid {
+                subscription_id: "sub_test_1".into(),
+                invoice_id: "in_test_1".into()
+            }
+        );
+        assert_eq!(ev.amount(), Some((120000, "USD")));
+        assert_eq!(ev.order_ref(), Some(Uuid::parse_str(ORDER).unwrap()));
+        assert_eq!(ev.session_id(), None);
+        // An expanded subscription.
+        let mut inv = renewal_invoice();
+        inv["subscription"] = json!({"id": "sub_test_9", "object": "subscription"});
+        assert!(matches!(
+            event_at(INVOICE_PAID, 1, inv).unwrap().kind(),
+            EventKind::RenewalPaid { subscription_id, .. } if subscription_id == "sub_test_9"
+        ));
+        // Another hub's subscription names no order of ours.
+        let mut inv = renewal_invoice();
+        inv["subscription_details"]["metadata"]["wipehub_hub"] = json!("http://127.0.0.1:7901");
+        assert_eq!(event_at(INVOICE_PAID, 1, inv).unwrap().order_ref(), None);
+        // The session-level `metadata` is not read for an invoice.
+        let mut inv = renewal_invoice();
+        inv["metadata"] = ours();
+        inv["subscription_details"] = json!({"metadata": {}});
+        assert_eq!(event_at(INVOICE_PAID, 1, inv).unwrap().order_ref(), None);
+    }
+
+    /// The renewal invoice in API versions after 2024-06-20: no top-level
+    /// `subscription` or `subscription_details`, both under `parent`.
+    fn parent_renewal_invoice() -> Value {
+        let mut inv = renewal_invoice();
+        let map = inv.as_object_mut().unwrap();
+        map.remove("subscription");
+        map.remove("subscription_details");
+        inv["parent"] = json!({
+            "type": "subscription_details",
+            "quote_details": null,
+            "subscription_details": {"subscription": "sub_test_1", "metadata": ours()},
+        });
+        inv
+    }
+
+    #[test]
+    fn a_renewal_invoice_is_read_in_the_newer_parent_shape() {
+        let ev = event_at(INVOICE_PAID, 1, parent_renewal_invoice()).unwrap();
+        assert_eq!(
+            ev.kind(),
+            &EventKind::RenewalPaid {
+                subscription_id: "sub_test_1".into(),
+                invoice_id: "in_test_1".into()
+            }
+        );
+        assert_eq!(ev.amount(), Some((120000, "USD")));
+        assert_eq!(ev.order_ref(), Some(Uuid::parse_str(ORDER).unwrap()));
+        // The parent's metadata names another hub: no order of ours.
+        let mut inv = parent_renewal_invoice();
+        inv["parent"]["subscription_details"]["metadata"]["wipehub_hub"] =
+            json!("http://127.0.0.1:7901");
+        assert_eq!(event_at(INVOICE_PAID, 1, inv).unwrap().order_ref(), None);
+        // The top-level shape wins when both are present.
+        let mut inv = renewal_invoice();
+        inv["parent"] = json!({"subscription_details": {"subscription": "sub_other"}});
+        assert!(matches!(
+            event_at(INVOICE_PAID, 1, inv).unwrap().kind(),
+            EventKind::RenewalPaid { subscription_id, .. } if subscription_id == "sub_test_1"
+        ));
+        // Neither shape names a subscription: ignored (and logged at error).
+        let mut inv = parent_renewal_invoice();
+        inv["parent"] = Value::Null;
+        assert_eq!(
+            event_at(INVOICE_PAID, 1, inv).unwrap().kind(),
+            &EventKind::Ignored {
+                event_type: INVOICE_PAID.into()
+            }
+        );
+    }
+
+    #[test]
+    fn other_paid_invoices_are_ignored() {
+        let ignored = EventKind::Ignored {
+            event_type: INVOICE_PAID.into(),
+        };
+        for (field, value) in [
+            ("billing_reason", json!("subscription_create")),
+            ("billing_reason", json!("manual")),
+            ("billing_reason", Value::Null),
+            ("subscription", Value::Null),
+            ("subscription", json!("")),
+        ] {
+            let mut inv = renewal_invoice();
+            inv[field] = value.clone();
+            assert_eq!(
+                event_at(INVOICE_PAID, 1, inv).unwrap().kind(),
+                &ignored,
+                "{field} {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn subscription_changes_map_to_renews() {
+        for (at_period_end, cancel_at, renews) in [
+            (false, Value::Null, true),
+            (true, Value::Null, false),
+            (false, json!(1_900_000_000), false),
+            (true, json!(1_900_000_000), false),
+        ] {
+            let ev = event_at(
+                CUSTOMER_SUBSCRIPTION_UPDATED,
+                1_800_000_123,
+                subscription(at_period_end, cancel_at.clone()),
+            )
+            .unwrap();
+            assert_eq!(
+                ev.kind(),
+                &EventKind::RenewalChanged {
+                    subscription_id: "sub_test_1".into(),
+                    renews
+                },
+                "{at_period_end} {cancel_at}"
+            );
+            assert_eq!(ev.occurred_at(), Some(1_800_000_123));
+            assert_eq!(ev.order_ref(), Some(Uuid::parse_str(ORDER).unwrap()));
+        }
+        let ev = event_at(
+            CUSTOMER_SUBSCRIPTION_DELETED,
+            1_800_000_200,
+            subscription(false, Value::Null),
+        )
+        .unwrap();
+        assert_eq!(
+            ev.kind(),
+            &EventKind::SubscriptionEnded {
+                subscription_id: "sub_test_1".into()
+            }
+        );
+        assert_eq!(ev.order_ref(), Some(Uuid::parse_str(ORDER).unwrap()));
+        // The hub check applies to subscription metadata too.
+        let mut sub = subscription(true, Value::Null);
+        sub["metadata"] = json!({"wipehub_order_id": ORDER});
+        assert_eq!(
+            event_at(CUSTOMER_SUBSCRIPTION_UPDATED, 1, sub)
+                .unwrap()
+                .order_ref(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_full_refund_names_its_payments_and_a_partial_one_is_ignored() {
+        let refs = |ev: VerifiedEvent| match ev.kind() {
+            EventKind::Refunded { payment_refs } => payment_refs.clone(),
+            other => panic!("{other:?}"),
+        };
+        let ev = event_at(
+            CHARGE_REFUNDED,
+            1,
+            charge(true, json!("pi_1"), json!("in_1")),
+        )
+        .unwrap();
+        assert_eq!(refs(ev), ["pi_1", "in_1"]);
+        let ev = event_at(CHARGE_REFUNDED, 1, charge(true, json!("pi_1"), Value::Null)).unwrap();
+        assert_eq!(refs(ev), ["pi_1"]);
+        let ev = event_at(CHARGE_REFUNDED, 1, charge(true, Value::Null, json!("in_1"))).unwrap();
+        assert_eq!(refs(ev), ["in_1"]);
+        let ev = event_at(
+            CHARGE_REFUNDED,
+            1,
+            charge(false, json!("pi_1"), Value::Null),
+        )
+        .unwrap();
+        assert_eq!(
+            ev.kind(),
+            &EventKind::Ignored {
+                event_type: CHARGE_REFUNDED.into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_full_refund_naming_no_payment_is_acknowledged_as_ignored() {
+        // A legacy Charges API charge from another app on a shared account
+        // (decision 11): refusing it would make Stripe retry for days.
+        let ev = event_at(CHARGE_REFUNDED, 1, charge(true, Value::Null, Value::Null)).unwrap();
+        assert_eq!(
+            ev.kind(),
+            &EventKind::Ignored {
+                event_type: CHARGE_REFUNDED.into()
+            }
+        );
+    }
+
+    #[test]
+    fn mapped_types_without_their_ids_are_refused() {
+        let mut inv = renewal_invoice();
+        inv.as_object_mut().unwrap().remove("id");
+        assert!(rejected(event_at(INVOICE_PAID, 1, inv)));
+        for t in [CUSTOMER_SUBSCRIPTION_UPDATED, CUSTOMER_SUBSCRIPTION_DELETED] {
+            let mut sub = subscription(false, Value::Null);
+            sub["id"] = json!("");
+            assert!(rejected(event_at(t, 1, sub)), "{t}");
+            assert!(rejected(event_at(t, 1, Value::Null)), "{t}");
+        }
+        let mut inv = renewal_invoice();
+        inv["id"] = json!("i".repeat(MAX_EVENT_FIELD + 1));
+        assert!(rejected(event_at(INVOICE_PAID, 1, inv)));
+    }
+
+    fn checkout_order(interval: &str) -> CheckoutOrder {
+        CheckoutOrder {
+            order_id: Uuid::parse_str(ORDER).unwrap(),
+            organization_id: Uuid::nil(),
+            offering_id: Uuid::nil(),
+            offering_name: "Station".into(),
+            price_minor: 120000,
+            currency: "USD".into(),
+            interval: interval.into(),
+            customer_id: None,
+            renewal_notice: (interval == "annual").then(|| {
+                crate::entitlements::renewal_notice(
+                    120000,
+                    "USD",
+                    time::macros::date!(2026 - 11 - 08),
+                )
+            }),
+        }
+    }
+
+    #[test]
+    fn an_annual_checkout_is_a_yearly_subscription() {
+        let p = stripe();
+        let field = |form: &[(&str, String)], name: &str| {
+            form.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.clone())
+        };
+        let form = p.checkout_form(&checkout_order("annual"), None);
+        assert_eq!(field(&form, "mode").as_deref(), Some("subscription"));
+        assert_eq!(
+            field(&form, "line_items[0][price_data][recurring][interval]").as_deref(),
+            Some("year")
+        );
+        for key in ["wipehub_order_id", "wipehub_organization_id", "wipehub_hub"] {
+            assert_eq!(
+                field(&form, &format!("subscription_data[metadata][{key}]")),
+                field(&form, &format!("metadata[{key}]")),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            field(&form, "custom_text[submit][message]").as_deref(),
+            Some(
+                "Renews automatically every year at 1,200.00 USD until you cancel. Your first \
+                 year runs to 8 November 2027. Cancel any time from Billing in your account: \
+                 your current year still runs to its end, and you will not be charged again. \
+                 We email you before each renewal."
+            )
+        );
+        assert_eq!(field(&form, "customer_creation"), None);
+        assert_eq!(field(&form, "customer"), None);
+        let with = p.checkout_form(&checkout_order("annual"), Some("cus_1"));
+        assert_eq!(field(&with, "customer").as_deref(), Some("cus_1"));
+        assert_eq!(field(&with, "customer_creation"), None);
+
+        let one_off = p.checkout_form(&checkout_order("one_off"), None);
+        assert_eq!(field(&one_off, "mode").as_deref(), Some("payment"));
+        assert_eq!(
+            field(&one_off, "customer_creation").as_deref(),
+            Some("always")
+        );
+        assert!(
+            one_off
+                .iter()
+                .all(|(k, _)| !k.starts_with("subscription_data")
+                    && !k.starts_with("custom_text")
+                    && !k.contains("recurring")),
+            "{one_off:?}"
+        );
     }
 }

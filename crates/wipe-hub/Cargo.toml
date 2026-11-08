@@ -39,6 +39,8 @@ hex = { workspace = true }
 hmac = "0.12"
 base64 = { workspace = true }
 uuid = { workspace = true }
+# Dates in the auto-renewal notice (offerings-and-payments story 4).
+time = { workspace = true }
 # The Stripe provider's API calls (offerings-and-payments story 3).
 reqwest = { workspace = true }
 # argon2 0.6 needs a newer Rust than the 1.80 MSRV.

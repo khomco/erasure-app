@@ -4,6 +4,7 @@ import { formatPrice } from "@/api/adminOfferings";
 import { abandonFakeCheckout, fetchFakeCheckout, payFakeCheckout, type Order } from "@/api/orders";
 import { FormError } from "./AuthForm";
 import { INTERVAL_LABELS } from "./OfferingForm";
+import { RenewalNoticeText } from "./RenewalNoticeText";
 
 /**
  * `/checkout/fake?session=…`: the Fake payment provider's stand-in for a
@@ -53,7 +54,8 @@ function Checkout({ session }: { session: string }) {
     onError: reread,
   });
   const busy = pay.isPending || abandon.isPending;
-  const o = checkout.data;
+  const o = checkout.data?.order;
+  const notice = checkout.data?.renewal_notice;
 
   return (
     <>
@@ -66,6 +68,7 @@ function Checkout({ session }: { session: string }) {
             {formatPrice(o.price_minor, o.currency)}{" "}
             <span className="text-slate-400">({INTERVAL_LABELS[o.interval].toLowerCase()})</span>
           </p>
+          {o.status === "pending" && notice && <RenewalNoticeText notice={notice} />}
           {o.status === "pending" ? (
             <div className="flex gap-2">
               <button

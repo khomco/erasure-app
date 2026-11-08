@@ -1,13 +1,21 @@
-//! Orders and the customer catalog (offerings-and-payments stories 2 and 3,
-//! CAP-2 and CAP-3): the data layer behind [`crate::order_routes`].
+//! Orders and the customer catalog (offerings-and-payments stories 2, 3 and
+//! 4, CAP-2 to CAP-4): the data layer behind [`crate::order_routes`].
 //!
-//! - **Catalog**: published offerings only, by lower-cased name, then id.
+//! - **Catalog**: published offerings only, by lower-cased name, then id. An
+//!   annual offering carries the owner-approved auto-renewal notice
+//!   ([`crate::entitlements::renewal_notice`]); a one-off carries none.
 //! - **An order snapshots** the offering's name, price, currency, interval
 //!   and grants, so retiring the offering never changes what was bought.
-//! - **Lifecycle** `pending → paid` or `pending → expired`; both terminal.
-//!   [`apply_event`], fed a [`VerifiedEvent`] that only a provider's
-//!   `verify_event` can make, is the only code that changes an order's
-//!   status, and only [`crate::payment_events::receive`] calls it.
+//! - **Lifecycle** `pending → paid` or `pending → expired`, and `paid →
+//!   refunded` (a full refund, story 4); `expired` and `refunded` are
+//!   terminal. [`apply_event`], fed a [`VerifiedEvent`] that only a
+//!   provider's `verify_event` can make, is the only code that changes an
+//!   order's status, and only [`crate::payment_events::receive`] calls it.
+//! - **Fulfilment**: the paid transition creates the order's one
+//!   entitlement in the same transaction ([`crate::entitlements::grant`]).
+//!   Subscription events (renewal, renewal change, end) go to
+//!   [`crate::entitlements`]; a refund marks the entitlement and the order
+//!   `refunded`. None of them touches an issued licence (ROADMAP §0.2).
 //! - **A paid event is checked against the order's snapshot**: a different
 //!   amount, currency or order reference leaves the order pending
 //!   ([`ApplyOutcome::Mismatch`]) for a human to look at.
@@ -17,8 +25,8 @@
 //!   Stripe), and checkout and billing reuse it ([`billing_customer`]).
 //! - **Every state change writes one audit row** in its transaction:
 //!   `order.created` (actor `user:<id>`), then `order.paid` or
-//!   `order.expired` (actor `provider:<name>`, detail `{event_id}`); the
-//!   subject is `order:<id>`.
+//!   `order.expired`, later `order.refunded` (actor `provider:<name>`,
+//!   detail `{event_id}`); the subject is `order:<id>`.
 //! - **Every customer query takes the organization id first**; another
 //!   organization's order or session is the same `None` as an unknown one.
 //! - Money is integer minor units; timestamps are RFC 3339 UTC strings
@@ -35,6 +43,7 @@ use uuid::Uuid;
 use crate::admin::RFC3339_UTC;
 use crate::audit::{self, AuditEntry, AuditError};
 use crate::auth::actor;
+use crate::entitlements::{self, RenewalNotice};
 use crate::offering_admin::Grants;
 use crate::payments::{CheckoutOrder, EventKind, PaymentProvider, ProviderError, VerifiedEvent};
 
@@ -57,6 +66,9 @@ pub struct CatalogOffering {
     /// `one_off` or `annual`.
     pub interval: String,
     pub grants: Grants,
+    /// The auto-renewal notice for an annual offering, dated today; `null`
+    /// for a one-off.
+    pub renewal_notice: Option<RenewalNotice>,
 }
 
 /// An order as its organization sees it. The provider's session id is not
@@ -71,7 +83,7 @@ pub struct Order {
     pub currency: String,
     pub interval: String,
     pub grants: Grants,
-    /// `pending`, `paid` or `expired`.
+    /// `pending`, `paid`, `expired` or `refunded`.
     pub status: String,
     /// `fake` or `stripe`.
     pub provider: String,
@@ -80,6 +92,7 @@ pub struct Order {
     pub updated_at: String,
     pub paid_at: Option<String>,
     pub expired_at: Option<String>,
+    pub refunded_at: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -99,7 +112,10 @@ struct OfferingRow {
 
 impl From<OfferingRow> for CatalogOffering {
     fn from(r: OfferingRow) -> Self {
+        let renewal_notice =
+            entitlements::renewal_notice_now(&r.billing_interval, r.price_minor, &r.currency);
         CatalogOffering {
+            renewal_notice,
             id: r.id,
             name: r.name,
             description: r.description,
@@ -136,6 +152,7 @@ struct OrderRow {
     updated_at: String,
     paid_at: Option<String>,
     expired_at: Option<String>,
+    refunded_at: Option<String>,
 }
 
 impl From<OrderRow> for Order {
@@ -160,6 +177,7 @@ impl From<OrderRow> for Order {
             updated_at: r.updated_at,
             paid_at: r.paid_at,
             expired_at: r.expired_at,
+            refunded_at: r.refunded_at,
         }
     }
 }
@@ -182,16 +200,19 @@ pub enum OrderError {
 /// `payment_events.outcome` values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome {
-    /// The order moved to `paid` or `expired`; the order after the change.
+    /// The order moved to `paid`, `expired` or `refunded`, or its
+    /// entitlement was renewed, changed or ended; the order after the change.
     Applied(Order),
-    /// The order was not pending; it is unchanged.
+    /// The order (or its entitlement) is already past the event; it is
+    /// unchanged.
     Unchanged(Order),
     /// An event type the hub does not act on.
     Ignored,
-    /// No order has the event's checkout session.
+    /// No order has the event's checkout session, no entitlement its
+    /// subscription, or none the refunded payment.
     Unmatched,
-    /// A paid event disagrees with the order's snapshot (amount, currency or
-    /// order reference); the order stays pending.
+    /// A paid event or paid renewal disagrees with the order's snapshot
+    /// (amount, currency or order reference); nothing changes.
     Mismatch(Order),
 }
 
@@ -232,7 +253,8 @@ fn select_orders() -> String {
                 to_char(o.created_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS created_at, \
                 to_char(o.updated_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS updated_at, \
                 to_char(o.paid_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS paid_at, \
-                to_char(o.expired_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS expired_at \
+                to_char(o.expired_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS expired_at, \
+                to_char(o.refunded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS refunded_at \
          FROM orders o"
     )
 }
@@ -337,7 +359,7 @@ pub async fn billing_customer<'e, E: sqlx::PgExecutor<'e>>(
     .await
 }
 
-async fn fetch(conn: &mut PgConnection, id: Uuid) -> Result<Order, sqlx::Error> {
+pub(crate) async fn fetch(conn: &mut PgConnection, id: Uuid) -> Result<Order, sqlx::Error> {
     let row: OrderRow = sqlx::query_as(&format!("{} WHERE o.id = $1", select_orders()))
         .bind(id)
         .fetch_one(&mut *conn)
@@ -389,6 +411,7 @@ pub async fn create(
             currency: offering.currency.clone(),
             interval: offering.interval.clone(),
             customer_id,
+            renewal_notice: offering.renewal_notice.clone(),
         })
         .await?;
     let g = &offering.grants;
@@ -451,57 +474,90 @@ pub async fn create(
 ///   at error; the order stays pending.
 /// - Otherwise the order moves to `paid` or `expired`, the time is stamped
 ///   and `order.paid` / `order.expired {event_id}` is audited as
-///   `provider:<name>` ([`ApplyOutcome::Applied`]). A paid event that names
+///   `provider:<name>` ([`ApplyOutcome::Applied`]). A paid order gets its
+///   one entitlement ([`entitlements::grant`]). A paid event that names
 ///   the buyer's customer stores it in `billing_customers` ([`store_customer`]):
 ///   inserted, or replacing a different stored customer; the same customer
 ///   writes nothing.
+/// - A renewal payment, a renewal change or a subscription end changes the
+///   subscription's entitlement only ([`entitlements::renew`],
+///   [`entitlements::change_renewal`], [`entitlements::end`]).
+/// - A full refund marks the refunded payment's entitlement `refunded`
+///   ([`entitlements::refund`]) and then its order `paid → refunded`, audited
+///   `order.refunded {event_id, payment_ref}`.
 ///
 /// Only `Applied` writes anything.
 pub async fn apply_event(
     conn: &mut PgConnection,
     event: &VerifiedEvent,
 ) -> Result<ApplyOutcome, ApplyError> {
-    let (session_id, to, stamp, action) = match event.kind() {
-        EventKind::CheckoutCompleted { session_id } => {
-            (session_id, "paid", "paid_at", "order.paid")
-        }
-        EventKind::CheckoutExpired { session_id } => {
-            (session_id, "expired", "expired_at", "order.expired")
-        }
+    // Which order moves, from which status to which, with its stamp, audit
+    // action and (for a refund) the refunded payment.
+    let (order, from, to, stamp, action, payment_ref) = match event.kind() {
         EventKind::Ignored { .. } => return Ok(ApplyOutcome::Ignored),
-    };
-    let Some(order) = lock_by_session(conn, event.provider(), session_id).await? else {
-        return Ok(ApplyOutcome::Unmatched);
-    };
-    if order.status != "pending" {
-        return Ok(ApplyOutcome::Unchanged(order));
-    }
-    if to == "paid" {
-        let amount_differs = event.amount().is_some_and(|(minor, currency)| {
-            minor != order.price_minor || currency != order.currency
-        });
-        let ref_differs = event.order_ref().is_some_and(|r| r != order.id);
-        if amount_differs || ref_differs {
-            tracing::error!(
-                order_id = %order.id,
-                event_id = event.id(),
-                provider = event.provider(),
-                expected_amount = order.price_minor,
-                expected_currency = %order.currency,
-                event_amount = ?event.amount(),
-                event_order_ref = ?event.order_ref(),
-                "a paid payment event disagrees with its order; the order stays pending \
-                 for a human to check"
-            );
-            return Ok(ApplyOutcome::Mismatch(order));
+        EventKind::RenewalPaid { .. } => return entitlements::renew(conn, event).await,
+        EventKind::RenewalChanged { .. } => return entitlements::change_renewal(conn, event).await,
+        EventKind::SubscriptionEnded { .. } => return entitlements::end(conn, event).await,
+        EventKind::Refunded { .. } => match entitlements::refund(conn, event).await? {
+            entitlements::Refund::Done(outcome) => return Ok(*outcome),
+            entitlements::Refund::Order {
+                order_id,
+                payment_ref,
+            } => (
+                fetch(conn, order_id).await?,
+                "paid",
+                "refunded",
+                "refunded_at",
+                "order.refunded",
+                Some(payment_ref),
+            ),
+        },
+        EventKind::CheckoutCompleted { session_id } | EventKind::CheckoutExpired { session_id } => {
+            let Some(order) = lock_by_session(conn, event.provider(), session_id).await? else {
+                return Ok(ApplyOutcome::Unmatched);
+            };
+            if order.status != "pending" {
+                return Ok(ApplyOutcome::Unchanged(order));
+            }
+            if matches!(event.kind(), EventKind::CheckoutExpired { .. }) {
+                (
+                    order,
+                    "pending",
+                    "expired",
+                    "expired_at",
+                    "order.expired",
+                    None,
+                )
+            } else {
+                let amount_differs = event.amount().is_some_and(|(minor, currency)| {
+                    minor != order.price_minor || currency != order.currency
+                });
+                let ref_differs = event.order_ref().is_some_and(|r| r != order.id);
+                if amount_differs || ref_differs {
+                    tracing::error!(
+                        order_id = %order.id,
+                        event_id = event.id(),
+                        provider = event.provider(),
+                        expected_amount = order.price_minor,
+                        expected_currency = %order.currency,
+                        event_amount = ?event.amount(),
+                        event_order_ref = ?event.order_ref(),
+                        "a paid payment event disagrees with its order; the order stays \
+                         pending for a human to check"
+                    );
+                    return Ok(ApplyOutcome::Mismatch(order));
+                }
+                (order, "pending", "paid", "paid_at", "order.paid", None)
+            }
         }
-    }
+    };
     sqlx::query(&format!(
         "UPDATE orders SET status = $2, {stamp} = now(), updated_at = now() \
-         WHERE id = $1 AND status = 'pending'"
+         WHERE id = $1 AND status = $3"
     ))
     .bind(order.id)
     .bind(to)
+    .bind(from)
     .execute(&mut *conn)
     .await?;
     audit::record(
@@ -510,7 +566,10 @@ pub async fn apply_event(
             actor: &format!("provider:{}", event.provider()),
             action,
             subject: &subject(order.id),
-            detail: json!({ "event_id": event.id() }),
+            detail: match payment_ref {
+                Some(payment_ref) => json!({ "event_id": event.id(), "payment_ref": payment_ref }),
+                None => json!({ "event_id": event.id() }),
+            },
         },
     )
     .await?;
@@ -518,6 +577,7 @@ pub async fn apply_event(
         if let Some(customer) = event.customer_id() {
             store_customer(conn, order.id, event.provider(), customer).await?;
         }
+        entitlements::grant(conn, order.id, event).await?;
     }
     Ok(ApplyOutcome::Applied(fetch(conn, order.id).await?))
 }

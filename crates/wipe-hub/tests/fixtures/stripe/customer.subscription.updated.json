@@ -1,0 +1,64 @@
+{
+  "id": "__EVENT_ID__",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": __CREATED__,
+  "data": {
+    "object": {
+      "id": "__SUBSCRIPTION_ID__",
+      "object": "subscription",
+      "billing_cycle_anchor": 1731024000,
+      "cancel_at": null,
+      "cancel_at_period_end": __CANCEL_AT_PERIOD_END__,
+      "canceled_at": null,
+      "cancellation_details": {
+        "comment": null,
+        "feedback": null,
+        "reason": null
+      },
+      "collection_method": "charge_automatically",
+      "created": 1731024000,
+      "currency": "__CURRENCY__",
+      "current_period_start": 1731024000,
+      "current_period_end": 1762560000,
+      "customer": "cus_test_1",
+      "ended_at": null,
+      "items": {
+        "object": "list",
+        "data": [
+          {
+            "id": "si_test_1",
+            "object": "subscription_item",
+            "price": {
+              "id": "price_test_1",
+              "object": "price",
+              "currency": "__CURRENCY__",
+              "recurring": {
+                "interval": "year",
+                "interval_count": 1
+              },
+              "unit_amount": __AMOUNT__
+            },
+            "quantity": 1
+          }
+        ],
+        "has_more": false
+      },
+      "latest_invoice": "in_test_0",
+      "livemode": false,
+      "metadata": {
+        "wipehub_hub": "__HUB__",
+        "wipehub_order_id": "__ORDER_ID__",
+        "wipehub_organization_id": "__ORGANIZATION_ID__"
+      },
+      "status": "active"
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "customer.subscription.updated"
+}

@@ -14,6 +14,12 @@
 //! - [`crate::stripe::Stripe`]: Stripe Checkout, the Stripe billing portal
 //!   and `Stripe-Signature` verification.
 //!
+//! Subscriptions (story 4): an annual offering checks out as a subscription.
+//! Its renewal payments, renewal changes, end and refunds arrive as events
+//! too ([`EventKind::RenewalPaid`] and the others), and change entitlements
+//! through the same path. The Fake provider simulates them with
+//! [`FAKE_SUBSCRIPTION_RENEWED`] and [`FAKE_SUBSCRIPTION_CANCELLED`].
+//!
 //! An order changes status only by [`apply_event`] applying a
 //! [`VerifiedEvent`], called only from [`crate::payment_events::receive`],
 //! and only [`PaymentProvider::verify_event`] can make a `VerifiedEvent`: its
@@ -45,6 +51,14 @@ pub const FAKE_SIGNATURE_HEADER: &str = "fake-signature";
 /// Fake event types.
 pub const FAKE_CHECKOUT_COMPLETED: &str = "checkout.completed";
 pub const FAKE_CHECKOUT_EXPIRED: &str = "checkout.expired";
+/// A renewal payment of a Fake subscription.
+pub const FAKE_SUBSCRIPTION_RENEWED: &str = "subscription.renewed";
+/// A Fake subscription cancelled at period end.
+pub const FAKE_SUBSCRIPTION_CANCELLED: &str = "subscription.cancelled";
+/// Prefix of Fake subscription ids.
+pub const FAKE_SUBSCRIPTION_PREFIX: &str = "fake_sub_";
+/// Prefix of Fake invoice ids.
+pub const FAKE_INVOICE_PREFIX: &str = "fake_in_";
 /// Prefix of Fake checkout session ids.
 pub const FAKE_SESSION_PREFIX: &str = "fake_cs_";
 /// Prefix of Fake event ids.
@@ -67,6 +81,17 @@ pub struct CheckoutOrder {
     pub interval: String,
     /// The organization's stored customer at this provider, if any.
     pub customer_id: Option<String>,
+    /// The owner-approved auto-renewal notice, for an annual offering (which
+    /// checks out as a subscription); `None` for a one-off.
+    pub renewal_notice: Option<crate::entitlements::RenewalNotice>,
+}
+
+impl CheckoutOrder {
+    /// Whether the order renews (an annual offering, bought as a
+    /// subscription).
+    pub fn is_annual(&self) -> bool {
+        self.interval == "annual"
+    }
 }
 
 /// A started hosted checkout: the provider's session id and where to send
@@ -100,8 +125,35 @@ pub enum EventKind {
     CheckoutCompleted { session_id: String },
     /// The checkout session ended without payment.
     CheckoutExpired { session_id: String },
+    /// A subscription's renewal invoice was paid.
+    RenewalPaid {
+        subscription_id: String,
+        invoice_id: String,
+    },
+    /// Whether a subscription will renew changed (an owner cancelled at
+    /// period end, or resumed).
+    RenewalChanged {
+        subscription_id: String,
+        renews: bool,
+    },
+    /// The provider ended a subscription (after a cancellation at period
+    /// end, or after failed renewal charges).
+    SubscriptionEnded { subscription_id: String },
+    /// A payment was refunded in full; its provider references (non-empty).
+    Refunded { payment_refs: Vec<String> },
     /// An event type the hub does not act on.
     Ignored { event_type: String },
+}
+
+/// The optional fields of a [`VerifiedEvent`], for provider implementations.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EventFields {
+    pub customer_id: Option<String>,
+    pub amount: Option<(i64, String)>,
+    pub order_ref: Option<Uuid>,
+    pub subscription_id: Option<String>,
+    pub payment_ref: Option<String>,
+    pub occurred_at: Option<i64>,
 }
 
 /// A provider event whose signature has been verified. Only
@@ -116,6 +168,9 @@ pub struct VerifiedEvent {
     customer_id: Option<String>,
     amount: Option<(i64, String)>,
     order_ref: Option<Uuid>,
+    subscription_id: Option<String>,
+    payment_ref: Option<String>,
+    occurred_at: Option<i64>,
 }
 
 /// The longest event id, event type or session id the hub stores.
@@ -123,17 +178,16 @@ pub const MAX_EVENT_FIELD: usize = 255;
 
 impl VerifiedEvent {
     /// For provider implementations in this crate only: checks the fields
-    /// every stored event needs (a non-blank id and type, and a non-blank
-    /// session id, each at most [`MAX_EVENT_FIELD`] characters). A customer
-    /// id that does not fit is dropped.
+    /// every stored event needs (a non-blank id and type, and the non-blank
+    /// session, subscription, invoice and payment ids its kind names, each at
+    /// most [`MAX_EVENT_FIELD`] characters). An optional customer,
+    /// subscription or payment reference that does not fit is dropped.
     pub(crate) fn new(
         id: String,
         provider: &'static str,
         event_type: String,
         kind: EventKind,
-        customer_id: Option<String>,
-        amount: Option<(i64, String)>,
-        order_ref: Option<Uuid>,
+        fields: EventFields,
     ) -> Result<Self, ProviderError> {
         let fits = |s: &str| !s.trim().is_empty() && s.chars().count() <= MAX_EVENT_FIELD;
         if !fits(&id) {
@@ -146,24 +200,63 @@ impl VerifiedEvent {
                 "the event type is missing or too long",
             ));
         }
-        if let EventKind::CheckoutCompleted { session_id }
-        | EventKind::CheckoutExpired { session_id } = &kind
-        {
-            if !fits(session_id) {
-                return Err(ProviderError::Rejected(
-                    "the checkout session id is missing or too long",
-                ));
+        match &kind {
+            EventKind::CheckoutCompleted { session_id }
+            | EventKind::CheckoutExpired { session_id } => {
+                if !fits(session_id) {
+                    return Err(ProviderError::Rejected(
+                        "the checkout session id is missing or too long",
+                    ));
+                }
             }
+            EventKind::RenewalPaid {
+                subscription_id,
+                invoice_id,
+            } => {
+                if !fits(subscription_id) || !fits(invoice_id) {
+                    return Err(ProviderError::Rejected(
+                        "the subscription or invoice id is missing or too long",
+                    ));
+                }
+            }
+            EventKind::RenewalChanged {
+                subscription_id, ..
+            }
+            | EventKind::SubscriptionEnded { subscription_id } => {
+                if !fits(subscription_id) {
+                    return Err(ProviderError::Rejected(
+                        "the subscription id is missing or too long",
+                    ));
+                }
+            }
+            EventKind::Refunded { payment_refs } => {
+                if payment_refs.is_empty() || !payment_refs.iter().all(|r| fits(r)) {
+                    return Err(ProviderError::Rejected(
+                        "the refunded payment's ids are missing or too long",
+                    ));
+                }
+            }
+            EventKind::Ignored { .. } => {}
         }
-        let customer_id = customer_id.filter(|c| fits(c));
+        let EventFields {
+            customer_id,
+            amount,
+            order_ref,
+            subscription_id,
+            payment_ref,
+            occurred_at,
+        } = fields;
         Ok(Self {
             id,
             provider,
             event_type,
             kind,
-            customer_id,
+            customer_id: customer_id.filter(|c| fits(c)),
             amount,
             order_ref,
+            subscription_id: subscription_id.filter(|c| fits(c)),
+            payment_ref: payment_ref.filter(|c| fits(c)),
+            occurred_at,
         })
     }
 
@@ -186,7 +279,7 @@ impl VerifiedEvent {
         match &self.kind {
             EventKind::CheckoutCompleted { session_id }
             | EventKind::CheckoutExpired { session_id } => Some(session_id),
-            EventKind::Ignored { .. } => None,
+            _ => None,
         }
     }
 
@@ -211,6 +304,24 @@ impl VerifiedEvent {
     /// `metadata[wipehub_hub]` is this hub's origin (decisions 9 and 11).
     pub fn order_ref(&self) -> Option<Uuid> {
         self.order_ref
+    }
+
+    /// The subscription a completed checkout started (Stripe's `sub_…`, the
+    /// Fake `fake_sub_…`), if any: the order renews.
+    pub fn subscription_id(&self) -> Option<&str> {
+        self.subscription_id.as_deref()
+    }
+
+    /// A completed checkout's payment reference (Stripe's payment intent, or
+    /// the subscription's first invoice), which a refund names.
+    pub fn payment_ref(&self) -> Option<&str> {
+        self.payment_ref.as_deref()
+    }
+
+    /// When the provider says the event happened, in unix seconds, if sent
+    /// (orders renewal changes that arrive out of order).
+    pub fn occurred_at(&self) -> Option<i64> {
+        self.occurred_at
     }
 }
 
@@ -297,8 +408,12 @@ struct FakeEvent {
     id: String,
     #[serde(rename = "type")]
     event_type: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subscription_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    invoice_id: Option<String>,
 }
 
 pub(crate) type HmacSha256 = Hmac<Sha256>;
@@ -333,10 +448,23 @@ impl Fake {
     /// A new Fake event of `event_type` for `session_id`: its JSON body and
     /// its signature. The event id is `fake_evt_<uuid>`.
     pub fn signed_event(event_type: &str, session_id: &str) -> (Vec<u8>, String) {
+        Self::signed_event_with(event_type, Some(session_id), None, None)
+    }
+
+    /// A new Fake event of `event_type` with any of a checkout session, a
+    /// subscription and an invoice: its JSON body and its signature.
+    pub fn signed_event_with(
+        event_type: &str,
+        session_id: Option<&str>,
+        subscription_id: Option<&str>,
+        invoice_id: Option<&str>,
+    ) -> (Vec<u8>, String) {
         let event = FakeEvent {
             id: format!("{FAKE_EVENT_PREFIX}{}", Uuid::new_v4().simple()),
             event_type: event_type.to_string(),
-            session_id: Some(session_id.to_string()),
+            session_id: session_id.map(str::to_string),
+            subscription_id: subscription_id.map(str::to_string),
+            invoice_id: invoice_id.map(str::to_string),
         };
         let body = serde_json::to_vec(&event).expect("a Fake event serializes");
         let signature = Self::sign(&body);
@@ -403,30 +531,39 @@ impl PaymentProvider for Fake {
             .map_err(|_| ProviderError::Rejected("the signature does not match"))?;
         let event: FakeEvent = serde_json::from_slice(body)
             .map_err(|_| ProviderError::Rejected("the event is not valid JSON"))?;
-        let session = |s: Option<String>| {
+        let required = |s: Option<String>, missing: &'static str| {
             s.filter(|s| !s.trim().is_empty())
-                .ok_or(ProviderError::Rejected("the event has no session_id"))
+                .ok_or(ProviderError::Rejected(missing))
         };
+        const NO_SESSION: &str = "the event has no session_id";
+        const NO_SUBSCRIPTION: &str = "the event has no subscription_id";
+        let mut fields = EventFields::default();
         let kind = match event.event_type.as_str() {
-            FAKE_CHECKOUT_COMPLETED => EventKind::CheckoutCompleted {
-                session_id: session(event.session_id)?,
-            },
+            FAKE_CHECKOUT_COMPLETED => {
+                fields.subscription_id = event.subscription_id.clone();
+                EventKind::CheckoutCompleted {
+                    session_id: required(event.session_id, NO_SESSION)?,
+                }
+            }
             FAKE_CHECKOUT_EXPIRED => EventKind::CheckoutExpired {
-                session_id: session(event.session_id)?,
+                session_id: required(event.session_id, NO_SESSION)?,
             },
+            FAKE_SUBSCRIPTION_RENEWED => EventKind::RenewalPaid {
+                subscription_id: required(event.subscription_id, NO_SUBSCRIPTION)?,
+                invoice_id: required(event.invoice_id, "the event has no invoice_id")?,
+            },
+            FAKE_SUBSCRIPTION_CANCELLED => {
+                fields.occurred_at = Some(crate::stripe::unix_now());
+                EventKind::RenewalChanged {
+                    subscription_id: required(event.subscription_id, NO_SUBSCRIPTION)?,
+                    renews: false,
+                }
+            }
             _ => EventKind::Ignored {
                 event_type: event.event_type.clone(),
             },
         };
-        VerifiedEvent::new(
-            event.id,
-            self.name(),
-            event.event_type,
-            kind,
-            None,
-            None,
-            None,
-        )
+        VerifiedEvent::new(event.id, self.name(), event.event_type, kind, fields)
     }
 }
 
@@ -449,6 +586,7 @@ mod tests {
             currency: "USD".into(),
             interval: "annual".into(),
             customer_id: None,
+            renewal_notice: None,
         }
     }
 
@@ -604,6 +742,58 @@ mod tests {
                     Err(ProviderError::Rejected(_))
                 ),
                 "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn fake_subscription_events_map_to_kinds() {
+        let (body, sig) = Fake::signed_event_with(
+            FAKE_CHECKOUT_COMPLETED,
+            Some("fake_cs_1"),
+            Some("fake_sub_1"),
+            None,
+        );
+        let ev = verify(&body, Some(&sig)).unwrap();
+        assert_eq!(ev.subscription_id(), Some("fake_sub_1"));
+        assert_eq!(ev.payment_ref(), None);
+        let (body, sig) = Fake::signed_event_with(
+            FAKE_SUBSCRIPTION_RENEWED,
+            None,
+            Some("fake_sub_1"),
+            Some("fake_in_1"),
+        );
+        let ev = verify(&body, Some(&sig)).unwrap();
+        assert_eq!(
+            ev.kind(),
+            &EventKind::RenewalPaid {
+                subscription_id: "fake_sub_1".into(),
+                invoice_id: "fake_in_1".into()
+            }
+        );
+        assert_eq!(ev.session_id(), None);
+        let (body, sig) =
+            Fake::signed_event_with(FAKE_SUBSCRIPTION_CANCELLED, None, Some("fake_sub_1"), None);
+        let ev = verify(&body, Some(&sig)).unwrap();
+        assert_eq!(
+            ev.kind(),
+            &EventKind::RenewalChanged {
+                subscription_id: "fake_sub_1".into(),
+                renews: false
+            }
+        );
+        assert!(ev.occurred_at().is_some());
+        // Missing ids are refused.
+        for (event_type, sub, invoice) in [
+            (FAKE_SUBSCRIPTION_RENEWED, None, Some("fake_in_1")),
+            (FAKE_SUBSCRIPTION_RENEWED, Some("fake_sub_1"), None),
+            (FAKE_SUBSCRIPTION_RENEWED, Some(" "), Some("fake_in_1")),
+            (FAKE_SUBSCRIPTION_CANCELLED, None, None),
+        ] {
+            let (body, sig) = Fake::signed_event_with(event_type, None, sub, invoice);
+            assert!(
+                matches!(verify(&body, Some(&sig)), Err(ProviderError::Rejected(_))),
+                "{event_type} {sub:?} {invoice:?}"
             );
         }
     }

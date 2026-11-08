@@ -62,6 +62,12 @@ export function OrderPage({ id }: { id: string }) {
               <dd>{o.expired_at}</dd>
             </>
           )}
+          {o.refunded_at && (
+            <>
+              <dt className="text-slate-400">Refunded</dt>
+              <dd>{o.refunded_at}</dd>
+            </>
+          )}
           <dt className="text-slate-400">Payment provider</dt>
           <dd>{o.provider === "fake" ? "Test (no money moves)" : "Stripe"}</dd>
         </dl>

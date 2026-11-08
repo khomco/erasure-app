@@ -125,10 +125,21 @@ const ROUTES: &[(&str, &str, Class)] = &[
     ("POST", "/api/checkout", Customer),
     ("GET", "/api/orders", Customer),
     ("GET", "/api/orders/:id", Customer),
+    ("GET", "/api/entitlements", Customer),
     ("POST", "/api/billing/portal", Customer),
     ("GET", "/api/payments/fake/sessions/:id", Customer),
     ("POST", "/api/payments/fake/sessions/:id/pay", Customer),
     ("POST", "/api/payments/fake/sessions/:id/abandon", Customer),
+    (
+        "POST",
+        "/api/payments/fake/entitlements/:id/renew",
+        Customer,
+    ),
+    (
+        "POST",
+        "/api/payments/fake/entitlements/:id/cancel",
+        Customer,
+    ),
     ("GET", "/api/admin/organizations", Admin),
     ("GET", "/api/admin/users", Admin),
     ("GET", "/api/admin/organizations/:id", Admin),
@@ -277,8 +288,8 @@ async fn tenant(hub: &Hub, org_name: &str, names: Option<(&str, &str)>, offering
 
 /// Everything stored about organization `org`, as JSON text: the
 /// organization row, its users, its invitations, its orders, its billing
-/// customers, and its users' sessions and emailed tokens (hashes, expiries,
-/// `used_at`), each in full.
+/// customers, its entitlements and their renewals, and its users' sessions
+/// and emailed tokens (hashes, expiries, `used_at`), each in full.
 async fn rows_of(hub: &Hub, org: Uuid) -> Vec<String> {
     let mut out = Vec::new();
     for sql in [
@@ -288,6 +299,10 @@ async fn rows_of(hub: &Hub, org: Uuid) -> Vec<String> {
         "SELECT row_to_json(o)::text FROM orders o WHERE organization_id = $1 ORDER BY id",
         "SELECT row_to_json(c)::text FROM billing_customers c WHERE organization_id = $1 \
          ORDER BY provider",
+        "SELECT row_to_json(e)::text FROM entitlements e WHERE organization_id = $1 ORDER BY id",
+        "SELECT row_to_json(r)::text FROM entitlement_renewals r \
+         JOIN entitlements e ON e.id = r.entitlement_id \
+         WHERE e.organization_id = $1 ORDER BY r.invoice_id",
         "SELECT row_to_json(s)::text FROM sessions s JOIN users u ON u.id = s.user_id \
          WHERE u.organization_id = $1 ORDER BY s.token_hash",
         "SELECT row_to_json(t)::text FROM auth_tokens t JOIN users u ON u.id = t.user_id \
@@ -301,6 +316,47 @@ async fn rows_of(hub: &Hub, org: Uuid) -> Vec<String> {
         out.extend(rows);
     }
     out
+}
+
+/// `owner` buys `offering` (annual) through the Fake provider and renews it
+/// once: the entitlement's id.
+async fn paid_renewed_entitlement(hub: &Hub, owner: &Who, offering: &str) -> String {
+    let resp = hub
+        .post(
+            "/api/checkout",
+            json!({ "offering_id": offering }),
+            Some(&owner.cookie),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: Value = resp.json().await.unwrap();
+    let order = body["order"]["id"].as_str().unwrap().to_string();
+    let session: String =
+        sqlx::query_scalar("SELECT provider_session_id FROM orders WHERE id = $1::uuid")
+            .bind(&order)
+            .fetch_one(&hub.db.pool)
+            .await
+            .unwrap();
+    let resp = hub
+        .post_empty(
+            &format!("/api/payments/fake/sessions/{session}/pay"),
+            Some(&owner.cookie),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let id: Uuid = sqlx::query_scalar("SELECT id FROM entitlements WHERE order_id = $1::uuid")
+        .bind(&order)
+        .fetch_one(&hub.db.pool)
+        .await
+        .unwrap();
+    let resp = hub
+        .post_empty(
+            &format!("/api/payments/fake/entitlements/{id}/renew"),
+            Some(&owner.cookie),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    id.to_string()
 }
 
 /// A fresh session cookie for `user_id`, so routes that end sessions or
@@ -335,7 +391,17 @@ async fn organization_a_never_sees_or_changes_organization_b() {
     .execute(&hub.db.pool)
     .await
     .unwrap();
+    // B has a paid, renewing order (an entitlement) renewed once.
+    let b_entitlement = paid_renewed_entitlement(&hub, &b.owner, &offering).await;
     let b_before = rows_of(&hub, b.org).await;
+    assert!(
+        b_before.iter().any(|r| r.contains(&b_entitlement)),
+        "{b_before:?}"
+    );
+    assert!(
+        b_before.iter().any(|r| r.contains("fake_in_")),
+        "{b_before:?}"
+    );
     assert!(
         b_before.iter().any(|r| r.contains("cus_bravo_secret")),
         "{b_before:?}"
@@ -356,6 +422,7 @@ async fn organization_a_never_sees_or_changes_organization_b() {
         b.order.clone(),
         b.session.clone(),
         "cus_bravo_secret".into(),
+        b_entitlement.clone(),
     ];
 
     let mut swept = 0;
@@ -372,6 +439,8 @@ async fn organization_a_never_sees_or_changes_organization_b() {
                 b.order.clone()
             } else if path.starts_with("/api/payments/fake/sessions/") {
                 b.session.clone()
+            } else if path.starts_with("/api/payments/fake/entitlements/") {
+                b_entitlement.clone()
             } else {
                 // Only admin routes remain with `:id`; they refuse a
                 // customer before reading it.

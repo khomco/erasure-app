@@ -1,0 +1,80 @@
+{
+  "id": "__EVENT_ID__",
+  "object": "event",
+  "api_version": "2025-03-31.basil",
+  "created": __CREATED__,
+  "data": {
+    "object": {
+      "id": "__INVOICE_ID__",
+      "object": "invoice",
+      "account_country": "US",
+      "account_name": "Wipestation Test",
+      "amount_due": __AMOUNT__,
+      "amount_paid": __AMOUNT__,
+      "amount_remaining": 0,
+      "attempt_count": 1,
+      "attempted": true,
+      "billing_reason": "subscription_cycle",
+      "collection_method": "charge_automatically",
+      "created": 1762600000,
+      "currency": "__CURRENCY__",
+      "customer": "cus_test_1",
+      "customer_email": "buyer@example.com",
+      "customer_name": "Test Buyer",
+      "customer_address": {
+        "city": "Springfield",
+        "country": "US",
+        "line1": "1 Example Street",
+        "line2": null,
+        "postal_code": "00000",
+        "state": "IL"
+      },
+      "hosted_invoice_url": "https://invoice.stripe.com/i/test",
+      "invoice_pdf": "https://pay.stripe.com/invoice/test/pdf",
+      "lines": {
+        "object": "list",
+        "data": [
+          {
+            "id": "il_test_1",
+            "object": "line_item",
+            "amount": __AMOUNT__,
+            "currency": "__CURRENCY__",
+            "period": {
+              "start": 1762600000,
+              "end": 1794136000
+            },
+            "quantity": 1
+          }
+        ],
+        "has_more": false
+      },
+      "livemode": false,
+      "metadata": {},
+      "number": "TEST-0002",
+      "parent": {
+        "type": "subscription_details",
+        "quote_details": null,
+        "subscription_details": {
+          "metadata": {
+            "wipehub_hub": "__HUB__",
+            "wipehub_order_id": "__ORDER_ID__",
+            "wipehub_organization_id": "__ORGANIZATION_ID__"
+          },
+          "subscription": "__SUBSCRIPTION_ID__"
+        }
+      },
+      "period_start": 1731024000,
+      "period_end": 1762600000,
+      "status": "paid",
+      "subtotal": __AMOUNT__,
+      "total": __AMOUNT__
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "invoice.paid"
+}

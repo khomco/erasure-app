@@ -11,6 +11,7 @@ export const ORDER_STATUS_LABELS: Record<Order["status"], string> = {
   pending: "Awaiting payment",
   paid: "Paid",
   expired: "Expired (not paid)",
+  refunded: "Refunded",
 };
 
 /** "1 seat, per machine, unlimited erasures, 12 months; PDF certificates". */
@@ -53,6 +54,9 @@ function Orders({ account }: { account: Account }) {
       <p className="flex gap-4 text-sm">
         <Link to="/buy" className="text-indigo-400 hover:underline">
           Buy
+        </Link>
+        <Link to="/seats" className="text-indigo-400 hover:underline">
+          Licence seats
         </Link>
       </p>
       {account.user.role === "owner" && <BillingButton />}

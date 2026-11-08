@@ -1,5 +1,7 @@
-//! The Stripe provider and the payment webhook (offerings-and-payments story
-//! 3, CAP-3, CAP-5 and CAP-7). One test per row of the story's I/O matrix,
+//! The Stripe provider and the payment webhook (offerings-and-payments
+//! stories 3 and 4, CAP-3 to CAP-5 and CAP-7). One test per row of the
+//! stories' I/O matrices (story 4: subscriptions, renewals, cancellation
+//! and refunds, asserting entitlement rows too),
 //! through HTTP: a hub on the Stripe provider pointed at a local mock of the
 //! Stripe API (`support::stripe_mock`), and Stripe-shaped event fixtures from
 //! `tests/fixtures/stripe/` signed in the test. Asserts the responses, the
@@ -20,6 +22,7 @@ use support::stripe_mock::{
 };
 use uuid::Uuid;
 use wipe_hub::csrf::MSG_BAD_CSRF;
+use wipe_hub::entitlements::renewal_notice_now;
 use wipe_hub::order_routes::{
     MSG_EVENT_NOT_READY, MSG_NO_BILLING_ACCOUNT, MSG_OWNER_ONLY_BILLING, MSG_PROVIDER_FAILED,
 };
@@ -61,6 +64,19 @@ fn template(name: &str) -> &'static str {
         "payment_intent.succeeded" => {
             include_str!("fixtures/stripe/payment_intent.succeeded.json")
         }
+        "checkout.session.completed.subscription" => {
+            include_str!("fixtures/stripe/checkout.session.completed.subscription.json")
+        }
+        "invoice.paid" => include_str!("fixtures/stripe/invoice.paid.json"),
+        "invoice.paid.create" => include_str!("fixtures/stripe/invoice.paid.create.json"),
+        "invoice.paid.parent" => include_str!("fixtures/stripe/invoice.paid.parent.json"),
+        "customer.subscription.updated" => {
+            include_str!("fixtures/stripe/customer.subscription.updated.json")
+        }
+        "customer.subscription.deleted" => {
+            include_str!("fixtures/stripe/customer.subscription.deleted.json")
+        }
+        "charge.refunded" => include_str!("fixtures/stripe/charge.refunded.json"),
         other => panic!("no fixture {other}"),
     }
 }
@@ -68,19 +84,53 @@ fn template(name: &str) -> &'static str {
 /// A fixture with its placeholders filled: a fresh event id, `session`, the
 /// order and organization ids, the spawned hub's origin (`BASE`, the
 /// `metadata[wipehub_hub]` the hub sends), the offering's price, and `usd`
-/// (Stripe sends currencies lower-case).
+/// (Stripe sends currencies lower-case). Story 4's placeholders get
+/// [`DEFAULTS`] unless [`fill`] is given them.
 fn event(name: &str, session: &str, order: &str, org: &str) -> Value {
-    let text = template(name)
+    fill(
+        name,
+        &[
+            ("__SESSION_ID__", session.to_string()),
+            ("__ORDER_ID__", order.to_string()),
+            ("__ORGANIZATION_ID__", org.to_string()),
+        ],
+    )
+}
+
+/// Story 4's placeholders and their defaults.
+const DEFAULTS: &[(&str, &str)] = &[
+    ("__PAYMENT_INTENT__", "pi_test_1"),
+    ("__SUBSCRIPTION_ID__", "sub_test_1"),
+    ("__INVOICE_ID__", "in_test_1"),
+    ("__CANCEL_AT_PERIOD_END__", "false"),
+    ("__REFUNDED__", "true"),
+];
+
+/// The fixture `name` with `pairs` substituted first, then a fresh event id,
+/// the hub, the price, `usd`, `__CREATED__` = now, `__AMOUNT_REFUNDED__` =
+/// the price (a full refund), and [`DEFAULTS`].
+fn fill(name: &str, pairs: &[(&str, String)]) -> Value {
+    let mut text = template(name).to_string();
+    for (placeholder, value) in pairs {
+        text = text.replace(placeholder, value);
+    }
+    text = text
         .replace(
             "__EVENT_ID__",
             &format!("evt_test_{}", Uuid::new_v4().simple()),
         )
-        .replace("__SESSION_ID__", session)
-        .replace("__ORDER_ID__", order)
-        .replace("__ORGANIZATION_ID__", org)
         .replace("__HUB__", BASE)
+        .replace("__AMOUNT_REFUNDED__", &PRICE.to_string())
         .replace("__AMOUNT__", &PRICE.to_string())
-        .replace("__CURRENCY__", "usd");
+        .replace("__CURRENCY__", "usd")
+        .replace("__CREATED__", &now().to_string());
+    for (placeholder, value) in DEFAULTS {
+        text = text.replace(placeholder, value);
+    }
+    assert!(
+        !text.contains("__"),
+        "unfilled placeholder in {name}: {text}"
+    );
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
@@ -123,7 +173,10 @@ struct Shop {
     owner: Who,
     member: Who,
     org: String,
+    /// Annual (a subscription since story 4).
     offering: String,
+    /// One-off, 24 months.
+    one_off: String,
 }
 
 /// One stored payment event: `(event_id, event_type, session_id,
@@ -146,6 +199,7 @@ async fn shop() -> Shop {
     let member = hub.add(&owner, "member").await;
     let org = org_of(&hub, &owner).await;
     let offering = hub.published_offering("Station annual").await;
+    let one_off = hub.published_one_off_offering("Station once", 24).await;
     Shop {
         hub,
         mock,
@@ -153,23 +207,34 @@ async fn shop() -> Shop {
         member,
         org,
         offering,
+        one_off,
     }
 }
 
 impl Shop {
     async fn checkout_resp(&self) -> Response {
+        self.checkout_of_resp(&self.offering).await
+    }
+
+    async fn checkout_of_resp(&self, offering: &str) -> Response {
         self.hub
             .post(
                 "/api/checkout",
-                json!({ "offering_id": self.offering }),
+                json!({ "offering_id": offering }),
                 Some(&self.owner.cookie),
             )
             .await
     }
 
-    /// A pending order: `(response body, order id, session id)`.
+    /// A pending order of the annual offering: `(response body, order id,
+    /// session id)`.
     async fn checkout(&self) -> (Value, String, String) {
-        let resp = self.checkout_resp().await;
+        self.checkout_of(&self.offering).await
+    }
+
+    /// A pending order of `offering`: `(response body, order id, session id)`.
+    async fn checkout_of(&self, offering: &str) -> (Value, String, String) {
+        let resp = self.checkout_of_resp(offering).await;
         let code = resp.status();
         let v: Value = resp.json().await.unwrap();
         assert_eq!(code, StatusCode::CREATED, "{v}");
@@ -250,8 +315,9 @@ impl Shop {
 
 #[tokio::test]
 async fn stripe_checkout_sends_the_documented_request() {
+    // A one-off offering: a single payment (story 3's form, unchanged).
     let s = shop().await;
-    let (v, id, session) = s.checkout().await;
+    let (v, id, session) = s.checkout_of(&s.one_off).await;
     assert_eq!(v["order"]["status"], "pending");
     assert_eq!(v["order"]["provider"], "stripe");
     assert!(session.starts_with("cs_test_"), "{session}");
@@ -291,7 +357,7 @@ async fn stripe_checkout_sends_the_documented_request() {
         ("line_items[0][price_data][unit_amount]", PRICE.to_string()),
         (
             "line_items[0][price_data][product_data][name]",
-            "Station annual".into(),
+            "Station once".into(),
         ),
         ("metadata[wipehub_order_id]", id.clone()),
         ("metadata[wipehub_organization_id]", s.org.clone()),
@@ -312,6 +378,66 @@ async fn stripe_checkout_sends_the_documented_request() {
     assert_eq!(audits.len(), 1, "{audits:?}");
     assert_eq!(audits[0].0, "order.created");
     assert_eq!(audits[0].2["provider"], "stripe");
+}
+
+#[tokio::test]
+async fn an_annual_checkout_is_a_stripe_subscription() {
+    let s = shop().await;
+    let (v, id, _) = s.checkout().await;
+    assert_eq!(v["order"]["interval"], "annual");
+    let requests = s.mock.requests();
+    assert_eq!(requests.len(), 1);
+    let r = &requests[0];
+    assert_eq!(r.path, "/v1/checkout/sessions");
+    assert_eq!(
+        r.header("idempotency-key"),
+        Some(format!("wipehub-checkout-{id}").as_str())
+    );
+    let notice = renewal_notice_now("annual", PRICE, "USD").unwrap();
+    let page = format!("{BASE}/orders/{id}");
+    let mut want: Vec<(String, String)> = [
+        ("mode", "subscription".to_string()),
+        ("client_reference_id", id.clone()),
+        ("success_url", page.clone()),
+        ("cancel_url", page),
+        ("line_items[0][quantity]", "1".into()),
+        ("line_items[0][price_data][currency]", "usd".into()),
+        ("line_items[0][price_data][unit_amount]", PRICE.to_string()),
+        (
+            "line_items[0][price_data][product_data][name]",
+            "Station annual".into(),
+        ),
+        (
+            "line_items[0][price_data][recurring][interval]",
+            "year".into(),
+        ),
+        ("metadata[wipehub_order_id]", id.clone()),
+        ("metadata[wipehub_organization_id]", s.org.clone()),
+        ("metadata[wipehub_hub]", BASE.into()),
+        ("subscription_data[metadata][wipehub_order_id]", id.clone()),
+        (
+            "subscription_data[metadata][wipehub_organization_id]",
+            s.org.clone(),
+        ),
+        ("subscription_data[metadata][wipehub_hub]", BASE.into()),
+        (
+            "custom_text[submit][message]",
+            format!("{} {}", notice.headline, notice.detail),
+        ),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    let mut got = r.form.clone();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
+    // Never `customer_creation` in subscription mode.
+    assert_eq!(r.field("customer_creation"), None);
+    assert!(r
+        .field("custom_text[submit][message]")
+        .unwrap()
+        .starts_with("Renews automatically every year at 1,200.00 USD until you cancel. "));
 }
 
 #[tokio::test]
@@ -927,7 +1053,10 @@ async fn a_stale_stored_customer_falls_back_to_a_new_one() {
     );
     assert_eq!(second.path, "/v1/checkout/sessions");
     assert_eq!(second.field("customer"), None);
-    assert_eq!(second.field("customer_creation"), Some("always"));
+    // An annual offering is a subscription: Stripe creates the customer
+    // itself and refuses `customer_creation`, so only `customer` is dropped.
+    assert_eq!(second.field("mode"), Some("subscription"));
+    assert_eq!(second.field("customer_creation"), None);
     assert_eq!(
         second.header("idempotency-key"),
         Some(format!("wipehub-checkout-{id}-new-customer").as_str())
@@ -1209,4 +1338,801 @@ async fn the_schema_keeps_events_append_only_and_customers_replace_only() {
     .execute(pool)
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn a_one_off_stale_customer_falls_back_with_customer_creation() {
+    let s = shop().await;
+    sqlx::query(
+        "INSERT INTO billing_customers (organization_id, provider, customer_id) \
+         VALUES ($1::uuid, 'stripe', 'cus_old')",
+    )
+    .bind(&s.org)
+    .execute(&s.hub.db.pool)
+    .await
+    .unwrap();
+    s.mock.reply_next(
+        400,
+        json!({"error": {"type": "invalid_request_error", "code": "resource_missing",
+                         "param": "customer"}}),
+    );
+    s.checkout_of(&s.one_off).await;
+    let requests = s.mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].field("customer"), Some("cus_old"));
+    assert_eq!(requests[1].field("mode"), Some("payment"));
+    assert_eq!(requests[1].field("customer"), None);
+    assert_eq!(requests[1].field("customer_creation"), Some("always"));
+}
+
+// ---------------------------------------------------------------------------
+// Story 4: entitlements, renewals, cancellation and refunds
+
+/// One entitlement row: `(status, renews, months from term_start to term_end,
+/// subscription_id, payment_ref, cancelled, refunded)`.
+type EntRow = (
+    String,
+    bool,
+    i32,
+    Option<String>,
+    Option<String>,
+    bool,
+    bool,
+);
+
+impl Shop {
+    async fn entitlement(&self, order: &str) -> EntRow {
+        sqlx::query_as(
+            "SELECT status, renews, \
+                    (extract(year FROM age(term_end, term_start)) * 12 \
+                     + extract(month FROM age(term_end, term_start)))::int, \
+                    subscription_id, payment_ref, cancelled_at IS NOT NULL, \
+                    refunded_at IS NOT NULL \
+             FROM entitlements WHERE order_id = $1::uuid",
+        )
+        .bind(order)
+        .fetch_one(&self.hub.db.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn entitlement_id(&self, order: &str) -> String {
+        let id: Uuid = sqlx::query_scalar("SELECT id FROM entitlements WHERE order_id = $1::uuid")
+            .bind(order)
+            .fetch_one(&self.hub.db.pool)
+            .await
+            .unwrap();
+        id.to_string()
+    }
+
+    /// `(action, actor, detail)` of every audit row about the entitlement of
+    /// `order`, oldest first.
+    async fn entitlement_audits(&self, order: &str) -> Vec<(String, String, Value)> {
+        let id = self.entitlement_id(order).await;
+        sqlx::query_as("SELECT action, actor, detail FROM audit_log WHERE subject = $1 ORDER BY id")
+            .bind(format!("entitlement:{id}"))
+            .fetch_all(&self.hub.db.pool)
+            .await
+            .unwrap()
+    }
+
+    /// `(invoice_id, renewal adds 12 months)` of every renewal row.
+    async fn renewals(&self) -> Vec<(String, bool)> {
+        sqlx::query_as(
+            "SELECT invoice_id, term_end = previous_term_end + interval '12 months' \
+             FROM entitlement_renewals ORDER BY created_at, invoice_id",
+        )
+        .fetch_all(&self.hub.db.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn seats(&self) -> Value {
+        let resp = self
+            .hub
+            .get("/api/entitlements", Some(&self.member.cookie))
+            .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        resp.json().await.unwrap()
+    }
+
+    /// The fixture `name` for this organization's `order`, with `pairs`.
+    fn sub_event(&self, name: &str, order: &str, pairs: &[(&str, String)]) -> Value {
+        let mut all = vec![
+            ("__ORDER_ID__", order.to_string()),
+            ("__ORGANIZATION_ID__", self.org.clone()),
+        ];
+        all.extend(pairs.iter().map(|(k, v)| (*k, v.clone())));
+        fill(name, &all)
+    }
+
+    /// An annual order paid through a subscription `sub` whose first invoice
+    /// is `first_invoice`: its order id.
+    async fn subscribed(&self, sub: &str, first_invoice: &str) -> String {
+        let (_, id, session) = self.checkout().await;
+        let paid = self.sub_event(
+            "checkout.session.completed.subscription",
+            &id,
+            &[
+                ("__SESSION_ID__", session),
+                ("__SUBSCRIPTION_ID__", sub.to_string()),
+                ("__INVOICE_ID__", first_invoice.to_string()),
+            ],
+        );
+        received(deliver(&self.hub, &bytes(&paid)).await).await;
+        assert_eq!(self.outcome(&paid).await.as_deref(), Some("applied"));
+        id
+    }
+
+    async fn deliver_ok(&self, ev: &Value) -> Option<String> {
+        received(deliver(&self.hub, &bytes(ev)).await).await;
+        self.outcome(ev).await
+    }
+}
+
+fn renewal(s: &Shop, order: &str, sub: &str, invoice: &str) -> Value {
+    s.sub_event(
+        "invoice.paid",
+        order,
+        &[
+            ("__SUBSCRIPTION_ID__", sub.to_string()),
+            ("__INVOICE_ID__", invoice.to_string()),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn a_paid_subscription_grants_one_renewing_entitlement() {
+    let s = shop().await;
+    let id = s.subscribed("sub_test_1", "in_test_0").await;
+    assert_eq!(s.status(&id).await, "paid");
+    assert_eq!(
+        s.entitlement(&id).await,
+        (
+            "active".into(),
+            true,
+            12,
+            Some("sub_test_1".into()),
+            Some("in_test_0".into()),
+            false,
+            false
+        )
+    );
+    let audits = s.entitlement_audits(&id).await;
+    assert_eq!(audits.len(), 1, "{audits:?}");
+    assert_eq!(
+        (audits[0].0.as_str(), audits[0].1.as_str()),
+        ("entitlement.granted", "provider:stripe")
+    );
+    assert_eq!(audits[0].2["order_id"], json!(id));
+    assert!(audits[0].2["term_end"].as_str().unwrap().ends_with('Z'));
+    let seats = s.seats().await;
+    assert_eq!(seats["available_seats"], 1);
+    assert_eq!(seats["entitlements"][0]["renews"], true);
+
+    // The first invoice (paid through the checkout) is ignored.
+    let first = s.sub_event(
+        "invoice.paid.create",
+        &id,
+        &[
+            ("__SUBSCRIPTION_ID__", "sub_test_1".into()),
+            ("__INVOICE_ID__", "in_test_0".into()),
+        ],
+    );
+    assert_eq!(s.deliver_ok(&first).await.as_deref(), Some("ignored"));
+    assert_eq!(s.entitlement(&id).await.2, 12);
+    assert!(s.renewals().await.is_empty());
+
+    // A one-off payment: no subscription, the payment intent, its own term.
+    let (_, once, session) = s.checkout_of(&s.one_off).await;
+    let paid = s.event("checkout.session.completed", &session, &once);
+    assert_eq!(s.deliver_ok(&paid).await.as_deref(), Some("applied"));
+    assert_eq!(
+        s.entitlement(&once).await,
+        (
+            "active".into(),
+            false,
+            24,
+            None,
+            Some("pi_test_1".into()),
+            false,
+            false
+        )
+    );
+    // One seat plus the one-off's two.
+    assert_eq!(s.seats().await["available_seats"], 3);
+}
+
+#[tokio::test]
+async fn a_renewal_extends_the_term_once_per_invoice() {
+    let s = shop().await;
+    let id = s.subscribed("sub_test_1", "in_test_0").await;
+    let first = renewal(&s, &id, "sub_test_1", "in_test_1");
+    assert_eq!(s.deliver_ok(&first).await.as_deref(), Some("applied"));
+    assert_eq!(s.entitlement(&id).await.2, 24);
+    // The same invoice under a new event id changes nothing.
+    let again = renewal(&s, &id, "sub_test_1", "in_test_1");
+    assert_ne!(again["id"], first["id"]);
+    assert_eq!(s.deliver_ok(&again).await.as_deref(), Some("unchanged"));
+    // A replay of the first event is a duplicate.
+    received(deliver(&s.hub, &bytes(&first)).await).await;
+    assert_eq!(s.entitlement(&id).await.2, 24);
+    assert_eq!(s.renewals().await, [("in_test_1".to_string(), true)]);
+    // The next year's invoice extends again.
+    let next = renewal(&s, &id, "sub_test_1", "in_test_2");
+    assert_eq!(s.deliver_ok(&next).await.as_deref(), Some("applied"));
+    assert_eq!(s.entitlement(&id).await.2, 36);
+    assert_eq!(s.renewals().await.len(), 2);
+
+    let audits = s.entitlement_audits(&id).await;
+    let actions: Vec<&str> = audits.iter().map(|a| a.0.as_str()).collect();
+    assert_eq!(
+        actions,
+        [
+            "entitlement.granted",
+            "entitlement.renewed",
+            "entitlement.renewed"
+        ]
+    );
+    let renewed = &audits[1];
+    assert_eq!(renewed.1, "provider:stripe");
+    let detail = renewed.2.as_object().unwrap();
+    let mut keys: Vec<&String> = detail.keys().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["event_id", "invoice_id", "previous_term_end", "term_end"]
+    );
+    assert_eq!(renewed.2["event_id"], first["id"]);
+    assert_eq!(renewed.2["invoice_id"], "in_test_1");
+    assert_eq!(renewed.2["previous_term_end"], audits[0].2["term_end"]);
+    assert_eq!(audits[2].2["previous_term_end"], renewed.2["term_end"]);
+    // The order is untouched by renewals.
+    let order_actions: Vec<String> = s.order_audits(&id).await.into_iter().map(|a| a.0).collect();
+    assert_eq!(order_actions, ["order.created", "order.paid"]);
+}
+
+#[tokio::test]
+async fn a_renewal_before_its_checkout_is_retried_until_the_entitlement_exists() {
+    let s = shop().await;
+    let (_, id, session) = s.checkout().await;
+    let early = renewal(&s, &id, "sub_test_early", "in_test_1");
+    assert_error(
+        deliver(&s.hub, &bytes(&early)).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+        MSG_EVENT_NOT_READY,
+    )
+    .await;
+    assert_eq!(s.hub.count("payment_events").await, 0);
+    // A subscription change and end before the checkout are retried too.
+    for name in [
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+    ] {
+        let ev = s.sub_event(
+            name,
+            &id,
+            &[("__SUBSCRIPTION_ID__", "sub_test_early".into())],
+        );
+        assert_error(
+            deliver(&s.hub, &bytes(&ev)).await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            MSG_EVENT_NOT_READY,
+        )
+        .await;
+    }
+    assert_eq!(s.hub.count("payment_events").await, 0);
+    // Another hub's renewal for an unknown subscription is acknowledged.
+    let mut foreign = renewal(&s, &Uuid::new_v4().to_string(), "sub_other", "in_other");
+    foreign["data"]["object"]["subscription_details"]["metadata"]["wipehub_hub"] =
+        json!("https://staging.wipehub.example");
+    assert_eq!(s.deliver_ok(&foreign).await.as_deref(), Some("unmatched"));
+
+    let paid = s.sub_event(
+        "checkout.session.completed.subscription",
+        &id,
+        &[
+            ("__SESSION_ID__", session),
+            ("__SUBSCRIPTION_ID__", "sub_test_early".into()),
+            ("__INVOICE_ID__", "in_test_0".into()),
+        ],
+    );
+    assert_eq!(s.deliver_ok(&paid).await.as_deref(), Some("applied"));
+    // Stripe retries the same renewal: now it applies.
+    assert_eq!(s.deliver_ok(&early).await.as_deref(), Some("applied"));
+    assert_eq!(s.entitlement(&id).await.2, 24);
+}
+
+#[tokio::test]
+async fn a_renewal_for_another_amount_is_a_mismatch() {
+    let s = shop().await;
+    let id = s.subscribed("sub_test_1", "in_test_0").await;
+    for (field, value) in [("subtotal", json!(PRICE + 1)), ("currency", json!("eur"))] {
+        let mut ev = renewal(&s, &id, "sub_test_1", &format!("in_test_{field}"));
+        ev["data"]["object"][field] = value;
+        assert_eq!(s.deliver_ok(&ev).await.as_deref(), Some("mismatch"));
+    }
+    assert_eq!(s.entitlement(&id).await.2, 12);
+    assert!(s.renewals().await.is_empty());
+    assert_eq!(s.entitlement_audits(&id).await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_owner_cancels_and_resumes_in_the_billing_portal() {
+    let s = shop().await;
+    let id = s.subscribed("sub_test_1", "in_test_0").await;
+    let t = now();
+    let update = |cancel: bool, created: i64| {
+        s.sub_event(
+            "customer.subscription.updated",
+            &id,
+            &[
+                ("__CANCEL_AT_PERIOD_END__", cancel.to_string()),
+                ("__CREATED__", created.to_string()),
+            ],
+        )
+    };
+    let stop = update(true, t - 20);
+    assert_eq!(s.deliver_ok(&stop).await.as_deref(), Some("applied"));
+    let ent = s.entitlement(&id).await;
+    assert_eq!((ent.0.as_str(), ent.1), ("active", false));
+    assert_eq!(s.seats().await["available_seats"], 1);
+    let resume = update(false, t - 10);
+    assert_eq!(s.deliver_ok(&resume).await.as_deref(), Some("applied"));
+    assert!(s.entitlement(&id).await.1);
+    // An older event arriving late changes nothing.
+    let late = update(true, t - 15);
+    assert_eq!(s.deliver_ok(&late).await.as_deref(), Some("unchanged"));
+    assert!(s.entitlement(&id).await.1);
+    // The same state again is unchanged.
+    let same = update(false, t);
+    assert_eq!(s.deliver_ok(&same).await.as_deref(), Some("unchanged"));
+    // `cancel_at` set also stops renewal.
+    let mut cancel_at = update(false, t + 1);
+    cancel_at["data"]["object"]["cancel_at"] = json!(t + 86400);
+    assert_eq!(s.deliver_ok(&cancel_at).await.as_deref(), Some("applied"));
+    assert!(!s.entitlement(&id).await.1);
+
+    let audits = s.entitlement_audits(&id).await;
+    let actions: Vec<(&str, &str)> = audits
+        .iter()
+        .map(|a| (a.0.as_str(), a.1.as_str()))
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            ("entitlement.granted", "provider:stripe"),
+            ("entitlement.renewal_stopped", "provider:stripe"),
+            ("entitlement.renewal_resumed", "provider:stripe"),
+            ("entitlement.renewal_stopped", "provider:stripe"),
+        ]
+    );
+    assert_eq!(audits[1].2, json!({"event_id": stop["id"]}));
+    assert_eq!(audits[2].2, json!({"event_id": resume["id"]}));
+}
+
+#[tokio::test]
+async fn a_subscription_stripe_ends_keeps_its_seats_until_the_term_ends() {
+    let s = shop().await;
+    let id = s.subscribed("sub_test_1", "in_test_0").await;
+    // Delivered an hour late: `cancelled_at` is Stripe's time, not arrival.
+    let ended_at = now() - 3600;
+    let ended = s.sub_event(
+        "customer.subscription.deleted",
+        &id,
+        &[("__CREATED__", ended_at.to_string())],
+    );
+    assert_eq!(s.deliver_ok(&ended).await.as_deref(), Some("applied"));
+    let ent = s.entitlement(&id).await;
+    assert_eq!(
+        (ent.0.as_str(), ent.1, ent.2, ent.5, ent.6),
+        ("cancelled", false, 12, true, false)
+    );
+    let cancelled_at: i64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM cancelled_at)::bigint FROM entitlements \
+         WHERE order_id = $1::uuid",
+    )
+    .bind(&id)
+    .fetch_one(&s.hub.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(cancelled_at, ended_at);
+    let seats = s.seats().await;
+    assert_eq!(seats["available_seats"], 1);
+    assert_eq!(seats["entitlements"][0]["status"], "cancelled");
+    assert_eq!(seats["entitlements"][0]["current"], true);
+    assert!(seats["entitlements"][0]["cancelled_at"]
+        .as_str()
+        .unwrap()
+        .ends_with('Z'));
+    // Ending again, a later renewal, or a renewal change: unchanged.
+    let again = s.sub_event("customer.subscription.deleted", &id, &[]);
+    assert_eq!(s.deliver_ok(&again).await.as_deref(), Some("unchanged"));
+    let late = renewal(&s, &id, "sub_test_1", "in_test_1");
+    assert_eq!(s.deliver_ok(&late).await.as_deref(), Some("unchanged"));
+    let resume = s.sub_event("customer.subscription.updated", &id, &[]);
+    assert_eq!(s.deliver_ok(&resume).await.as_deref(), Some("unchanged"));
+    assert_eq!(s.entitlement(&id).await.2, 12);
+    assert!(s.renewals().await.is_empty());
+    let actions: Vec<String> = s
+        .entitlement_audits(&id)
+        .await
+        .into_iter()
+        .map(|a| a.0)
+        .collect();
+    assert_eq!(actions, ["entitlement.granted", "entitlement.cancelled"]);
+    assert_eq!(s.status(&id).await, "paid");
+}
+
+#[tokio::test]
+async fn a_full_refund_withdraws_the_seats_and_refunds_the_order() {
+    let s = shop().await;
+    // A one-off, refunded through its payment intent.
+    let (_, once, session) = s.checkout_of(&s.one_off).await;
+    let paid = s.sub_event(
+        "checkout.session.completed",
+        &once,
+        &[
+            ("__SESSION_ID__", session),
+            ("__PAYMENT_INTENT__", "pi_once".into()),
+        ],
+    );
+    assert_eq!(s.deliver_ok(&paid).await.as_deref(), Some("applied"));
+    // A subscription renewed once, refunded through the renewal's invoice.
+    let sub = s.subscribed("sub_test_1", "in_test_0").await;
+    let renewed = renewal(&s, &sub, "sub_test_1", "in_test_1");
+    assert_eq!(s.deliver_ok(&renewed).await.as_deref(), Some("applied"));
+    assert_eq!(s.seats().await["available_seats"], 3);
+
+    let refund = s.sub_event(
+        "charge.refunded",
+        &once,
+        &[
+            ("__PAYMENT_INTENT__", "pi_once".into()),
+            ("__INVOICE_ID__", "in_unrelated".into()),
+        ],
+    );
+    let mut refund = refund;
+    refund["data"]["object"]["invoice"] = Value::Null;
+    assert_eq!(s.deliver_ok(&refund).await.as_deref(), Some("applied"));
+    assert_eq!(s.status(&once).await, "refunded");
+    let ent = s.entitlement(&once).await;
+    assert_eq!((ent.0.as_str(), ent.1, ent.6), ("refunded", false, true));
+    assert_eq!(s.seats().await["available_seats"], 1);
+
+    let refund_renewal = s.sub_event(
+        "charge.refunded",
+        &sub,
+        &[
+            ("__PAYMENT_INTENT__", "pi_test_invoice".into()),
+            ("__INVOICE_ID__", "in_test_1".into()),
+        ],
+    );
+    assert_eq!(
+        s.deliver_ok(&refund_renewal).await.as_deref(),
+        Some("applied")
+    );
+    assert_eq!(s.status(&sub).await, "refunded");
+    let ent = s.entitlement(&sub).await;
+    assert_eq!((ent.0.as_str(), ent.1, ent.2), ("refunded", false, 24));
+    let seats = s.seats().await;
+    assert_eq!(seats["available_seats"], 0);
+    assert!(seats["entitlements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| e["current"] == false && e["status"] == "refunded"));
+    // A second refund of the same payment is unchanged.
+    let again = s.sub_event(
+        "charge.refunded",
+        &sub,
+        &[("__INVOICE_ID__", "in_test_0".into())],
+    );
+    assert_eq!(s.deliver_ok(&again).await.as_deref(), Some("unchanged"));
+
+    for order in [&once, &sub] {
+        let audits = s.order_audits(order).await;
+        let last = audits.last().unwrap();
+        assert_eq!(
+            (last.0.as_str(), last.1.as_str()),
+            ("order.refunded", "provider:stripe")
+        );
+        let ent_last = s.entitlement_audits(order).await.pop().unwrap();
+        assert_eq!(ent_last.0, "entitlement.refunded");
+        assert_eq!(ent_last.2, last.2);
+    }
+    // The audit names which payment was refunded.
+    let once_audit = s.order_audits(&once).await.pop().unwrap().2;
+    assert_eq!(
+        once_audit,
+        json!({"event_id": refund["id"], "payment_ref": "pi_once"})
+    );
+    let sub_audit = s.order_audits(&sub).await.pop().unwrap().2;
+    assert_eq!(
+        sub_audit,
+        json!({"event_id": refund_renewal["id"], "payment_ref": "in_test_1"})
+    );
+    assert_eq!(s.hub.audited("order.refunded").await.len(), 2);
+    let refunded_at: Option<String> =
+        sqlx::query_scalar("SELECT to_char(refunded_at, 'YYYY') FROM orders WHERE id = $1::uuid")
+            .bind(&once)
+            .fetch_one(&s.hub.db.pool)
+            .await
+            .unwrap();
+    assert!(refunded_at.is_some());
+    // A member reads the refunded order back through the API.
+    let resp = s
+        .hub
+        .get(&format!("/api/orders/{once}"), Some(&s.member.cookie))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["order"]["status"], "refunded", "{v}");
+    let at = v["order"]["refunded_at"].as_str().unwrap_or_default();
+    assert!(at.ends_with('Z'), "{v}");
+}
+
+#[tokio::test]
+async fn a_partial_or_unknown_refund_changes_nothing() {
+    let s = shop().await;
+    let id = s.subscribed("sub_test_1", "in_test_0").await;
+    let mut partial = s.sub_event(
+        "charge.refunded",
+        &id,
+        &[
+            ("__REFUNDED__", "false".into()),
+            ("__INVOICE_ID__", "in_test_0".into()),
+        ],
+    );
+    partial["data"]["object"]["amount_refunded"] = json!(100);
+    assert_eq!(s.deliver_ok(&partial).await.as_deref(), Some("ignored"));
+    let unknown = s.sub_event(
+        "charge.refunded",
+        &id,
+        &[
+            ("__PAYMENT_INTENT__", "pi_nobody".into()),
+            ("__INVOICE_ID__", "in_nobody".into()),
+        ],
+    );
+    assert_eq!(s.deliver_ok(&unknown).await.as_deref(), Some("unmatched"));
+    assert_eq!(s.status(&id).await, "paid");
+    assert_eq!(s.entitlement(&id).await.0, "active");
+    assert_eq!(s.seats().await["available_seats"], 1);
+    // A full refund naming neither a payment intent nor an invoice (another
+    // app's legacy charge) is acknowledged as ignored, never refused, so
+    // Stripe does not retry it (decision 11).
+    let mut bare = s.sub_event("charge.refunded", &id, &[]);
+    bare["data"]["object"]["payment_intent"] = Value::Null;
+    bare["data"]["object"]["invoice"] = Value::Null;
+    assert_eq!(s.deliver_ok(&bare).await.as_deref(), Some("ignored"));
+    assert_eq!(s.status(&id).await, "paid");
+    assert_eq!(s.entitlement(&id).await.0, "active");
+    assert_eq!(s.seats().await["available_seats"], 1);
+}
+
+#[tokio::test]
+async fn a_refund_after_the_subscription_ended_still_refunds() {
+    let s = shop().await;
+    let id = s.subscribed("sub_test_1", "in_test_0").await;
+    let ended = s.sub_event("customer.subscription.deleted", &id, &[]);
+    assert_eq!(s.deliver_ok(&ended).await.as_deref(), Some("applied"));
+    assert_eq!(s.seats().await["available_seats"], 1);
+    let refund = s.sub_event(
+        "charge.refunded",
+        &id,
+        &[
+            ("__PAYMENT_INTENT__", "pi_test_first".into()),
+            ("__INVOICE_ID__", "in_test_0".into()),
+        ],
+    );
+    assert_eq!(s.deliver_ok(&refund).await.as_deref(), Some("applied"));
+    let ent = s.entitlement(&id).await;
+    // Refunded, not renewing, the cancellation time kept.
+    assert_eq!(
+        (ent.0.as_str(), ent.1, ent.2, ent.5, ent.6),
+        ("refunded", false, 12, true, true)
+    );
+    assert_eq!(s.status(&id).await, "refunded");
+    let expected = json!({"event_id": refund["id"], "payment_ref": "in_test_0"});
+    let ent_audits = s.entitlement_audits(&id).await;
+    let actions: Vec<(&str, &str)> = ent_audits
+        .iter()
+        .map(|a| (a.0.as_str(), a.1.as_str()))
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            ("entitlement.granted", "provider:stripe"),
+            ("entitlement.cancelled", "provider:stripe"),
+            ("entitlement.refunded", "provider:stripe"),
+        ]
+    );
+    assert_eq!(ent_audits[2].2, expected);
+    let order_audits = s.order_audits(&id).await;
+    let last = order_audits.last().unwrap();
+    assert_eq!(
+        (last.0.as_str(), last.1.as_str(), &last.2),
+        ("order.refunded", "provider:stripe", &expected)
+    );
+    assert_eq!(s.hub.audited("order.refunded").await.len(), 1);
+    assert_eq!(s.seats().await["available_seats"], 0);
+}
+
+#[tokio::test]
+async fn a_renewal_in_the_newer_invoice_shape_extends_the_term() {
+    let s = shop().await;
+    let id = s.subscribed("sub_test_1", "in_test_0").await;
+    let parent = s.sub_event(
+        "invoice.paid.parent",
+        &id,
+        &[
+            ("__SUBSCRIPTION_ID__", "sub_test_1".into()),
+            ("__INVOICE_ID__", "in_test_1".into()),
+        ],
+    );
+    assert!(parent["data"]["object"].get("subscription").is_none());
+    assert_eq!(s.deliver_ok(&parent).await.as_deref(), Some("applied"));
+    assert_eq!(s.entitlement(&id).await.2, 24);
+    assert_eq!(s.renewals().await, [("in_test_1".to_string(), true)]);
+
+    // Before its checkout, the newer shape's metadata names the order: 503.
+    let (_, early_id, _) = s.checkout().await;
+    let early = s.sub_event(
+        "invoice.paid.parent",
+        &early_id,
+        &[
+            ("__SUBSCRIPTION_ID__", "sub_test_early".into()),
+            ("__INVOICE_ID__", "in_test_early".into()),
+        ],
+    );
+    assert_error(
+        deliver(&s.hub, &bytes(&early)).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+        MSG_EVENT_NOT_READY,
+    )
+    .await;
+
+    // Neither shape names a subscription: ignored, nothing changes.
+    let mut neither = s.sub_event(
+        "invoice.paid.parent",
+        &id,
+        &[("__INVOICE_ID__", "in_test_2".into())],
+    );
+    neither["data"]["object"]["parent"] = Value::Null;
+    assert_eq!(s.deliver_ok(&neither).await.as_deref(), Some("ignored"));
+    assert_eq!(s.entitlement(&id).await.2, 24);
+    assert_eq!(s.renewals().await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_stale_change_after_an_equal_one_stays_stale() {
+    let s = shop().await;
+    let id = s.subscribed("sub_test_1", "in_test_0").await;
+    let t = now();
+    let update = |cancel: bool, created: i64| {
+        s.sub_event(
+            "customer.subscription.updated",
+            &id,
+            &[
+                ("__CANCEL_AT_PERIOD_END__", cancel.to_string()),
+                ("__CREATED__", created.to_string()),
+            ],
+        )
+    };
+    // Already renewing: a resume at t is unchanged but advances the clock.
+    let resume = update(false, t);
+    assert_eq!(s.deliver_ok(&resume).await.as_deref(), Some("unchanged"));
+    // A cancel from before it, delivered later, is stale.
+    let cancel = update(true, t - 100);
+    assert_eq!(s.deliver_ok(&cancel).await.as_deref(), Some("unchanged"));
+    assert!(s.entitlement(&id).await.1);
+    // An equal change older than the clock does not move it back.
+    let older_resume = update(false, t - 200);
+    assert_eq!(
+        s.deliver_ok(&older_resume).await.as_deref(),
+        Some("unchanged")
+    );
+    let cancel = update(true, t - 50);
+    assert_eq!(s.deliver_ok(&cancel).await.as_deref(), Some("unchanged"));
+    assert!(s.entitlement(&id).await.1);
+    // Neither unchanged event is audited.
+    assert_eq!(s.entitlement_audits(&id).await.len(), 1);
+    // A newer cancel applies.
+    let cancel = update(true, t + 1);
+    assert_eq!(s.deliver_ok(&cancel).await.as_deref(), Some("applied"));
+    assert!(!s.entitlement(&id).await.1);
+}
+
+#[tokio::test]
+async fn subscription_events_for_an_order_that_will_never_be_paid_are_unmatched() {
+    let s = shop().await;
+    // Each kind of subscription event naming `order`, for an unknown
+    // subscription.
+    let all_kinds = |order: &str, tag: &str| {
+        vec![
+            renewal(&s, order, &format!("sub_{tag}"), &format!("in_{tag}")),
+            s.sub_event(
+                "invoice.paid.parent",
+                order,
+                &[
+                    ("__SUBSCRIPTION_ID__", format!("sub_{tag}")),
+                    ("__INVOICE_ID__", format!("in_{tag}_parent")),
+                ],
+            ),
+            s.sub_event(
+                "customer.subscription.updated",
+                order,
+                &[
+                    ("__SUBSCRIPTION_ID__", format!("sub_{tag}")),
+                    ("__CANCEL_AT_PERIOD_END__", "true".into()),
+                ],
+            ),
+            s.sub_event(
+                "customer.subscription.deleted",
+                order,
+                &[("__SUBSCRIPTION_ID__", format!("sub_{tag}"))],
+            ),
+        ]
+    };
+
+    // An order that expired (a failed bank payment).
+    let (_, expired, session) = s.checkout().await;
+    let failed = s.event("checkout.session.async_payment_failed", &session, &expired);
+    assert_eq!(s.deliver_ok(&failed).await.as_deref(), Some("applied"));
+    assert_eq!(s.status(&expired).await, "expired");
+    for ev in all_kinds(&expired, "expired") {
+        assert_eq!(
+            s.deliver_ok(&ev).await.as_deref(),
+            Some("unmatched"),
+            "{ev}"
+        );
+    }
+
+    // An order that stays pending after a mismatched checkout event.
+    let (_, mismatched, session) = s.checkout().await;
+    let mut wrong = s.event("checkout.session.completed", &session, &mismatched);
+    wrong["data"]["object"]["amount_subtotal"] = json!(PRICE + 1);
+    assert_eq!(s.deliver_ok(&wrong).await.as_deref(), Some("mismatch"));
+    assert_eq!(s.status(&mismatched).await, "pending");
+    for ev in all_kinds(&mismatched, "mismatched") {
+        assert_eq!(
+            s.deliver_ok(&ev).await.as_deref(),
+            Some("unmatched"),
+            "{ev}"
+        );
+    }
+
+    // A refunded order.
+    let refunded = s.subscribed("sub_test_1", "in_test_0").await;
+    let refund = s.sub_event(
+        "charge.refunded",
+        &refunded,
+        &[("__INVOICE_ID__", "in_test_0".into())],
+    );
+    assert_eq!(s.deliver_ok(&refund).await.as_deref(), Some("applied"));
+    for ev in all_kinds(&refunded, "refunded") {
+        assert_eq!(
+            s.deliver_ok(&ev).await.as_deref(),
+            Some("unmatched"),
+            "{ev}"
+        );
+    }
+
+    // Nothing changed: no entitlement for the two unpaid orders, the
+    // refunded one untouched.
+    assert_eq!(s.status(&expired).await, "expired");
+    assert_eq!(s.status(&mismatched).await, "pending");
+    assert_eq!(s.hub.count("entitlements").await, 1);
+    assert!(s.renewals().await.is_empty());
+
+    // A pending order with no mismatch still waits (the existing rule).
+    let (_, pending, _) = s.checkout().await;
+    for ev in all_kinds(&pending, "pending") {
+        assert_error(
+            deliver(&s.hub, &bytes(&ev)).await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            MSG_EVENT_NOT_READY,
+        )
+        .await;
+    }
 }

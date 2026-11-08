@@ -425,3 +425,230 @@ async fn lead_notes_need_a_body_and_go_with_their_lead_but_not_their_author() {
         .unwrap();
     assert_eq!(count("SELECT count(*) FROM lead_notes").await, 0);
 }
+
+/// A paid order (organization, offering, order) inserted directly: the
+/// order's and organization's ids.
+async fn paid_order(t: &TestDb, interval: &str) -> (uuid::Uuid, uuid::Uuid) {
+    let org: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ('Acme') RETURNING id")
+            .fetch_one(&t.pool)
+            .await
+            .unwrap();
+    let offering: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO offerings (name, price_minor, currency, billing_interval, scope, seats, \
+                                term_months) \
+         VALUES ('Station ' || gen_random_uuid(), 120000, 'USD', $1, 'machine', 1, 12) \
+         RETURNING id",
+    )
+    .bind(interval)
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    let order: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO orders (organization_id, offering_id, offering_name, price_minor, currency, \
+                             billing_interval, scope, seats, term_months, provider, \
+                             provider_session_id) \
+         VALUES ($1, $2, 'Station', 120000, 'USD', $3, 'machine', 1, 12, 'stripe', \
+                 'cs_' || gen_random_uuid()) RETURNING id",
+    )
+    .bind(org)
+    .bind(offering)
+    .bind(interval)
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE orders SET status = 'paid', paid_at = now() WHERE id = $1")
+        .bind(order)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    (order, org)
+}
+
+#[tokio::test]
+async fn orders_gain_a_terminal_refunded_status_after_paid_only() {
+    let t = TestDb::migrated().await;
+    let (order, _) = paid_order(&t, "annual").await;
+    let pool = &t.pool;
+    for sql in [
+        // Not without its stamp, and the payment time stays.
+        "UPDATE orders SET status = 'refunded' WHERE id = $1",
+        "UPDATE orders SET status = 'refunded', refunded_at = now(), paid_at = NULL WHERE id = $1",
+        "UPDATE orders SET status = 'refunded', refunded_at = now(), \
+         paid_at = paid_at - interval '1 day' WHERE id = $1",
+        "UPDATE orders SET refunded_at = now() WHERE id = $1",
+        "UPDATE orders SET status = 'expired', expired_at = now(), paid_at = NULL WHERE id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(order)
+            .execute(pool)
+            .await
+            .expect_err(sql);
+    }
+    sqlx::query(
+        "UPDATE orders SET status = 'refunded', refunded_at = now(), updated_at = now() \
+         WHERE id = $1",
+    )
+    .bind(order)
+    .execute(pool)
+    .await
+    .unwrap();
+    for sql in [
+        "UPDATE orders SET status = 'paid', refunded_at = NULL WHERE id = $1",
+        "UPDATE orders SET refunded_at = now() - interval '1 day' WHERE id = $1",
+        "UPDATE orders SET updated_at = now() + interval '1 day' WHERE id = $1",
+        "DELETE FROM orders WHERE id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(order)
+            .execute(pool)
+            .await
+            .expect_err(sql);
+    }
+    // A pending order cannot be refunded.
+    let pending: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO orders (organization_id, offering_id, offering_name, price_minor, currency, \
+                             billing_interval, scope, seats, term_months, provider, \
+                             provider_session_id) \
+         SELECT organization_id, offering_id, offering_name, price_minor, currency, \
+                billing_interval, scope, seats, term_months, provider, 'cs_pending' \
+         FROM orders WHERE id = $1 RETURNING id",
+    )
+    .bind(order)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE orders SET status = 'refunded', refunded_at = now() WHERE id = $1")
+        .bind(pending)
+        .execute(pool)
+        .await
+        .expect_err("pending -> refunded");
+}
+
+#[tokio::test]
+async fn entitlements_and_renewals_refuse_illegal_changes() {
+    let t = TestDb::migrated().await;
+    let (order, org) = paid_order(&t, "annual").await;
+    let pool = &t.pool;
+    let ent: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO entitlements (organization_id, order_id, provider, subscription_id, \
+                                   payment_ref, term_start, term_end, renews) \
+         VALUES ($1, $2, 'stripe', 'sub_1', 'in_0', now(), now() + interval '12 months', true) \
+         RETURNING id",
+    )
+    .bind(org)
+    .bind(order)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    // One entitlement per order, one per subscription; sane terms.
+    for sql in [
+        "INSERT INTO entitlements (organization_id, order_id, provider, term_start, term_end, \
+                                   renews) \
+         SELECT organization_id, order_id, provider, now(), now() + interval '1 month', false \
+         FROM entitlements WHERE id = $1",
+        "UPDATE entitlements SET term_end = term_start WHERE id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(ent)
+            .execute(pool)
+            .await
+            .expect_err(sql);
+    }
+    let renewal = |invoice: &'static str| {
+        sqlx::query(
+            "INSERT INTO entitlement_renewals (provider, invoice_id, entitlement_id, \
+                                               previous_term_end, term_end) \
+             SELECT 'stripe', $2, id, term_end, term_end + interval '12 months' \
+             FROM entitlements WHERE id = $1",
+        )
+        .bind(ent)
+        .bind(invoice)
+        .execute(pool)
+    };
+    renewal("in_1").await.unwrap();
+    renewal("in_1").await.expect_err("an invoice applies once");
+    for sql in [
+        "UPDATE entitlement_renewals SET term_end = term_end + interval '1 day' \
+         WHERE entitlement_id = $1",
+        "DELETE FROM entitlement_renewals WHERE entitlement_id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(ent)
+            .execute(pool)
+            .await
+            .expect_err(sql);
+    }
+    for sql in [
+        "DELETE FROM entitlements WHERE id = $1",
+        "UPDATE entitlements SET term_end = term_end - interval '1 day' WHERE id = $1",
+        "UPDATE entitlements SET term_start = term_start - interval '1 day' WHERE id = $1",
+        "UPDATE entitlements SET payment_ref = 'pi_other' WHERE id = $1",
+        "UPDATE entitlements SET subscription_id = NULL, renews = false WHERE id = $1",
+        "UPDATE entitlements SET order_id = gen_random_uuid() WHERE id = $1",
+        // Status steps need their stamps; a cancelled entitlement never renews.
+        "UPDATE entitlements SET status = 'cancelled', renews = false WHERE id = $1",
+        "UPDATE entitlements SET status = 'cancelled', cancelled_at = now() WHERE id = $1",
+        "UPDATE entitlements SET status = 'refunded', renews = false WHERE id = $1",
+        "UPDATE entitlements SET status = 'bogus' WHERE id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(ent)
+            .execute(pool)
+            .await
+            .expect_err(sql);
+    }
+    // Legal: renews off and on, the term growing, then cancellation.
+    for sql in [
+        "UPDATE entitlements SET renews = false, renewal_changed_at = now() WHERE id = $1",
+        "UPDATE entitlements SET term_end = term_end + interval '12 months' WHERE id = $1",
+        "UPDATE entitlements SET status = 'cancelled', cancelled_at = now() WHERE id = $1",
+    ] {
+        sqlx::query(sql).bind(ent).execute(pool).await.expect(sql);
+    }
+    for sql in [
+        "UPDATE entitlements SET status = 'active', cancelled_at = NULL WHERE id = $1",
+        "UPDATE entitlements SET cancelled_at = now() + interval '1 day' WHERE id = $1",
+        "UPDATE entitlements SET renews = true WHERE id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(ent)
+            .execute(pool)
+            .await
+            .expect_err(sql);
+    }
+    // A cancelled entitlement's term never grows (a renewal paid after the
+    // subscription ended is refunded at the provider, never granted).
+    let err = sqlx::query(
+        "UPDATE entitlements SET term_end = term_end + interval '12 months' WHERE id = $1",
+    )
+    .bind(ent)
+    .execute(pool)
+    .await
+    .expect_err("a cancelled entitlement's term grew");
+    assert!(
+        err.to_string()
+            .contains("only an active entitlement's term can be extended"),
+        "{err}"
+    );
+    sqlx::query("UPDATE entitlements SET status = 'refunded', refunded_at = now() WHERE id = $1")
+        .bind(ent)
+        .execute(pool)
+        .await
+        .unwrap();
+    // A refunded entitlement never changes again.
+    for sql in [
+        "UPDATE entitlements SET term_end = term_end + interval '12 months' WHERE id = $1",
+        "UPDATE entitlements SET updated_at = now() + interval '1 day' WHERE id = $1",
+        "UPDATE entitlements SET status = 'cancelled' WHERE id = $1",
+        "UPDATE entitlements SET status = 'active', refunded_at = NULL, cancelled_at = NULL \
+         WHERE id = $1",
+        "DELETE FROM entitlements WHERE id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(ent)
+            .execute(pool)
+            .await
+            .expect_err(sql);
+    }
+}
