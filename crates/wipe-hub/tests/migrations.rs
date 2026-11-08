@@ -158,3 +158,57 @@ async fn auth_tokens_accept_the_story_3_purposes_only() {
         other => panic!("expected a CHECK violation, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn invitations_accept_owner_and_member_roles_and_32_byte_unique_hashes() {
+    let t = TestDb::migrated().await;
+    let org: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ('Org') RETURNING id")
+            .fetch_one(&t.pool)
+            .await
+            .unwrap();
+    let insert = |hash: Vec<u8>, role: &'static str| {
+        let pool = t.pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO invitations (organization_id, email, role, token_hash, expires_at) \
+                 VALUES ($1, 'a@example.com', $2, $3, now() + interval '7 days')",
+            )
+            .bind(org)
+            .bind(role)
+            .bind(hash)
+            .execute(&pool)
+            .await
+        }
+    };
+    insert(vec![1; 32], "owner").await.unwrap();
+    insert(vec![2; 32], "member").await.unwrap();
+    let constraint = |e: sqlx::Error| match e {
+        sqlx::Error::Database(d) => d.constraint().map(str::to_string),
+        other => panic!("expected a constraint violation, got {other:?}"),
+    };
+    assert_eq!(
+        constraint(insert(vec![3; 32], "vendor_admin").await.unwrap_err()).as_deref(),
+        Some("invitations_role_check")
+    );
+    assert_eq!(
+        constraint(insert(vec![4; 16], "member").await.unwrap_err()).as_deref(),
+        Some("invitations_token_hash_check")
+    );
+    assert_eq!(
+        constraint(insert(vec![1; 32], "member").await.unwrap_err()).as_deref(),
+        Some("invitations_token_hash_key")
+    );
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT indexname::text FROM pg_indexes WHERE tablename = 'invitations' ORDER BY 1",
+    )
+    .fetch_all(&t.pool)
+    .await
+    .unwrap();
+    for want in [
+        "invitations_invited_by_idx",
+        "invitations_organization_email_idx",
+    ] {
+        assert!(indexes.iter().any(|i| i == want), "{want} in {indexes:?}");
+    }
+}

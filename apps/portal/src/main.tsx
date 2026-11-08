@@ -11,9 +11,12 @@ import {
 } from "@tanstack/react-router";
 
 import "./index.css";
+import { AcceptInvitePage } from "./pages/AcceptInvitePage";
+import { AccountPage } from "./pages/AccountPage";
 import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
 import { HomePage } from "./pages/HomePage";
 import { MagicLinkPage } from "./pages/MagicLinkPage";
+import { OrganizationPage } from "./pages/OrganizationPage";
 import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SignInLinkPage } from "./pages/SignInLinkPage";
 import { SignInPage } from "./pages/SignInPage";
@@ -125,6 +128,29 @@ const resetPasswordRoute = createRoute({
   },
 });
 
+const accountRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/account",
+  component: AccountPage,
+});
+
+const organizationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/organization",
+  component: OrganizationPage,
+});
+
+// The hub emails `{public_base_url}/accept-invite?token=…`.
+const acceptInviteRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/accept-invite",
+  validateSearch: tokenSearch,
+  component: function AcceptInviteRoute() {
+    const { token } = acceptInviteRoute.useSearch();
+    return <AcceptInvitePage token={token} />;
+  },
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   signUpRoute,
@@ -134,6 +160,9 @@ const routeTree = rootRoute.addChildren([
   forgotPasswordRoute,
   magicLinkRoute,
   resetPasswordRoute,
+  accountRoute,
+  organizationRoute,
+  acceptInviteRoute,
 ]);
 
 const router = createRouter({ routeTree });

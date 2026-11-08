@@ -17,6 +17,7 @@ pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 pub const VERIFICATION_SUBJECT: &str = "Verify your Wipestation email address";
 pub const MAGIC_LINK_SUBJECT: &str = "Your Wipestation sign-in link";
 pub const PASSWORD_RESET_SUBJECT: &str = "Reset your Wipestation password";
+pub const INVITATION_SUBJECT: &str = "You're invited to join a Wipestation organization";
 
 #[derive(Debug, thiserror::Error)]
 pub enum MailError {
@@ -81,6 +82,25 @@ impl Mailer {
         self.send(to, PASSWORD_RESET_SUBJECT, body).await
     }
 
+    /// The team invitation message: plain text naming the organization and
+    /// the inviter, containing `link`. The names are user input (validated:
+    /// no control characters), so they appear only in the body, never in a
+    /// header.
+    pub async fn send_invitation(
+        &self,
+        to: &str,
+        organization_name: &str,
+        inviter_name: &str,
+        link: &Url,
+    ) -> Result<(), MailError> {
+        self.send(
+            to,
+            INVITATION_SUBJECT,
+            invitation_body(organization_name, inviter_name, link),
+        )
+        .await
+    }
+
     async fn send(&self, to: &str, subject: &str, body: String) -> Result<(), MailError> {
         let to: Mailbox = to
             .parse()
@@ -93,5 +113,36 @@ impl Mailer {
             .body(body)?;
         self.transport.send(message).await?;
         Ok(())
+    }
+}
+
+fn invitation_body(organization_name: &str, inviter_name: &str, link: &Url) -> String {
+    format!(
+        "{inviter_name} has invited you to join the organization \"{organization_name}\" \
+         in the Wipestation portal.\n\n\
+         To accept, open the link below and choose your name and password. \
+         It works once and expires in 7 days.\n\n\
+         {link}\n\n\
+         If you did not expect this invitation, ignore this email. \
+         No account is created unless you accept.\n"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invitation_body_names_both_and_links() {
+        let link = Url::parse("http://127.0.0.1:7900/accept-invite?token=abc").unwrap();
+        let body = invitation_body("Engines Ltd", "Ada Lovelace", &link);
+        assert!(body.contains("Ada Lovelace has invited you"), "{body}");
+        assert!(body.contains("\"Engines Ltd\""), "{body}");
+        assert!(
+            body.contains("http://127.0.0.1:7900/accept-invite?token=abc"),
+            "{body}"
+        );
+        assert!(body.contains("expires in 7 days"), "{body}");
+        assert!(body.contains("ignore this email"), "{body}");
     }
 }

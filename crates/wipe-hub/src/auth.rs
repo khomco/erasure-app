@@ -2,7 +2,7 @@
 //! `me` and resending the verification email (portal-accounts story 1);
 //! the CSRF token, sign-in throttles, session rotation and sign-out
 //! everywhere (story 2); magic links, password reset and the email-send
-//! throttle (story 3).
+//! throttle (story 3); changing the password while signed in (story 4).
 //!
 //! - Sign-in and sign-up delete the request's incoming session in the
 //!   transaction that creates the new one.
@@ -15,9 +15,10 @@
 //!   Refusals are counted on the throttle row and audited once per lock as
 //!   `auth.sign_in_lock_summary`, never one row each.
 //! - Every route that sends email (sign-up, resend verification, magic link,
-//!   password reset) first charges `mail:to:<address>` and `mail:<peer key>`
-//!   ([`charge_mail`]); each charge is final, so the send that reaches a
-//!   limit locks the key, and a refusal is 429 before any lookup, Argon2 or
+//!   password reset, invitation) first charges `mail:<peer key>` and
+//!   `mail:to:<address>` ([`charge_mail`]; an invitation also charges
+//!   `mail:org:<organization id>`); each charge is final, so the send that
+//!   reaches a limit locks the key, and a refusal is 429 before any lookup, Argon2 or
 //!   send. Locks are `auth.mail_locked`, summaries `auth.mail_lock_summary`.
 //! - The magic-link and reset request routes answer 202 `{}` whether or not
 //!   the account exists; the lookup, token, audit row and send all run in a
@@ -72,6 +73,8 @@ pub const MSG_LOCKED: &str = "too many failed sign-in attempts; try again later"
 pub const MSG_MAIL_LOCKED: &str = "too many emails requested; try again later";
 pub const MSG_BAD_MAGIC_LINK: &str = "this sign-in link is invalid or has expired";
 pub const MSG_BAD_RESET: &str = "this password reset link is invalid or has expired";
+pub const MSG_WRONG_CURRENT_PASSWORD: &str = "current password is incorrect";
+pub const MSG_OWNER_ONLY: &str = "only an organization owner can manage the team";
 
 /// Prefix of a password sign-in throttle key for an email address.
 const SIGN_IN_EMAIL_PREFIX: &str = "email:";
@@ -95,6 +98,7 @@ pub fn routes() -> Router<AppState> {
             "/api/auth/password-reset/complete",
             post(complete_password_reset),
         )
+        .route("/api/auth/password", post(change_password))
 }
 
 // ---------------------------------------------------------------------------
@@ -116,7 +120,7 @@ impl ApiError {
     }
 
     /// A 500 whose cause is logged, never returned.
-    fn internal(cause: impl std::fmt::Display) -> Self {
+    pub(crate) fn internal(cause: impl std::fmt::Display) -> Self {
         tracing::error!(error = %cause, "auth request failed");
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
     }
@@ -222,7 +226,7 @@ pub fn is_local_host(base: &Url) -> bool {
     }
 }
 
-fn secure(state: &AppState) -> bool {
+pub(crate) fn secure(state: &AppState) -> bool {
     secure_cookies(&state.config.public_base_url)
 }
 
@@ -246,11 +250,25 @@ pub fn session_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// The signed-in user, from a live session cookie; 401 `not signed in`
-/// otherwise.
+/// otherwise. `role` is read in the query that resolves the session, so a
+/// demotion or removal applies to the user's very next request.
 #[derive(Debug, Clone, Copy)]
 pub struct CurrentUser {
     pub user_id: Uuid,
     pub organization_id: Uuid,
+    pub role: accounts::Role,
+}
+
+impl CurrentUser {
+    /// 403 [`MSG_OWNER_ONLY`] unless the user is their organization's
+    /// `owner` (a `member` or `vendor_admin` is refused).
+    pub fn require_owner(&self) -> Result<(), ApiError> {
+        if self.role == accounts::Role::Owner {
+            Ok(())
+        } else {
+            Err(ApiError::new(StatusCode::FORBIDDEN, MSG_OWNER_ONLY))
+        }
+    }
 }
 
 #[async_trait]
@@ -260,17 +278,18 @@ impl FromRequestParts<AppState> for CurrentUser {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
         let not_signed_in = || ApiError::new(StatusCode::UNAUTHORIZED, MSG_NOT_SIGNED_IN);
         let token = session_token(&parts.headers).ok_or_else(not_signed_in)?;
-        let (user_id, organization_id) = accounts::session_user(&state.pool, &token)
+        let (user_id, organization_id, role) = accounts::session_user(&state.pool, &token)
             .await?
             .ok_or_else(not_signed_in)?;
         Ok(Self {
             user_id,
             organization_id,
+            role,
         })
     }
 }
 
-fn actor(user_id: Uuid) -> String {
+pub(crate) fn actor(user_id: Uuid) -> String {
     format!("user:{user_id}")
 }
 
@@ -385,7 +404,7 @@ async fn sign_up(
             .map_err(|m| ApiError::new(StatusCode::BAD_REQUEST, m))?;
     // Sign-up sends a verification email: charged before Argon2 or any write.
     let peer = ip_key(peer.map(|ConnectInfo(addr)| addr));
-    if let Err(refused) = charge_mail(&state, &new.email, peer.as_deref()).await? {
+    if let Err(refused) = charge_mail(&state, &new.email, peer.as_deref(), None).await? {
         return Ok(refused);
     }
     let password_hash = accounts::hash_password(new.password.clone()).await?;
@@ -494,7 +513,7 @@ async fn email_key<'e, E: sqlx::PgExecutor<'e>>(
 /// The throttle key for a peer: IPv4 (including IPv4-mapped IPv6) keys on
 /// the full address; IPv6 on its /64, which one subscriber can rotate
 /// through freely. No peer, no key.
-fn ip_key(peer: Option<SocketAddr>) -> Option<String> {
+pub(crate) fn ip_key(peer: Option<SocketAddr>) -> Option<String> {
     peer.map(|addr| match addr.ip().to_canonical() {
         IpAddr::V4(v4) => format!("ip:{v4}"),
         IpAddr::V6(v6) => {
@@ -506,7 +525,7 @@ fn ip_key(peer: Option<SocketAddr>) -> Option<String> {
 }
 
 /// `detail` plus `"peer"` when there is a peer key.
-fn with_peer(mut detail: serde_json::Value, peer: Option<&str>) -> serde_json::Value {
+pub(crate) fn with_peer(mut detail: serde_json::Value, peer: Option<&str>) -> serde_json::Value {
     if let (Some(p), Some(obj)) = (peer, detail.as_object_mut()) {
         obj.insert("peer".into(), json!(p));
     }
@@ -605,58 +624,50 @@ async fn charge_sign_in(
     })
 }
 
-/// Charge one email send against `mail:<peer key>` and then
-/// `mail:to:<address>`, in one transaction, before any lookup, Argon2 or
-/// send. `Err(response)` is the 429 for a refused send (the IP charge is
-/// given back if only the address refuses). A send is final, so every
-/// charge is confirmed at once: the one reaching a limit locks the key for
-/// [`throttle::MAIL_LOCKOUT`] and is audited once as `auth.mail_locked`.
-/// Charges are never refunded, so known and unknown addresses count alike.
-async fn charge_mail(
+/// Charge one email send against `mail:<peer key>`, then
+/// `mail:to:<address>`, then `extra` (a further key and its limit, such as
+/// an invitation's `mail:org:<id>`), in one transaction, before any lookup,
+/// Argon2 or send. `Err(response)` is the 429 for a refused send: the
+/// charges this request already made on earlier keys are given back. A send
+/// is final, so every charge is confirmed at once: the one reaching a limit
+/// locks the key for [`throttle::MAIL_LOCKOUT`] and is audited once as
+/// `auth.mail_locked`. Charges are never refunded after a send is allowed,
+/// so known and unknown addresses count alike.
+pub(crate) async fn charge_mail(
     state: &AppState,
     address: &str,
     peer: Option<&str>,
+    extra: Option<(&str, i32)>,
 ) -> Result<Result<(), Response>, ApiError> {
     let mut tx = state.pool.begin().await?;
     let address_key = email_key(&mut *tx, MAIL_TO_PREFIX, address).await?;
     let ip_key = peer.map(|p| format!("{}{p}", throttle::MAIL_KEY_PREFIX));
+    let keys: Vec<(&str, i32)> = ip_key
+        .as_deref()
+        .map(|k| (k, throttle::MAIL_IP_LIMIT))
+        .into_iter()
+        .chain(std::iter::once((
+            address_key.as_str(),
+            throttle::MAIL_ADDRESS_LIMIT,
+        )))
+        .chain(extra)
+        .collect();
     let mut summaries = Vec::new();
     let mut refused = None;
 
-    if let Some(ip) = ip_key.as_deref() {
-        let charged =
-            throttle::charge(&mut tx, ip, throttle::MAIL_IP_LIMIT, throttle::MAIL_WINDOW).await?;
+    for (i, &(key, limit)) in keys.iter().enumerate() {
+        let charged = throttle::charge(&mut tx, key, limit, throttle::MAIL_WINDOW).await?;
         summaries.extend(charged.summary);
         if let throttle::Charge::Refused { retry_after_secs } = charged.outcome {
-            refused = Some(retry_after_secs);
-        }
-    }
-    if refused.is_none() {
-        let charged = throttle::charge(
-            &mut tx,
-            &address_key,
-            throttle::MAIL_ADDRESS_LIMIT,
-            throttle::MAIL_WINDOW,
-        )
-        .await?;
-        summaries.extend(charged.summary);
-        if let throttle::Charge::Refused { retry_after_secs } = charged.outcome {
-            if let Some(ip) = ip_key.as_deref() {
-                throttle::refund(&mut *tx, ip).await?;
+            for &(earlier, _) in &keys[..i] {
+                throttle::refund(&mut *tx, earlier).await?;
             }
             refused = Some(retry_after_secs);
+            break;
         }
     }
     if refused.is_none() {
-        let keys = ip_key
-            .as_deref()
-            .map(|k| (k, throttle::MAIL_IP_LIMIT))
-            .into_iter()
-            .chain(std::iter::once((
-                address_key.as_str(),
-                throttle::MAIL_ADDRESS_LIMIT,
-            )));
-        for (key, limit) in keys {
+        for &(key, limit) in &keys {
             let engaged =
                 throttle::confirm_failure(&mut *tx, key, limit, throttle::MAIL_LOCKOUT).await?;
             if let Some(until) = engaged {
@@ -899,7 +910,7 @@ async fn resend_verification(
         return Err(ApiError::new(StatusCode::CONFLICT, MSG_ALREADY_VERIFIED));
     }
     let peer = ip_key(peer.map(|ConnectInfo(addr)| addr));
-    if let Err(refused) = charge_mail(&state, &account.user.email, peer.as_deref()).await? {
+    if let Err(refused) = charge_mail(&state, &account.user.email, peer.as_deref(), None).await? {
         return Ok(refused);
     }
     let token = accounts::create_verification_token(&state.pool, user.user_id).await?;
@@ -962,7 +973,7 @@ async fn request_link(
     let email = accounts::validate_email(&req.email)
         .map_err(|m| ApiError::new(StatusCode::BAD_REQUEST, m))?;
     let peer = ip_key(peer.map(|ConnectInfo(addr)| addr));
-    if let Err(refused) = charge_mail(&state, &email, peer.as_deref()).await? {
+    if let Err(refused) = charge_mail(&state, &email, peer.as_deref(), None).await? {
         return Ok(refused);
     }
     tokio::spawn(async move {
@@ -1209,6 +1220,141 @@ async fn complete_password_reset(
     let mut resp = Json(json!({ "password_reset": true })).into_response();
     resp.headers_mut()
         .insert(SET_COOKIE, cleared_cookie(secure(&state)));
+    Ok(resp)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+/// `POST /api/auth/password`: change the signed-in user's password. The new
+/// password is validated first (nothing is charged for an invalid one). The
+/// attempt is then charged against the sign-in throttle (`email:<the user's
+/// address>` and `ip:<peer>`) exactly like a sign-in, since the current
+/// password check is otherwise an unthrottled guessing oracle for whoever
+/// holds the session. A wrong current password keeps its charge and may lock
+/// the email key; the right one sets the new hash, retires outstanding reset
+/// and sign-in links, ends every session of the user (this one included) and
+/// starts a new one for this browser.
+async fn change_password(
+    State(state): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    user: CurrentUser,
+    JsonBody(req): JsonBody<ChangePasswordRequest>,
+) -> Result<Response, ApiError> {
+    accounts::validate_password(&req.new_password)
+        .map_err(|m| ApiError::new(StatusCode::BAD_REQUEST, m))?;
+    let account = accounts::account(&state.pool, user.organization_id, user.user_id)
+        .await?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, MSG_NOT_SIGNED_IN))?;
+    let email_key = email_key(&state.pool, SIGN_IN_EMAIL_PREFIX, &account.user.email).await?;
+    let ip_key = ip_key(peer.map(|ConnectInfo(addr)| addr));
+    if let Err(refused) = charge_sign_in(&state, &email_key, ip_key.as_deref()).await? {
+        return Ok(refused);
+    }
+    // The charge must be confirmed or refunded even if the client
+    // disconnects: run the rest as its own task, like `finish_sign_in`.
+    tokio::spawn(finish_password_change(state, user, email_key, ip_key, req))
+        .await
+        .map_err(ApiError::internal)?
+}
+
+async fn finish_password_change(
+    state: AppState,
+    user: CurrentUser,
+    email_key: String,
+    ip_key: Option<String>,
+    req: ChangePasswordRequest,
+) -> Result<Response, ApiError> {
+    let peer = ip_key.as_deref();
+    let who = actor(user.user_id);
+    let stored = accounts::password_hash(&state.pool, user.organization_id, user.user_id).await?;
+    // Oversized input fails without Argon2 work on it. An unusable hash
+    // (`!unusable`) never verifies, after the same Argon2 cost.
+    let ok = req.current_password.chars().count() <= accounts::PASSWORD_MAX_CHARS
+        && stored.is_some()
+        && accounts::verify_password(req.current_password, stored).await;
+
+    if !ok {
+        let mut tx = state.pool.begin().await?;
+        audit::record(
+            &mut *tx,
+            &AuditEntry {
+                actor: &who,
+                action: "auth.password_change_failed",
+                subject: &who,
+                detail: with_peer(json!({ "reason": "wrong_password" }), peer),
+            },
+        )
+        .await?;
+        let keys = std::iter::once((email_key.as_str(), throttle::SIGN_IN_EMAIL_LIMIT))
+            .chain(peer.map(|k| (k, throttle::SIGN_IN_IP_LIMIT)));
+        for (key, limit) in keys {
+            let engaged =
+                throttle::confirm_failure(&mut *tx, key, limit, throttle::SIGN_IN_LOCKOUT).await?;
+            if let Some(until) = engaged {
+                audit::record(
+                    &mut *tx,
+                    &AuditEntry {
+                        actor: "anonymous",
+                        action: "auth.sign_in_locked",
+                        subject: key,
+                        detail: with_peer(json!({ "until": until }), peer),
+                    },
+                )
+                .await?;
+            }
+        }
+        for s in throttle::purge_stale(&mut *tx).await? {
+            audit_lock_summary(&mut tx, &s, None).await?;
+        }
+        tx.commit().await?;
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            MSG_WRONG_CURRENT_PASSWORD,
+        ));
+    }
+
+    let password_hash = accounts::hash_password(req.new_password).await?;
+    let mut tx = state.pool.begin().await?;
+    accounts::set_password_hash(&mut *tx, user.user_id, &password_hash).await?;
+    accounts::retire_tokens(
+        &mut *tx,
+        user.user_id,
+        &[
+            accounts::PURPOSE_PASSWORD_RESET,
+            accounts::PURPOSE_MAGIC_LINK,
+        ],
+    )
+    .await?;
+    let sessions_ended = accounts::delete_user_sessions(&mut *tx, user.user_id).await?;
+    let session = accounts::create_session(&mut *tx, user.user_id).await?;
+    if let Some(s) = throttle::clear(&mut *tx, &email_key).await? {
+        audit_lock_summary(&mut tx, &s, peer).await?;
+    }
+    if let Some(ip) = peer {
+        throttle::refund(&mut *tx, ip).await?;
+    }
+    audit::record(
+        &mut *tx,
+        &AuditEntry {
+            actor: &who,
+            action: "auth.password_changed",
+            subject: &who,
+            detail: with_peer(json!({ "sessions_ended": sessions_ended }), peer),
+        },
+    )
+    .await?;
+    let account = accounts::account(&mut *tx, user.organization_id, user.user_id)
+        .await?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, MSG_NOT_SIGNED_IN))?;
+    tx.commit().await?;
+
+    let mut resp = Json(account).into_response();
+    resp.headers_mut()
+        .insert(SET_COOKIE, session_cookie(&session, secure(&state)));
     Ok(resp)
 }
 

@@ -173,7 +173,10 @@ pub fn validate_password(password: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_name(field: &str, value: &str) -> Result<String, String> {
+/// A trimmed, non-blank name of at most [`NAME_MAX_CHARS`] characters with no
+/// control characters (names appear in emails sent to third parties, such as
+/// invitations). `field` names the input in the error.
+pub fn validate_name(field: &str, value: &str) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() {
         return Err(format!("{field} must not be blank"));
@@ -182,6 +185,9 @@ fn validate_name(field: &str, value: &str) -> Result<String, String> {
         return Err(format!(
             "{field} must be at most {NAME_MAX_CHARS} characters"
         ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{field} must not contain control characters"));
     }
     Ok(value.to_string())
 }
@@ -415,6 +421,19 @@ pub async fn find_user_by_id<'e, E: sqlx::PgExecutor<'e>>(
         .await
 }
 
+/// The signed-in user's stored password hash, scoped to their organization.
+pub async fn password_hash<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT password_hash FROM users WHERE organization_id = $1 AND id = $2")
+        .bind(organization_id)
+        .bind(user_id)
+        .fetch_optional(executor)
+        .await
+}
+
 /// Replace a user's password hash.
 pub async fn set_password_hash<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
@@ -601,21 +620,28 @@ pub async fn create_session<'e, E: sqlx::PgExecutor<'e>>(
     Ok(token.raw)
 }
 
-/// Who a live session belongs to: `(user_id, organization_id)`.
+/// Who a live session belongs to: `(user_id, organization_id, role)`. The
+/// role is read in the same query, so a role change or removal applies to
+/// the user's very next request.
 pub async fn session_user<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     raw: &str,
-) -> Result<Option<(Uuid, Uuid)>, sqlx::Error> {
+) -> Result<Option<(Uuid, Uuid, Role)>, sqlx::Error> {
     let Some(hash) = hash_token(raw) else {
         return Ok(None);
     };
-    sqlx::query_as(
-        "SELECT u.id, u.organization_id FROM sessions s JOIN users u ON u.id = s.user_id \
+    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT u.id, u.organization_id, u.role FROM sessions s JOIN users u ON u.id = s.user_id \
          WHERE s.token_hash = $1 AND s.expires_at > now()",
     )
     .bind(&hash[..])
     .fetch_optional(executor)
-    .await
+    .await?;
+    row.map(|(id, org, role)| {
+        let role = Role::from_str(&role).map_err(|e| sqlx::Error::Decode(e.into()))?;
+        Ok((id, org, role))
+    })
+    .transpose()
 }
 
 /// End a session; returns its user's id if it existed.
@@ -720,6 +746,32 @@ mod tests {
         assert_eq!(validate_name("name", "  Ada ").unwrap(), "Ada");
         let err = validate_name("organization_name", " \t").unwrap_err();
         assert!(err.contains("organization_name"), "{err}");
+    }
+
+    #[test]
+    fn names_reject_control_characters() {
+        for bad in [
+            "Ada\nBcc: x@evil.test",
+            "Ad\ra",
+            "A\u{0}da",
+            "A\u{1b}[31mda",
+            "A\u{85}da",
+        ] {
+            assert_eq!(
+                validate_name("name", bad).unwrap_err(),
+                "name must not contain control characters",
+                "{bad:?}"
+            );
+        }
+        // Trimmed edge whitespace is not an error; real names pass.
+        assert_eq!(
+            validate_name("name", "\tGrace Hopper\n").unwrap(),
+            "Grace Hopper"
+        );
+        assert_eq!(
+            validate_name("name", "Zoë O'Brien-Łukasz").unwrap(),
+            "Zoë O'Brien-Łukasz"
+        );
     }
 
     #[test]

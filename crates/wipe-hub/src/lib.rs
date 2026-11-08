@@ -17,6 +17,8 @@ pub mod csrf;
 pub mod db;
 pub mod health;
 pub mod mail;
+pub mod team;
+pub mod team_routes;
 pub mod throttle;
 
 use std::net::SocketAddr;
@@ -67,6 +69,7 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/api/health", get(health::health))
         .merge(auth::routes())
+        .merge(team_routes::routes())
         // Unknown API paths are JSON 404s, portal or not: a typo in a client
         // must never get `index.html` back with a 200.
         .route("/api", any(api_not_found))

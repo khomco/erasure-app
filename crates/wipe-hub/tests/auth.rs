@@ -954,6 +954,36 @@ async fn mutating_api_requests_without_a_valid_csrf_token_are_403_and_write_noth
             "/api/auth/password-reset/complete",
             Some(json!({"token": "A".repeat(43), "password": PASSWORD})),
         ),
+        (
+            "/api/auth/password",
+            Some(json!({"current_password": PASSWORD, "new_password": "a new passphrase"})),
+        ),
+        ("/api/account/profile", Some(json!({"name": "Eve"}))),
+        ("/api/organization", Some(json!({"name": "Evil Ltd"}))),
+        (
+            "/api/organization/invitations",
+            Some(json!({"email": unique_address(), "role": "member"})),
+        ),
+        (
+            "/api/organization/invitations/00000000-0000-0000-0000-000000000000/revoke",
+            None,
+        ),
+        (
+            "/api/organization/members/00000000-0000-0000-0000-000000000000/role",
+            Some(json!({"role": "owner"})),
+        ),
+        (
+            "/api/organization/members/00000000-0000-0000-0000-000000000000/remove",
+            None,
+        ),
+        (
+            "/api/invitations/lookup",
+            Some(json!({"token": "A".repeat(43)})),
+        ),
+        (
+            "/api/invitations/accept",
+            Some(json!({"token": "A".repeat(43), "name": "Eve", "password": PASSWORD})),
+        ),
         ("/api/nope", None),
         ("/api", None),
         ("/api/health", None),

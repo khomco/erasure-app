@@ -1,7 +1,9 @@
 // Mirrors the `/api/auth/*` shapes in crates/wipe-hub/src/auth.rs (sign-up,
-// sign-in, verification, sessions, magic links and password reset) and
-// `wipe_hub::accounts::{Account, User, Organization, Role}`
-// (crates/wipe-hub/src/accounts.rs). Change both together.
+// sign-in, verification, sessions, magic links, password reset and password
+// change), `POST /api/account/profile` in crates/wipe-hub/src/team_routes.rs
+// and `wipe_hub::accounts::{Account, User, Organization, Role}`
+// (crates/wipe-hub/src/accounts.rs). Change both together. `request`,
+// `ensureOk`, `json` and the type guards are shared with `./team`.
 
 export type Role = "owner" | "member" | "vendor_admin";
 
@@ -89,7 +91,7 @@ export function emailRequestErrorMessage(error: unknown): string {
   return wait ? `Too many emails requested. Try again in ${wait}.` : messageOf(error);
 }
 
-type Fetch = typeof fetch;
+export type Fetch = typeof fetch;
 
 /** The hub's 403 text for a missing or mismatched CSRF token (crates/wipe-hub/src/csrf.rs). */
 export const CSRF_ERROR = "missing or invalid CSRF token";
@@ -144,7 +146,7 @@ async function isCsrfRejection(res: Response): Promise<boolean> {
   }
 }
 
-async function request(
+export async function request(
   fetchImpl: Fetch,
   method: "GET" | "POST",
   path: string,
@@ -168,7 +170,7 @@ async function request(
 }
 
 /** Throws a `HubError` carrying the hub's `error` message for a non-2xx. */
-async function ensureOk(res: Response): Promise<Response> {
+export async function ensureOk(res: Response): Promise<Response> {
   if (res.ok) return res;
   let message = `request failed (HTTP ${res.status})`;
   try {
@@ -180,7 +182,7 @@ async function ensureOk(res: Response): Promise<Response> {
   throw new HubError(res.status, message, retryAfter(res));
 }
 
-async function json<T>(res: Response, guard: (v: unknown) => v is T, what: string): Promise<T> {
+export async function json<T>(res: Response, guard: (v: unknown) => v is T, what: string): Promise<T> {
   let body: unknown;
   try {
     body = await res.json();
@@ -290,11 +292,37 @@ export async function resetPassword(
   );
 }
 
-function isObject(v: unknown): v is Record<string, unknown> {
+/**
+ * `POST /api/auth/password`: change the signed-in user's password. Every
+ * other session of the account ends; this browser gets a new session and
+ * stays signed in. A wrong current password is a 400 `HubError`; too many
+ * wrong ones lock like sign-in (429, see `signInErrorMessage`).
+ */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+  fetchImpl: Fetch = fetch,
+): Promise<Account> {
+  const res = await ensureOk(
+    await request(fetchImpl, "POST", "/api/auth/password", {
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  );
+  return json(res, isAccount, "password change");
+}
+
+/** `POST /api/account/profile`: set the signed-in user's name. */
+export async function updateProfile(name: string, fetchImpl: Fetch = fetch): Promise<Account> {
+  const res = await ensureOk(await request(fetchImpl, "POST", "/api/account/profile", { name }));
+  return json(res, isAccount, "profile");
+}
+
+export function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
 
-function isUser(v: unknown): v is User {
+export function isUser(v: unknown): v is User {
   return (
     isObject(v) &&
     typeof v.id === "string" &&
@@ -305,11 +333,11 @@ function isUser(v: unknown): v is User {
   );
 }
 
-function isOrganization(v: unknown): v is Organization {
+export function isOrganization(v: unknown): v is Organization {
   return isObject(v) && typeof v.id === "string" && typeof v.name === "string";
 }
 
-function isAccount(v: unknown): v is Account {
+export function isAccount(v: unknown): v is Account {
   return isObject(v) && isUser(v.user) && isOrganization(v.organization);
 }
 

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
@@ -90,7 +91,6 @@ function SignedIn({ account }: { account: Account }) {
     mutationFn: () => signOutEverywhere(),
     onSuccess: () => queryClient.setQueryData(["me"], null),
   });
-  const resend = useMutation({ mutationFn: () => resendVerification() });
   const signingOut = out.isPending || everywhere.isPending;
   const { user, organization } = account;
 
@@ -107,27 +107,19 @@ function SignedIn({ account }: { account: Account }) {
         <dd>{user.role}</dd>
       </dl>
       {!user.email_verified && (
-        <div className="rounded-md border border-amber-700 bg-amber-950/40 p-3">
-          <p className="text-amber-300">
-            Your email address is not verified. Open the verification link we sent you, or use
-            the button below if the email has not arrived.
-          </p>
-          <button
-            type="button"
-            onClick={() => resend.mutate()}
-            disabled={resend.isPending}
-            className="mt-2 text-indigo-400 hover:underline disabled:opacity-50"
-          >
-            Resend verification email
-          </button>
-          {resend.isSuccess && <p className="mt-1 text-emerald-400">Sent. Check your inbox.</p>}
-          {resend.isError && (
-            <p role="alert" className="mt-1 text-rose-400">
-              {emailRequestErrorMessage(resend.error)}
-            </p>
-          )}
-        </div>
+        <VerifyEmailNotice>
+          Your email address is not verified. Open the verification link we sent you, or use the
+          button below if the email has not arrived.
+        </VerifyEmailNotice>
       )}
+      <p className="flex gap-4">
+        <Link to="/account" className="text-indigo-400 hover:underline">
+          Your account
+        </Link>
+        <Link to="/organization" className="text-indigo-400 hover:underline">
+          Organization and team
+        </Link>
+      </p>
       <div className="flex gap-2">
         <button
           type="button"
@@ -157,6 +149,33 @@ function SignedIn({ account }: { account: Account }) {
           {everywhere.error instanceof Error
             ? everywhere.error.message
             : "Could not sign out everywhere"}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The "verify your email" notice with a resend button. `children` is the
+ * lead sentence, so a page can say why verification matters there.
+ */
+export function VerifyEmailNotice({ children }: { children: ReactNode }) {
+  const resend = useMutation({ mutationFn: () => resendVerification() });
+  return (
+    <div className="rounded-md border border-amber-700 bg-amber-950/40 p-3 text-sm">
+      <p className="text-amber-300">{children}</p>
+      <button
+        type="button"
+        onClick={() => resend.mutate()}
+        disabled={resend.isPending}
+        className="mt-2 text-indigo-400 hover:underline disabled:opacity-50"
+      >
+        Resend verification email
+      </button>
+      {resend.isSuccess && <p className="mt-1 text-emerald-400">Sent. Check your inbox.</p>}
+      {resend.isError && (
+        <p role="alert" className="mt-1 text-rose-400">
+          {emailRequestErrorMessage(resend.error)}
         </p>
       )}
     </div>

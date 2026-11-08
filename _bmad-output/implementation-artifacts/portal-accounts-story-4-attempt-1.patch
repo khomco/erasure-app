@@ -1,0 +1,4237 @@
+diff --git a/CONTEXT.md b/CONTEXT.md
+index d5d5bf2..ea19b3d 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -690,9 +690,10 @@ folder or in `.scratch/DECISIONS.md`.
+ | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
+ | Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check; landing page (problem, offline-verifiable certificate, differentiators, "what we are not", one early-access CTA); product, standards posture (certification roadmap labelled future), segment (ITAD, enterprise IT, government), pricing ("early-access pricing on request"), contact, privacy and terms pages; early-access and contact forms | ADR-0006 / ROADMAP W1.1–W1.4 | ✅ partial | The forms post nowhere (no `action`, submit disabled) until `lead-capture` adds `POST /api/leads`; pricing has no amounts until `offerings-and-payments`; privacy and terms are placeholders to publish before launch; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); copy and statuses await vendor sign-off |
+ | Vendor hub foundation — `crates/wipe-hub` (`wipe-hub serve`), flag/`WIPE_HUB_*` env config validated at start-up (`fake`\|`stripe` payment provider; `stripe` refuses to start without a webhook secret; optional 32-byte vendor root seed file, warned as file-held on every start), lazy Postgres pool, embedded sqlx migrations applied before listening (start-up exits within ~5 s if Postgres is unreachable), append-only `audit_log` table (ADR-0007 §6; written only through `audit::record`, which takes any executor so an action and its audit row share a transaction; UPDATE/DELETE/TRUNCATE rejected by triggers), `GET /api/health` probing Postgres and SMTP (≤2 s each; 503 `degraded` when either is down), root `compose.yaml` with Postgres and Mailpit, integration-test harness (`tests/support`: per-test `TestDb` databases dropped with their guard, `Mailpit` API client), portal serving (`apps/portal/dist` under the working directory or `--portal-dir`/`WIPE_HUB_PORTAL_DIR`; SPA fallback to `index.html`, `/assets/*` with no fallback, unknown `/api/*` paths JSON 404s; an explicit `--portal-dir` without `index.html` refuses to start, an unbuilt default is warned and non-API paths 404 naming the build) | ADR-0007 / ADR-0006 §1 / ROADMAP A1.1, A1.4 | ✅ partial | Only auth events call `audit::record` so far (row below); append-only does not stop the table owner (the hub's own role) or a superuser disabling the triggers (a separate unprivileged runtime role is a deployment decision, ROADMAP §0.5); no payments or licence issuance; vendor root custody is a file (production must not launch on it, ROADMAP A1.5); `cargo test --workspace` now needs `docker compose up -d` |
+-| Hub accounts: sign-up, email verification and password sign-in — migration `0003_accounts` (`organizations`; `users` with role `owner`\|`member`\|`vendor_admin`, unique on `lower(email)`; `auth_tokens` and `sessions` storing only the SHA-256 of 32-byte OS-RNG tokens), Argon2id password hashes (12–1024 chars, hashed off the async runtime), `/api/auth/{sign-up,verify-email,sign-in,sign-out,me,verification-email}` (sign-up creates an organization and its `owner` and signs them in; verification links `{public_base_url}/verify-email?token=…` are single-use and expire in 24 h; one generic 401 for a wrong password or unknown email, which still runs one Argon2 verification), server-side session per sign-up/sign-in in the `wipehub_session` cookie (`HttpOnly; SameSite=Lax; Path=/`, 14 days; `Secure` policy in the story-2 row below), plain-SMTP mailer with `--mail-from`/`WIPE_HUB_MAIL_FROM` sent after commit (SMTP down at sign-up: account still created, `verification_email_sent:false`, resend route recovers), every auth event audited in its transaction (`auth.sign_up`, `auth.email_verified`, `auth.sign_in`, `auth.sign_in_failed`, `auth.sign_out`), customer reads scoped by organization id in `accounts`; portal `/sign-up`, `/sign-in`, `/verify-email` pages and an account panel on home (verify notice with resend, sign-out) | ADR-0007 §3 / SPEC portal-accounts CAP-1, CAP-2 | ✅ partial | No team or profile pages (story 4); no `vendor_admin` creation or admin area (story 5); nothing is purchase-gated yet (no purchase route; `email_verified` in `/api/auth/me` is the field to gate on); plain SMTP only, no STARTTLS/auth for a production relay (ROADMAP §0.5); expired tokens are purged per user when that user is next issued one (a user's expired sessions are purged when they next sign in); sign-up's 409 for a taken email reveals whether that email is registered |
++| Hub accounts: sign-up, email verification and password sign-in — migration `0003_accounts` (`organizations`; `users` with role `owner`\|`member`\|`vendor_admin`, unique on `lower(email)`; `auth_tokens` and `sessions` storing only the SHA-256 of 32-byte OS-RNG tokens), Argon2id password hashes (12–1024 chars, hashed off the async runtime), `/api/auth/{sign-up,verify-email,sign-in,sign-out,me,verification-email}` (sign-up creates an organization and its `owner` and signs them in; verification links `{public_base_url}/verify-email?token=…` are single-use and expire in 24 h; one generic 401 for a wrong password or unknown email, which still runs one Argon2 verification), server-side session per sign-up/sign-in in the `wipehub_session` cookie (`HttpOnly; SameSite=Lax; Path=/`, 14 days; `Secure` policy in the story-2 row below), plain-SMTP mailer with `--mail-from`/`WIPE_HUB_MAIL_FROM` sent after commit (SMTP down at sign-up: account still created, `verification_email_sent:false`, resend route recovers), every auth event audited in its transaction (`auth.sign_up`, `auth.email_verified`, `auth.sign_in`, `auth.sign_in_failed`, `auth.sign_out`), customer reads scoped by organization id in `accounts`; portal `/sign-up`, `/sign-in`, `/verify-email` pages and an account panel on home (verify notice with resend, sign-out) | ADR-0007 §3 / SPEC portal-accounts CAP-1, CAP-2 | ✅ partial | No `vendor_admin` creation or admin area (story 5); nothing is purchase-gated yet (no purchase route; `email_verified` in `/api/auth/me` is the field to gate on); plain SMTP only, no STARTTLS/auth for a production relay (ROADMAP §0.5); expired tokens are purged per user when that user is next issued one (a user's expired sessions are purged when they next sign in); sign-up's 409 for a taken email reveals whether that email is registered |
+ | Hub sessions hardened: CSRF, sign-in throttles, rotation, sign out everywhere — double-submit CSRF token (`GET /api/auth/csrf` returns `{csrf_token}` with `Cache-Control: no-store`, reusing a well-formed `wipehub_csrf` cookie or minting 32 OS-RNG bytes; every non-GET/HEAD/OPTIONS `/api/*` request, unknown paths included, needs an `X-CSRF-Token` header equal to the cookie, compared in constant time, else 403 `missing or invalid CSRF token` before any handler or audit write; middleware `csrf::require`, no exemptions); migration `0004_auth_throttle` and `throttle::{charge, confirm_failure, refund, clear, purge_stale}` (reusable by story 3): every sign-in attempt, known or unknown email, is charged against `email:<address>` (trimmed, Postgres `lower()`, ≤254 chars) and `ip:<peer>` (IPv4 full address; IPv6 its /64) in one atomic statement per key before any lookup or Argon2 work, in a fixed 15-min window from the first charge; an attempt is refused while the key is locked or once charges in flight plus failures reach 5 per email or 20 per IP, so at most 5 (20) password checks run per window however many arrive at once; a refusal answers 429 `too many failed sign-in attempts; try again later` with `Retry-After` (time left on the lock, or 1 while only in-flight checks fill the window), even for the right password, and never extends a lock; a failure keeps its charge and the one that reaches the limit locks the key for 15 min; a success deletes the email key and refunds its IP charge, so the right password on the 5th try signs in unlocked; audit volume is bounded: `auth.sign_in_locked` once per lock (`{until}`), refusals counted in the row's `refused` and audited once as `auth.sign_in_lock_summary` (`{until, refused}`) when the row is cleared, restarted or purged, every sign-in audit row carrying `peer` except summaries of purged rows, which belong to other keys; the IP key is charged before the email key, so a locked IP never creates `email:` rows; the work after a charge runs in its own task, so a client disconnecting mid-check still has its outcome recorded; stale rows purged on failures with `SKIP LOCKED`; sign-in and sign-up delete the incoming session in the new session's transaction (`auth.sign_in` detail `{rotated}`); `POST /api/auth/sign-out-everywhere` ends every session of the signed-in user (`auth.sign_out_everywhere`, `{sessions: n}`); session and CSRF cookies are `Secure` unless `--public-base-url` is http on `localhost`, `*.localhost` or a loopback IP (http on any other host gets `Secure` and a start-up warning that browsers will drop the cookies); the portal client fetches and caches the token, sends it on every POST and refetches/retries once on a CSRF 403; the sign-in page turns a 429's `Retry-After` into "try again in N minutes"; "Sign out everywhere" on home | ADR-0007 §3 / SPEC portal-accounts CAP-2, CAP-3 | ✅ partial | The IP throttle keys on the TCP peer only (`X-Forwarded-For` is never trusted, ROADMAP §0.5), so behind a reverse proxy or a shared office NAT everyone shares one IP key and 20 failures among them lock all of them out (an IPv6 /64 is likewise one key); anyone who knows an email can lock that account out of password sign-in for 15 min at a time; because in-flight attempts count toward the limit, one failure while 19 other sign-ins from the same IP are mid-check can lock that IP; double-submit CSRF is open to cookie-tossing from a sibling subdomain until hosting is decided; no Origin/`Sec-Fetch-Site` checks; no idle timeout (sessions last 14 days unless signed out) |
+ | Hub magic links, password reset and the email-send throttle — migration `0005_auth_token_purposes` widens `auth_tokens.purpose` to `verify_email`\|`magic_link`\|`password_reset`; every emailed token is 32 OS-RNG bytes with only its SHA-256 stored, consumed by one atomic `UPDATE … WHERE used_at IS NULL AND expires_at > now()` (concurrent uses: exactly one wins), and issuing one deletes that user's expired tokens; `POST /api/auth/magic-link` and `POST /api/auth/password-reset` take `{email}` and answer 202 `{}` for known and unknown emails alike, SMTP down included: the handler only validates and charges the email-send throttle, and the account lookup, the token, the audit row (`auth.magic_link_requested`/`auth.password_reset_requested`) and the send of `{public_base_url}/magic-link?token=…` (15 min) or `/reset-password?token=…` (1 h) all run in a spawned task after the answer is decided, so neither the response nor its timing reveals whether the account exists (a failure there is logged at `warn`, never returned); an unknown email writes no token, mail or audit row; `POST /api/auth/magic-link/sign-in {token}` signs in like a password sign-in (rotating the incoming session), retires the user's other magic links, marks the email verified, clears that email's sign-in lock and is not subject to the sign-in throttle; if this sign-in is what verifies the email (a possibly pre-registered account, whose password was set by someone who never proved they own the mailbox), the same transaction also ends every other session of the user and replaces the password hash with the unusable marker `!unusable` until a reset (`auth.magic_link_sign_in` `{rotated, email_verified, sessions_ended, password_cleared}`); `POST /api/auth/password-reset/complete {token, password}` checks the password first (an invalid one never burns the token), peeks the token before Argon2, then in one transaction consumes it, sets the hash, retires outstanding reset and magic links, ends every session of the user and the browser's incoming session (whoever it belongs to), verifies the email and clears the sign-in lock, and answers `{"password_reset": true}` with the session cookie cleared, without signing in (`auth.password_reset` `{sessions, email_verified}`); a used or expired link is audited as `auth.magic_link_failed`/`auth.password_reset_failed` `{reason: "used"|"expired"}` once per token while the token is still stored (issuing a new link purges the user's expired ones), while an unknown or malformed token writes nothing, so these rows are bounded by the links issued (migration 0005 adds `auth_tokens.failure_audited_at` to mark them); every route that sends email (sign-up, resend verification, magic link, reset) is charged against `mail:to:<address>` (5 per hour) and `mail:ip:<peer>` (20 per hour) before any lookup, Argon2 or send, each charge final whether or not mail goes out, the one reaching a limit locking the key for 1 h (`auth.mail_locked` once; refusals summarised as `auth.mail_lock_summary`), a refusal being 429 `too many emails requested; try again later` with `Retry-After` and writing nothing but its throttle counters (stale throttle rows are purged only on a charged send); portal `/sign-in-link`, `/forgot-password` (same confirmation whether or not the account exists), `/magic-link` (signs in only on a button press, never on load, so a mail scanner cannot use the link) and `/reset-password`, linked from `/sign-in`; email-sending forms show "Too many emails requested. Try again in N minutes." | ADR-0007 §3 / SPEC portal-accounts CAP-2 | ✅ partial | Anyone who knows an address can lock its owner out of every route at once: 5 wrong passwords lock password sign-in for 15 min, and 5 link requests use up the address's emails for an hour, blocking magic link, reset, sign-up and resend (the limit counts unknown addresses too, so it reveals nothing; a sign-up that 409s still counts); when SMTP is down the two request routes still answer 202 and the user is never told the link did not go out; a user who signed up, never verified and then signs in by magic link loses their password and must reset it before password sign-in works again (the pre-registered-account mitigation); story 1's verification link still verifies a pre-registered account without ending its creator's session or password (deferred: on that path the clicker cannot be told apart from the person who just set the password); a send in flight is lost if the hub stops between answering and sending (the user asks again); no notice email when a password is reset or cleared; the per-IP mail limit has the same shared-NAT/proxy caveat as sign-in; expired tokens are only purged per user, with no global sweeper; the reset and magic-link token routes have no throttle of their own (a 256-bit token cannot be guessed); no MFA |
++| Hub account and team management — `POST /api/account/profile {name}` (own name only; the email is read-only; `account.profile_updated` `{}`, the name kept out of the log); `POST /api/auth/password {current_password, new_password}`: the new password is validated first (nothing charged), then the attempt is charged against the sign-in throttle (`email:<the user's address>`, `ip:<peer>`) exactly like a sign-in, so a stolen session cannot guess the current password unthrottled; a wrong one is 400 `current password is incorrect` (`auth.password_change_failed`, and the 5th locks the email for password sign-in too), the right one sets the new hash, retires outstanding reset and magic links, ends every session of the user and starts a new one for this browser (`auth.password_changed` `{sessions_ended}`); `CurrentUser` carries the role, read in the session query, so a demotion or removal applies to the very next request; organization-scoped data layer `team` (every query takes the session's organization id first, so another organization's user or invitation id is a 404 that changes and audits nothing, and a `vendor_admin` is never a target); `GET /api/organization/members` (any role, ordered by name then email); owner-only routes answer a `member` or `vendor_admin` 403 `only an organization owner can manage the team` before reading the body, charging a throttle or writing: `POST /api/organization {name}` (`organization.renamed` `{from, to}`), `POST /api/organization/members/{id}/role {role}` (`owner`\|`member` only; same role is a no-op; `organization.member_role_changed`), `POST /api/organization/members/{id}/remove` (deletes the user, so sessions and tokens cascade and the address is free again; `organization.member_removed` `{organization_id, email, role, sessions_ended}`; removing yourself is 409); an organization always keeps an owner: role changes and removals lock the organization row (`SELECT … FOR UPDATE`) before counting owners, so two owners demoting each other at once leave one (409 `an organization must keep at least one owner`); migration `0006_invitations` and `POST /api/organization/invitations {email, role}` (a verified owner only; 409 for an address already in the organization; charged against the email-send limit; revokes that address's other pending invitations and purges expired ones; `organization.member_invited`; SMTP down still creates it with `invitation_email_sent:false`), `GET …/invitations` (pending only), `POST …/invitations/{id}/revoke` (`organization.invitation_revoked`); the emailed `{public_base_url}/accept-invite?token=…` link is single-use and expires in 7 days; `POST /api/invitations/lookup {token}` previews it without consuming, `POST /api/invitations/accept {token, name, password}` validates first, peeks before Argon2, then atomically consumes the invitation and creates the user in the inviting organization with its role and a verified email, rotates the incoming session and signs in (`organization.invitation_accepted`); names reject control characters; portal `/account` (name, password change), `/organization` (rename, member list with role select and Remove for owners, invite form, pending invitations with Revoke) and `/accept-invite` (looks up on load, joins only on submit), linked from home | ADR-0007 §3 / SPEC portal-accounts CAP-4 | ✅ partial | No email-address change (needs a confirmation link to the new address and a notice to the old one); one organization per person, so an invitation to an address that already has an account anywhere fails only at acceptance (409, told to the mailbox owner, never to the inviter); removal deletes the user row (the audit log keeps id, email and role; revisit when orders reference users); organization and inviter names appear in invitation emails sent to third parties; the inviter learns only `invitation_email_sent` (handed to SMTP), not delivery; no ownership-transfer flow beyond role changes, no leaving or deleting an organization, no organization fields beyond its name; no notice email when a password is changed or a member removed |
+ 
+ ## 11. Deferred — known and committed
+ 
+@@ -1047,7 +1048,15 @@ and resolve. None of these have a decided answer.
+   Enterprise-mode **Customer** on a station.
+ - **Hub user role** — `owner` / `member` (customer side) or `vendor_admin`
+   (our staff, on the vendor organization). Sign-up creates an organization
+-  and its `owner`. Not an operator role at the bench.
++  and its `owner`. An owner renames the organization, invites people,
++  changes members between `owner` and `member` and removes them; a member
++  sees the member list only. An organization always keeps at least one
++  owner. Not an operator role at the bench.
++- **Invitation** — an owner's emailed, single-use offer
++  (`{public_base_url}/accept-invite?token=…`, 7 days) for one address to
++  join their organization as `owner` or `member`. Accepting creates that
++  person's hub user, with a verified email, in the inviting organization;
++  inviting the same address again replaces the pending one.
+ - **Portal session** — a server-side row in the hub's `sessions` table,
+   held by the browser as the `wipehub_session` cookie (only its SHA-256 is
+   stored). Unrelated to the station's session-scoped operator identity
+diff --git a/README.md b/README.md
+index 0ed927a..ec85b1b 100644
+--- a/README.md
++++ b/README.md
+@@ -45,9 +45,9 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
+ | `wipe-fleet` | mDNS service advertise / browse + deterministic lead election |
+ | `wipe-server` | Axum REST API + WebSocket event stream; auto-signs certs when a Job reaches `Erased` or `PendingCoSign`; destruction-manifest assembly and co-sign |
+ | `wipe-cli` | `wipestation serve / inspect / verify-cert` binary |
+-| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, a per-address and per-IP limit on every email it sends (5 per address, 20 per IP per hour), every auth event audited. Payments and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
++| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, profile and password change, organization rename and team management (owners invite by emailed single-use link, change roles between `owner` and `member`, and remove members; an organization always keeps an owner), a per-address and per-IP limit on every email it sends (5 per address, 20 per IP per hour), every auth event audited. Payments and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
+ | `apps/desktop` | Vite + React + TanStack Router + Tailwind frontend, plus Tauri 2 shell |
+-| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in, email-verification, sign-in-link (magic link) and password-reset pages, and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere); its API client sends the hub's CSRF token on every POST |
++| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in, email-verification, sign-in-link (magic link), password-reset and accept-invitation pages, an account page (name, password change), an organization page (rename, members, invitations, roles and removal for owners), and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere); its API client sends the hub's CSRF token on every POST |
+ | `sites/www` | Static Astro + Tailwind marketing site (pre-launch): landing, product, standards, segment (ITAD, enterprise IT, government), pricing, contact, privacy and terms pages, `/capabilities`, and early-access/contact forms that post nowhere until `lead-capture`; a build-time check fails `astro build` on any capability overclaim, missing meta/OG tag, missing sitemap, or resource loaded from another origin (ADR-0006 §2). See [`sites/www/README.md`](sites/www/README.md) |
+ 
+ ## Quick start
+diff --git a/apps/portal/src/api/auth.ts b/apps/portal/src/api/auth.ts
+index ace6052..d41f857 100644
+--- a/apps/portal/src/api/auth.ts
++++ b/apps/portal/src/api/auth.ts
+@@ -1,7 +1,9 @@
+ // Mirrors the `/api/auth/*` shapes in crates/wipe-hub/src/auth.rs (sign-up,
+-// sign-in, verification, sessions, magic links and password reset) and
+-// `wipe_hub::accounts::{Account, User, Organization, Role}`
+-// (crates/wipe-hub/src/accounts.rs). Change both together.
++// sign-in, verification, sessions, magic links, password reset and password
++// change), `POST /api/account/profile` in crates/wipe-hub/src/team_routes.rs
++// and `wipe_hub::accounts::{Account, User, Organization, Role}`
++// (crates/wipe-hub/src/accounts.rs). Change both together. `request`,
++// `ensureOk`, `json` and the type guards are shared with `./team`.
+ 
+ export type Role = "owner" | "member" | "vendor_admin";
+ 
+@@ -89,7 +91,7 @@ export function emailRequestErrorMessage(error: unknown): string {
+   return wait ? `Too many emails requested. Try again in ${wait}.` : messageOf(error);
+ }
+ 
+-type Fetch = typeof fetch;
++export type Fetch = typeof fetch;
+ 
+ /** The hub's 403 text for a missing or mismatched CSRF token (crates/wipe-hub/src/csrf.rs). */
+ export const CSRF_ERROR = "missing or invalid CSRF token";
+@@ -144,7 +146,7 @@ async function isCsrfRejection(res: Response): Promise<boolean> {
+   }
+ }
+ 
+-async function request(
++export async function request(
+   fetchImpl: Fetch,
+   method: "GET" | "POST",
+   path: string,
+@@ -168,7 +170,7 @@ async function request(
+ }
+ 
+ /** Throws a `HubError` carrying the hub's `error` message for a non-2xx. */
+-async function ensureOk(res: Response): Promise<Response> {
++export async function ensureOk(res: Response): Promise<Response> {
+   if (res.ok) return res;
+   let message = `request failed (HTTP ${res.status})`;
+   try {
+@@ -180,7 +182,7 @@ async function ensureOk(res: Response): Promise<Response> {
+   throw new HubError(res.status, message, retryAfter(res));
+ }
+ 
+-async function json<T>(res: Response, guard: (v: unknown) => v is T, what: string): Promise<T> {
++export async function json<T>(res: Response, guard: (v: unknown) => v is T, what: string): Promise<T> {
+   let body: unknown;
+   try {
+     body = await res.json();
+@@ -290,11 +292,37 @@ export async function resetPassword(
+   );
+ }
+ 
+-function isObject(v: unknown): v is Record<string, unknown> {
++/**
++ * `POST /api/auth/password`: change the signed-in user's password. Every
++ * other session of the account ends; this browser gets a new session and
++ * stays signed in. A wrong current password is a 400 `HubError`; too many
++ * wrong ones lock like sign-in (429, see `signInErrorMessage`).
++ */
++export async function changePassword(
++  currentPassword: string,
++  newPassword: string,
++  fetchImpl: Fetch = fetch,
++): Promise<Account> {
++  const res = await ensureOk(
++    await request(fetchImpl, "POST", "/api/auth/password", {
++      current_password: currentPassword,
++      new_password: newPassword,
++    }),
++  );
++  return json(res, isAccount, "password change");
++}
++
++/** `POST /api/account/profile`: set the signed-in user's name. */
++export async function updateProfile(name: string, fetchImpl: Fetch = fetch): Promise<Account> {
++  const res = await ensureOk(await request(fetchImpl, "POST", "/api/account/profile", { name }));
++  return json(res, isAccount, "profile");
++}
++
++export function isObject(v: unknown): v is Record<string, unknown> {
+   return typeof v === "object" && v !== null;
+ }
+ 
+-function isUser(v: unknown): v is User {
++export function isUser(v: unknown): v is User {
+   return (
+     isObject(v) &&
+     typeof v.id === "string" &&
+@@ -305,11 +333,11 @@ function isUser(v: unknown): v is User {
+   );
+ }
+ 
+-function isOrganization(v: unknown): v is Organization {
++export function isOrganization(v: unknown): v is Organization {
+   return isObject(v) && typeof v.id === "string" && typeof v.name === "string";
+ }
+ 
+-function isAccount(v: unknown): v is Account {
++export function isAccount(v: unknown): v is Account {
+   return isObject(v) && isUser(v.user) && isOrganization(v.organization);
+ }
+ 
+diff --git a/apps/portal/src/main.tsx b/apps/portal/src/main.tsx
+index ad0cfc9..e98e833 100644
+--- a/apps/portal/src/main.tsx
++++ b/apps/portal/src/main.tsx
+@@ -11,9 +11,12 @@ import {
+ } from "@tanstack/react-router";
+ 
+ import "./index.css";
++import { AcceptInvitePage } from "./pages/AcceptInvitePage";
++import { AccountPage } from "./pages/AccountPage";
+ import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
+ import { HomePage } from "./pages/HomePage";
+ import { MagicLinkPage } from "./pages/MagicLinkPage";
++import { OrganizationPage } from "./pages/OrganizationPage";
+ import { ResetPasswordPage } from "./pages/ResetPasswordPage";
+ import { SignInLinkPage } from "./pages/SignInLinkPage";
+ import { SignInPage } from "./pages/SignInPage";
+@@ -125,6 +128,29 @@ const resetPasswordRoute = createRoute({
+   },
+ });
+ 
++const accountRoute = createRoute({
++  getParentRoute: () => rootRoute,
++  path: "/account",
++  component: AccountPage,
++});
++
++const organizationRoute = createRoute({
++  getParentRoute: () => rootRoute,
++  path: "/organization",
++  component: OrganizationPage,
++});
++
++// The hub emails `{public_base_url}/accept-invite?token=…`.
++const acceptInviteRoute = createRoute({
++  getParentRoute: () => rootRoute,
++  path: "/accept-invite",
++  validateSearch: tokenSearch,
++  component: function AcceptInviteRoute() {
++    const { token } = acceptInviteRoute.useSearch();
++    return <AcceptInvitePage token={token} />;
++  },
++});
++
+ const routeTree = rootRoute.addChildren([
+   indexRoute,
+   signUpRoute,
+@@ -134,6 +160,9 @@ const routeTree = rootRoute.addChildren([
+   forgotPasswordRoute,
+   magicLinkRoute,
+   resetPasswordRoute,
++  accountRoute,
++  organizationRoute,
++  acceptInviteRoute,
+ ]);
+ 
+ const router = createRouter({ routeTree });
+diff --git a/apps/portal/src/pages/HomePage.tsx b/apps/portal/src/pages/HomePage.tsx
+index 02d5d39..b06d9f1 100644
+--- a/apps/portal/src/pages/HomePage.tsx
++++ b/apps/portal/src/pages/HomePage.tsx
+@@ -128,6 +128,14 @@ function SignedIn({ account }: { account: Account }) {
+           )}
+         </div>
+       )}
++      <p className="flex gap-4">
++        <Link to="/account" className="text-indigo-400 hover:underline">
++          Your account
++        </Link>
++        <Link to="/organization" className="text-indigo-400 hover:underline">
++          Organization and team
++        </Link>
++      </p>
+       <div className="flex gap-2">
+         <button
+           type="button"
+diff --git a/crates/wipe-hub/src/accounts.rs b/crates/wipe-hub/src/accounts.rs
+index 1989809..842f061 100644
+--- a/crates/wipe-hub/src/accounts.rs
++++ b/crates/wipe-hub/src/accounts.rs
+@@ -173,7 +173,10 @@ pub fn validate_password(password: &str) -> Result<(), String> {
+     Ok(())
+ }
+ 
+-fn validate_name(field: &str, value: &str) -> Result<String, String> {
++/// A trimmed, non-blank name of at most [`NAME_MAX_CHARS`] characters with no
++/// control characters (names appear in emails sent to third parties, such as
++/// invitations). `field` names the input in the error.
++pub fn validate_name(field: &str, value: &str) -> Result<String, String> {
+     let value = value.trim();
+     if value.is_empty() {
+         return Err(format!("{field} must not be blank"));
+@@ -183,6 +186,9 @@ fn validate_name(field: &str, value: &str) -> Result<String, String> {
+             "{field} must be at most {NAME_MAX_CHARS} characters"
+         ));
+     }
++    if value.chars().any(char::is_control) {
++        return Err(format!("{field} must not contain control characters"));
++    }
+     Ok(value.to_string())
+ }
+ 
+@@ -415,6 +421,19 @@ pub async fn find_user_by_id<'e, E: sqlx::PgExecutor<'e>>(
+         .await
+ }
+ 
++/// The signed-in user's stored password hash, scoped to their organization.
++pub async fn password_hash<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    organization_id: Uuid,
++    user_id: Uuid,
++) -> Result<Option<String>, sqlx::Error> {
++    sqlx::query_scalar("SELECT password_hash FROM users WHERE organization_id = $1 AND id = $2")
++        .bind(organization_id)
++        .bind(user_id)
++        .fetch_optional(executor)
++        .await
++}
++
+ /// Replace a user's password hash.
+ pub async fn set_password_hash<'e, E: sqlx::PgExecutor<'e>>(
+     executor: E,
+@@ -601,21 +620,28 @@ pub async fn create_session<'e, E: sqlx::PgExecutor<'e>>(
+     Ok(token.raw)
+ }
+ 
+-/// Who a live session belongs to: `(user_id, organization_id)`.
++/// Who a live session belongs to: `(user_id, organization_id, role)`. The
++/// role is read in the same query, so a role change or removal applies to
++/// the user's very next request.
+ pub async fn session_user<'e, E: sqlx::PgExecutor<'e>>(
+     executor: E,
+     raw: &str,
+-) -> Result<Option<(Uuid, Uuid)>, sqlx::Error> {
++) -> Result<Option<(Uuid, Uuid, Role)>, sqlx::Error> {
+     let Some(hash) = hash_token(raw) else {
+         return Ok(None);
+     };
+-    sqlx::query_as(
+-        "SELECT u.id, u.organization_id FROM sessions s JOIN users u ON u.id = s.user_id \
++    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
++        "SELECT u.id, u.organization_id, u.role FROM sessions s JOIN users u ON u.id = s.user_id \
+          WHERE s.token_hash = $1 AND s.expires_at > now()",
+     )
+     .bind(&hash[..])
+     .fetch_optional(executor)
+-    .await
++    .await?;
++    row.map(|(id, org, role)| {
++        let role = Role::from_str(&role).map_err(|e| sqlx::Error::Decode(e.into()))?;
++        Ok((id, org, role))
++    })
++    .transpose()
+ }
+ 
+ /// End a session; returns its user's id if it existed.
+@@ -722,6 +748,32 @@ mod tests {
+         assert!(err.contains("organization_name"), "{err}");
+     }
+ 
++    #[test]
++    fn names_reject_control_characters() {
++        for bad in [
++            "Ada\nBcc: x@evil.test",
++            "Ad\ra",
++            "A\u{0}da",
++            "A\u{1b}[31mda",
++            "A\u{85}da",
++        ] {
++            assert_eq!(
++                validate_name("name", bad).unwrap_err(),
++                "name must not contain control characters",
++                "{bad:?}"
++            );
++        }
++        // Trimmed edge whitespace is not an error; real names pass.
++        assert_eq!(
++            validate_name("name", "\tGrace Hopper\n").unwrap(),
++            "Grace Hopper"
++        );
++        assert_eq!(
++            validate_name("name", "Zoë O'Brien-Łukasz").unwrap(),
++            "Zoë O'Brien-Łukasz"
++        );
++    }
++
+     #[test]
+     fn hashes_are_argon2id_and_verify() {
+         let h = hash_password_blocking("correct horse battery").unwrap();
+diff --git a/crates/wipe-hub/src/auth.rs b/crates/wipe-hub/src/auth.rs
+index 1a52075..6b76ee0 100644
+--- a/crates/wipe-hub/src/auth.rs
++++ b/crates/wipe-hub/src/auth.rs
+@@ -2,7 +2,7 @@
+ //! `me` and resending the verification email (portal-accounts story 1);
+ //! the CSRF token, sign-in throttles, session rotation and sign-out
+ //! everywhere (story 2); magic links, password reset and the email-send
+-//! throttle (story 3).
++//! throttle (story 3); changing the password while signed in (story 4).
+ //!
+ //! - Sign-in and sign-up delete the request's incoming session in the
+ //!   transaction that creates the new one.
+@@ -72,6 +72,8 @@ pub const MSG_LOCKED: &str = "too many failed sign-in attempts; try again later"
+ pub const MSG_MAIL_LOCKED: &str = "too many emails requested; try again later";
+ pub const MSG_BAD_MAGIC_LINK: &str = "this sign-in link is invalid or has expired";
+ pub const MSG_BAD_RESET: &str = "this password reset link is invalid or has expired";
++pub const MSG_WRONG_CURRENT_PASSWORD: &str = "current password is incorrect";
++pub const MSG_OWNER_ONLY: &str = "only an organization owner can manage the team";
+ 
+ /// Prefix of a password sign-in throttle key for an email address.
+ const SIGN_IN_EMAIL_PREFIX: &str = "email:";
+@@ -95,6 +97,7 @@ pub fn routes() -> Router<AppState> {
+             "/api/auth/password-reset/complete",
+             post(complete_password_reset),
+         )
++        .route("/api/auth/password", post(change_password))
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -116,7 +119,7 @@ impl ApiError {
+     }
+ 
+     /// A 500 whose cause is logged, never returned.
+-    fn internal(cause: impl std::fmt::Display) -> Self {
++    pub(crate) fn internal(cause: impl std::fmt::Display) -> Self {
+         tracing::error!(error = %cause, "auth request failed");
+         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+     }
+@@ -222,7 +225,7 @@ pub fn is_local_host(base: &Url) -> bool {
+     }
+ }
+ 
+-fn secure(state: &AppState) -> bool {
++pub(crate) fn secure(state: &AppState) -> bool {
+     secure_cookies(&state.config.public_base_url)
+ }
+ 
+@@ -246,11 +249,25 @@ pub fn session_token(headers: &HeaderMap) -> Option<String> {
+ }
+ 
+ /// The signed-in user, from a live session cookie; 401 `not signed in`
+-/// otherwise.
++/// otherwise. `role` is read in the query that resolves the session, so a
++/// demotion or removal applies to the user's very next request.
+ #[derive(Debug, Clone, Copy)]
+ pub struct CurrentUser {
+     pub user_id: Uuid,
+     pub organization_id: Uuid,
++    pub role: accounts::Role,
++}
++
++impl CurrentUser {
++    /// 403 [`MSG_OWNER_ONLY`] unless the user is their organization's
++    /// `owner` (a `member` or `vendor_admin` is refused).
++    pub fn require_owner(&self) -> Result<(), ApiError> {
++        if self.role == accounts::Role::Owner {
++            Ok(())
++        } else {
++            Err(ApiError::new(StatusCode::FORBIDDEN, MSG_OWNER_ONLY))
++        }
++    }
+ }
+ 
+ #[async_trait]
+@@ -260,17 +277,18 @@ impl FromRequestParts<AppState> for CurrentUser {
+     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+         let not_signed_in = || ApiError::new(StatusCode::UNAUTHORIZED, MSG_NOT_SIGNED_IN);
+         let token = session_token(&parts.headers).ok_or_else(not_signed_in)?;
+-        let (user_id, organization_id) = accounts::session_user(&state.pool, &token)
++        let (user_id, organization_id, role) = accounts::session_user(&state.pool, &token)
+             .await?
+             .ok_or_else(not_signed_in)?;
+         Ok(Self {
+             user_id,
+             organization_id,
++            role,
+         })
+     }
+ }
+ 
+-fn actor(user_id: Uuid) -> String {
++pub(crate) fn actor(user_id: Uuid) -> String {
+     format!("user:{user_id}")
+ }
+ 
+@@ -494,7 +512,7 @@ async fn email_key<'e, E: sqlx::PgExecutor<'e>>(
+ /// The throttle key for a peer: IPv4 (including IPv4-mapped IPv6) keys on
+ /// the full address; IPv6 on its /64, which one subscriber can rotate
+ /// through freely. No peer, no key.
+-fn ip_key(peer: Option<SocketAddr>) -> Option<String> {
++pub(crate) fn ip_key(peer: Option<SocketAddr>) -> Option<String> {
+     peer.map(|addr| match addr.ip().to_canonical() {
+         IpAddr::V4(v4) => format!("ip:{v4}"),
+         IpAddr::V6(v6) => {
+@@ -506,7 +524,7 @@ fn ip_key(peer: Option<SocketAddr>) -> Option<String> {
+ }
+ 
+ /// `detail` plus `"peer"` when there is a peer key.
+-fn with_peer(mut detail: serde_json::Value, peer: Option<&str>) -> serde_json::Value {
++pub(crate) fn with_peer(mut detail: serde_json::Value, peer: Option<&str>) -> serde_json::Value {
+     if let (Some(p), Some(obj)) = (peer, detail.as_object_mut()) {
+         obj.insert("peer".into(), json!(p));
+     }
+@@ -612,7 +630,7 @@ async fn charge_sign_in(
+ /// charge is confirmed at once: the one reaching a limit locks the key for
+ /// [`throttle::MAIL_LOCKOUT`] and is audited once as `auth.mail_locked`.
+ /// Charges are never refunded, so known and unknown addresses count alike.
+-async fn charge_mail(
++pub(crate) async fn charge_mail(
+     state: &AppState,
+     address: &str,
+     peer: Option<&str>,
+@@ -1212,6 +1230,141 @@ async fn complete_password_reset(
+     Ok(resp)
+ }
+ 
++#[derive(Debug, Deserialize)]
++pub struct ChangePasswordRequest {
++    pub current_password: String,
++    pub new_password: String,
++}
++
++/// `POST /api/auth/password`: change the signed-in user's password. The new
++/// password is validated first (nothing is charged for an invalid one). The
++/// attempt is then charged against the sign-in throttle (`email:<the user's
++/// address>` and `ip:<peer>`) exactly like a sign-in, since the current
++/// password check is otherwise an unthrottled guessing oracle for whoever
++/// holds the session. A wrong current password keeps its charge and may lock
++/// the email key; the right one sets the new hash, retires outstanding reset
++/// and sign-in links, ends every session of the user (this one included) and
++/// starts a new one for this browser.
++async fn change_password(
++    State(state): State<AppState>,
++    peer: Option<ConnectInfo<SocketAddr>>,
++    user: CurrentUser,
++    JsonBody(req): JsonBody<ChangePasswordRequest>,
++) -> Result<Response, ApiError> {
++    accounts::validate_password(&req.new_password)
++        .map_err(|m| ApiError::new(StatusCode::BAD_REQUEST, m))?;
++    let account = accounts::account(&state.pool, user.organization_id, user.user_id)
++        .await?
++        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, MSG_NOT_SIGNED_IN))?;
++    let email_key = email_key(&state.pool, SIGN_IN_EMAIL_PREFIX, &account.user.email).await?;
++    let ip_key = ip_key(peer.map(|ConnectInfo(addr)| addr));
++    if let Err(refused) = charge_sign_in(&state, &email_key, ip_key.as_deref()).await? {
++        return Ok(refused);
++    }
++    // The charge must be confirmed or refunded even if the client
++    // disconnects: run the rest as its own task, like `finish_sign_in`.
++    tokio::spawn(finish_password_change(state, user, email_key, ip_key, req))
++        .await
++        .map_err(ApiError::internal)?
++}
++
++async fn finish_password_change(
++    state: AppState,
++    user: CurrentUser,
++    email_key: String,
++    ip_key: Option<String>,
++    req: ChangePasswordRequest,
++) -> Result<Response, ApiError> {
++    let peer = ip_key.as_deref();
++    let who = actor(user.user_id);
++    let stored = accounts::password_hash(&state.pool, user.organization_id, user.user_id).await?;
++    // Oversized input fails without Argon2 work on it. An unusable hash
++    // (`!unusable`) never verifies, after the same Argon2 cost.
++    let ok = req.current_password.chars().count() <= accounts::PASSWORD_MAX_CHARS
++        && stored.is_some()
++        && accounts::verify_password(req.current_password, stored).await;
++
++    if !ok {
++        let mut tx = state.pool.begin().await?;
++        audit::record(
++            &mut *tx,
++            &AuditEntry {
++                actor: &who,
++                action: "auth.password_change_failed",
++                subject: &who,
++                detail: with_peer(json!({ "reason": "wrong_password" }), peer),
++            },
++        )
++        .await?;
++        let keys = std::iter::once((email_key.as_str(), throttle::SIGN_IN_EMAIL_LIMIT))
++            .chain(peer.map(|k| (k, throttle::SIGN_IN_IP_LIMIT)));
++        for (key, limit) in keys {
++            let engaged =
++                throttle::confirm_failure(&mut *tx, key, limit, throttle::SIGN_IN_LOCKOUT).await?;
++            if let Some(until) = engaged {
++                audit::record(
++                    &mut *tx,
++                    &AuditEntry {
++                        actor: "anonymous",
++                        action: "auth.sign_in_locked",
++                        subject: key,
++                        detail: with_peer(json!({ "until": until }), peer),
++                    },
++                )
++                .await?;
++            }
++        }
++        for s in throttle::purge_stale(&mut *tx).await? {
++            audit_lock_summary(&mut tx, &s, None).await?;
++        }
++        tx.commit().await?;
++        return Err(ApiError::new(
++            StatusCode::BAD_REQUEST,
++            MSG_WRONG_CURRENT_PASSWORD,
++        ));
++    }
++
++    let password_hash = accounts::hash_password(req.new_password).await?;
++    let mut tx = state.pool.begin().await?;
++    accounts::set_password_hash(&mut *tx, user.user_id, &password_hash).await?;
++    accounts::retire_tokens(
++        &mut *tx,
++        user.user_id,
++        &[
++            accounts::PURPOSE_PASSWORD_RESET,
++            accounts::PURPOSE_MAGIC_LINK,
++        ],
++    )
++    .await?;
++    let sessions_ended = accounts::delete_user_sessions(&mut *tx, user.user_id).await?;
++    let session = accounts::create_session(&mut *tx, user.user_id).await?;
++    if let Some(s) = throttle::clear(&mut *tx, &email_key).await? {
++        audit_lock_summary(&mut tx, &s, peer).await?;
++    }
++    if let Some(ip) = peer {
++        throttle::refund(&mut *tx, ip).await?;
++    }
++    audit::record(
++        &mut *tx,
++        &AuditEntry {
++            actor: &who,
++            action: "auth.password_changed",
++            subject: &who,
++            detail: with_peer(json!({ "sessions_ended": sessions_ended }), peer),
++        },
++    )
++    .await?;
++    let account = accounts::account(&mut *tx, user.organization_id, user.user_id)
++        .await?
++        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, MSG_NOT_SIGNED_IN))?;
++    tx.commit().await?;
++
++    let mut resp = Json(account).into_response();
++    resp.headers_mut()
++        .insert(SET_COOKIE, session_cookie(&session, secure(&state)));
++    Ok(resp)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/wipe-hub/src/lib.rs b/crates/wipe-hub/src/lib.rs
+index 65f5e76..38caa8c 100644
+--- a/crates/wipe-hub/src/lib.rs
++++ b/crates/wipe-hub/src/lib.rs
+@@ -17,6 +17,8 @@ pub mod csrf;
+ pub mod db;
+ pub mod health;
+ pub mod mail;
++pub mod team;
++pub mod team_routes;
+ pub mod throttle;
+ 
+ use std::net::SocketAddr;
+@@ -67,6 +69,7 @@ pub fn router(state: AppState) -> Router {
+     let api = Router::new()
+         .route("/api/health", get(health::health))
+         .merge(auth::routes())
++        .merge(team_routes::routes())
+         // Unknown API paths are JSON 404s, portal or not: a typo in a client
+         // must never get `index.html` back with a 200.
+         .route("/api", any(api_not_found))
+diff --git a/crates/wipe-hub/src/mail.rs b/crates/wipe-hub/src/mail.rs
+index 9b93bbe..418b0fe 100644
+--- a/crates/wipe-hub/src/mail.rs
++++ b/crates/wipe-hub/src/mail.rs
+@@ -17,6 +17,7 @@ pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+ pub const VERIFICATION_SUBJECT: &str = "Verify your Wipestation email address";
+ pub const MAGIC_LINK_SUBJECT: &str = "Your Wipestation sign-in link";
+ pub const PASSWORD_RESET_SUBJECT: &str = "Reset your Wipestation password";
++pub const INVITATION_SUBJECT: &str = "You're invited to join a Wipestation organization";
+ 
+ #[derive(Debug, thiserror::Error)]
+ pub enum MailError {
+@@ -81,6 +82,25 @@ impl Mailer {
+         self.send(to, PASSWORD_RESET_SUBJECT, body).await
+     }
+ 
++    /// The team invitation message: plain text naming the organization and
++    /// the inviter, containing `link`. The names are user input (validated:
++    /// no control characters), so they appear only in the body, never in a
++    /// header.
++    pub async fn send_invitation(
++        &self,
++        to: &str,
++        organization_name: &str,
++        inviter_name: &str,
++        link: &Url,
++    ) -> Result<(), MailError> {
++        self.send(
++            to,
++            INVITATION_SUBJECT,
++            invitation_body(organization_name, inviter_name, link),
++        )
++        .await
++    }
++
+     async fn send(&self, to: &str, subject: &str, body: String) -> Result<(), MailError> {
+         let to: Mailbox = to
+             .parse()
+@@ -95,3 +115,34 @@ impl Mailer {
+         Ok(())
+     }
+ }
++
++fn invitation_body(organization_name: &str, inviter_name: &str, link: &Url) -> String {
++    format!(
++        "{inviter_name} has invited you to join the organization \"{organization_name}\" \
++         in the Wipestation portal.\n\n\
++         To accept, open the link below and choose your name and password. \
++         It works once and expires in 7 days.\n\n\
++         {link}\n\n\
++         If you did not expect this invitation, ignore this email. \
++         No account is created unless you accept.\n"
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn invitation_body_names_both_and_links() {
++        let link = Url::parse("http://127.0.0.1:7900/accept-invite?token=abc").unwrap();
++        let body = invitation_body("Engines Ltd", "Ada Lovelace", &link);
++        assert!(body.contains("Ada Lovelace has invited you"), "{body}");
++        assert!(body.contains("\"Engines Ltd\""), "{body}");
++        assert!(
++            body.contains("http://127.0.0.1:7900/accept-invite?token=abc"),
++            "{body}"
++        );
++        assert!(body.contains("expires in 7 days"), "{body}");
++        assert!(body.contains("ignore this email"), "{body}");
++    }
++}
+diff --git a/crates/wipe-hub/tests/auth.rs b/crates/wipe-hub/tests/auth.rs
+index aae629b..1de0f58 100644
+--- a/crates/wipe-hub/tests/auth.rs
++++ b/crates/wipe-hub/tests/auth.rs
+@@ -954,6 +954,36 @@ async fn mutating_api_requests_without_a_valid_csrf_token_are_403_and_write_noth
+             "/api/auth/password-reset/complete",
+             Some(json!({"token": "A".repeat(43), "password": PASSWORD})),
+         ),
++        (
++            "/api/auth/password",
++            Some(json!({"current_password": PASSWORD, "new_password": "a new passphrase"})),
++        ),
++        ("/api/account/profile", Some(json!({"name": "Eve"}))),
++        ("/api/organization", Some(json!({"name": "Evil Ltd"}))),
++        (
++            "/api/organization/invitations",
++            Some(json!({"email": unique_address(), "role": "member"})),
++        ),
++        (
++            "/api/organization/invitations/00000000-0000-0000-0000-000000000000/revoke",
++            None,
++        ),
++        (
++            "/api/organization/members/00000000-0000-0000-0000-000000000000/role",
++            Some(json!({"role": "owner"})),
++        ),
++        (
++            "/api/organization/members/00000000-0000-0000-0000-000000000000/remove",
++            None,
++        ),
++        (
++            "/api/invitations/lookup",
++            Some(json!({"token": "A".repeat(43)})),
++        ),
++        (
++            "/api/invitations/accept",
++            Some(json!({"token": "A".repeat(43), "name": "Eve", "password": PASSWORD})),
++        ),
+         ("/api/nope", None),
+         ("/api", None),
+         ("/api/health", None),
+diff --git a/crates/wipe-hub/tests/migrations.rs b/crates/wipe-hub/tests/migrations.rs
+index 393bb9b..9c37b05 100644
+--- a/crates/wipe-hub/tests/migrations.rs
++++ b/crates/wipe-hub/tests/migrations.rs
+@@ -158,3 +158,45 @@ async fn auth_tokens_accept_the_story_3_purposes_only() {
+         other => panic!("expected a CHECK violation, got {other:?}"),
+     }
+ }
++
++#[tokio::test]
++async fn invitations_accept_owner_and_member_roles_and_32_byte_unique_hashes() {
++    let t = TestDb::migrated().await;
++    let org: uuid::Uuid =
++        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ('Org') RETURNING id")
++            .fetch_one(&t.pool)
++            .await
++            .unwrap();
++    let insert = |hash: Vec<u8>, role: &'static str| {
++        let pool = t.pool.clone();
++        async move {
++            sqlx::query(
++                "INSERT INTO invitations (organization_id, email, role, token_hash, expires_at) \
++                 VALUES ($1, 'a@example.com', $2, $3, now() + interval '7 days')",
++            )
++            .bind(org)
++            .bind(role)
++            .bind(hash)
++            .execute(&pool)
++            .await
++        }
++    };
++    insert(vec![1; 32], "owner").await.unwrap();
++    insert(vec![2; 32], "member").await.unwrap();
++    let constraint = |e: sqlx::Error| match e {
++        sqlx::Error::Database(d) => d.constraint().map(str::to_string),
++        other => panic!("expected a constraint violation, got {other:?}"),
++    };
++    assert_eq!(
++        constraint(insert(vec![3; 32], "vendor_admin").await.unwrap_err()).as_deref(),
++        Some("invitations_role_check")
++    );
++    assert_eq!(
++        constraint(insert(vec![4; 16], "member").await.unwrap_err()).as_deref(),
++        Some("invitations_token_hash_check")
++    );
++    assert_eq!(
++        constraint(insert(vec![1; 32], "member").await.unwrap_err()).as_deref(),
++        Some("invitations_token_hash_key")
++    );
++}
+diff --git a/apps/portal/src/api/team.test.ts b/apps/portal/src/api/team.test.ts
+new file mode 100644
+index 0000000..9f001ea
+--- /dev/null
++++ b/apps/portal/src/api/team.test.ts
+@@ -0,0 +1,256 @@
++import { beforeEach, describe, expect, it } from "vitest";
++import {
++  HubError,
++  changePassword,
++  resetCsrfCache,
++  updateProfile,
++  type Account,
++  type User,
++} from "./auth";
++import {
++  acceptInvitation,
++  changeRole,
++  fetchInvitations,
++  fetchMembers,
++  inviteMember,
++  lookupInvitation,
++  removeMember,
++  renameOrganization,
++  revokeInvitation,
++  type Invitation,
++} from "./team";
++
++const user: User = {
++  id: "8a6e0804-2bd0-4672-b79d-d97027f9071a",
++  email: "ada@example.com",
++  name: "Ada",
++  role: "owner",
++  email_verified: true,
++};
++
++const account: Account = {
++  user,
++  organization: { id: "0f8fad5b-d9cb-469f-a165-70867728950e", name: "Engines Ltd" },
++};
++
++const invitation: Invitation = {
++  id: "5b1c2a40-6a43-4b84-9a52-2f0b1d7a3c11",
++  email: "grace@example.com",
++  role: "member",
++  created_at: "2026-11-08T10:00:00Z",
++  expires_at: "2026-11-15T10:00:00Z",
++};
++
++interface Call {
++  url: string;
++  method: string;
++  body: unknown;
++  csrf: string | null;
++}
++
++/**
++ * A fake hub, as in `auth.test.ts`: `GET /api/auth/csrf` answers
++ * `csrf-<n>`; every other call is recorded and answered by `status`/`body`.
++ */
++function respond(status: number, body?: unknown) {
++  const calls: Call[] = [];
++  const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
++    const url = String(input);
++    const method = init?.method ?? "GET";
++    if (url === "/api/auth/csrf" && method === "GET") {
++      return new Response(JSON.stringify({ csrf_token: "csrf-1" }), {
++        status: 200,
++        headers: { "Content-Type": "application/json" },
++      });
++    }
++    const headers = (init?.headers ?? {}) as Record<string, string>;
++    calls.push({
++      url,
++      method,
++      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
++      csrf: headers["X-CSRF-Token"] ?? null,
++    });
++    const text = body === undefined ? null : JSON.stringify(body);
++    return new Response(text, {
++      status,
++      headers: text ? { "Content-Type": "application/json" } : {},
++    });
++  }) as typeof fetch;
++  return { impl, calls };
++}
++
++beforeEach(() => resetCsrfCache());
++
++async function rejection(p: Promise<unknown>): Promise<unknown> {
++  return p.then(
++    () => undefined,
++    (e: unknown) => e,
++  );
++}
++
++describe("account", () => {
++  it("updateProfile posts the name with a CSRF token", async () => {
++    const f = respond(200, account);
++    expect(await updateProfile("Ada", f.impl)).toEqual(account);
++    expect(f.calls).toEqual([
++      { url: "/api/account/profile", method: "POST", body: { name: "Ada" }, csrf: "csrf-1" },
++    ]);
++  });
++
++  it("changePassword sends both passwords and returns the account", async () => {
++    const f = respond(200, account);
++    expect(await changePassword("old one here", "new one here!", f.impl)).toEqual(account);
++    expect(f.calls).toEqual([
++      {
++        url: "/api/auth/password",
++        method: "POST",
++        body: { current_password: "old one here", new_password: "new one here!" },
++        csrf: "csrf-1",
++      },
++    ]);
++  });
++
++  it("changePassword surfaces a wrong current password", async () => {
++    const f = respond(400, { error: "current password is incorrect" });
++    const err = await rejection(changePassword("x", "new one here!", f.impl));
++    expect(err).toBeInstanceOf(HubError);
++    expect((err as HubError).status).toBe(400);
++    expect((err as HubError).message).toBe("current password is incorrect");
++  });
++});
++
++describe("organization", () => {
++  it("fetchMembers reads the list without a CSRF token", async () => {
++    const f = respond(200, { members: [user] });
++    expect(await fetchMembers(f.impl)).toEqual([user]);
++    expect(f.calls).toEqual([
++      { url: "/api/organization/members", method: "GET", body: undefined, csrf: null },
++    ]);
++  });
++
++  it("fetchMembers rejects an unexpected body", async () => {
++    const f = respond(200, { members: [{ id: 1 }] });
++    const err = await rejection(fetchMembers(f.impl));
++    expect((err as Error).message).toBe("members returned an unexpected body (HTTP 200)");
++  });
++
++  it("renameOrganization posts the name", async () => {
++    const f = respond(200, account.organization);
++    expect(await renameOrganization("New", f.impl)).toEqual(account.organization);
++    expect(f.calls[0]).toEqual({
++      url: "/api/organization",
++      method: "POST",
++      body: { name: "New" },
++      csrf: "csrf-1",
++    });
++  });
++
++  it("an owner-only refusal is a 403 HubError", async () => {
++    const f = respond(403, { error: "only an organization owner can manage the team" });
++    const err = await rejection(renameOrganization("New", f.impl));
++    expect((err as HubError).status).toBe(403);
++    expect((err as HubError).message).toBe("only an organization owner can manage the team");
++  });
++
++  it("changeRole and removeMember address the member by id", async () => {
++    const f = respond(200, { ...user, role: "member" });
++    expect(await changeRole(user.id, "member", f.impl)).toEqual({ ...user, role: "member" });
++    const g = respond(204);
++    await removeMember(user.id, g.impl);
++    expect(f.calls[0]).toEqual({
++      url: `/api/organization/members/${user.id}/role`,
++      method: "POST",
++      body: { role: "member" },
++      csrf: "csrf-1",
++    });
++    expect(g.calls[0]).toEqual({
++      url: `/api/organization/members/${user.id}/remove`,
++      method: "POST",
++      body: undefined,
++      csrf: "csrf-1",
++    });
++  });
++});
++
++describe("invitations", () => {
++  it("inviteMember posts email and role", async () => {
++    const f = respond(201, { invitation, invitation_email_sent: false });
++    expect(await inviteMember("grace@example.com", "member", f.impl)).toEqual({
++      invitation,
++      invitation_email_sent: false,
++    });
++    expect(f.calls[0]).toEqual({
++      url: "/api/organization/invitations",
++      method: "POST",
++      body: { email: "grace@example.com", role: "member" },
++      csrf: "csrf-1",
++    });
++  });
++
++  it("inviteMember keeps the mail limit's Retry-After", async () => {
++    const calls: string[] = [];
++    const impl = (async (input: RequestInfo | URL) => {
++      const url = String(input);
++      calls.push(url);
++      if (url === "/api/auth/csrf") {
++        return new Response(JSON.stringify({ csrf_token: "c" }), { status: 200 });
++      }
++      return new Response(JSON.stringify({ error: "too many emails requested; try again later" }), {
++        status: 429,
++        headers: { "Retry-After": "120" },
++      });
++    }) as typeof fetch;
++    const err = await rejection(inviteMember("a@example.com", "owner", impl));
++    expect((err as HubError).status).toBe(429);
++    expect((err as HubError).retryAfterSecs).toBe(120);
++  });
++
++  it("fetchInvitations and revokeInvitation", async () => {
++    const f = respond(200, { invitations: [invitation] });
++    expect(await fetchInvitations(f.impl)).toEqual([invitation]);
++    const g = respond(204);
++    await revokeInvitation(invitation.id, g.impl);
++    expect(f.calls[0].url).toBe("/api/organization/invitations");
++    expect(g.calls[0]).toEqual({
++      url: `/api/organization/invitations/${invitation.id}/revoke`,
++      method: "POST",
++      body: undefined,
++      csrf: "csrf-1",
++    });
++  });
++
++  it("fetchInvitations rejects a role the hub never assigns", async () => {
++    const f = respond(200, { invitations: [{ ...invitation, role: "vendor_admin" }] });
++    await expect(fetchInvitations(f.impl)).rejects.toThrow("unexpected body");
++  });
++
++  it("lookupInvitation returns the preview", async () => {
++    const preview = { organization_name: "Engines Ltd", email: "g@example.com", role: "owner" };
++    const f = respond(200, preview);
++    expect(await lookupInvitation("tok", f.impl)).toEqual(preview);
++    expect(f.calls[0]).toEqual({
++      url: "/api/invitations/lookup",
++      method: "POST",
++      body: { token: "tok" },
++      csrf: "csrf-1",
++    });
++  });
++
++  it("lookupInvitation surfaces an unusable token", async () => {
++    const f = respond(400, { error: "this invitation is invalid or has expired" });
++    const err = await rejection(lookupInvitation("tok", f.impl));
++    expect((err as HubError).message).toBe("this invitation is invalid or has expired");
++  });
++
++  it("acceptInvitation posts token, name and password and returns the account", async () => {
++    const f = respond(201, account);
++    const input = { token: "tok", name: "Grace", password: "correct horse battery" };
++    expect(await acceptInvitation(input, f.impl)).toEqual(account);
++    expect(f.calls[0]).toEqual({
++      url: "/api/invitations/accept",
++      method: "POST",
++      body: input,
++      csrf: "csrf-1",
++    });
++  });
++});
+diff --git a/apps/portal/src/api/team.ts b/apps/portal/src/api/team.ts
+new file mode 100644
+index 0000000..e3acd92
+--- /dev/null
++++ b/apps/portal/src/api/team.ts
+@@ -0,0 +1,182 @@
++// Mirrors the organization, team and invitation routes in
++// crates/wipe-hub/src/team_routes.rs and `wipe_hub::team::{Invitation,
++// InvitationPreview}` (crates/wipe-hub/src/team.rs). Change both together.
++//
++// The hub decides who may do what (owners manage the team; an organization
++// keeps at least one owner). The portal only hides controls a member cannot
++// use; it never re-implements those rules.
++
++import {
++  ensureOk,
++  isAccount,
++  isObject,
++  isOrganization,
++  isUser,
++  json,
++  request,
++  type Account,
++  type Fetch,
++  type Organization,
++  type User,
++} from "./auth";
++
++/** A role an owner can assign. */
++export type AssignableRole = "owner" | "member";
++
++/** A pending invitation. Timestamps are RFC 3339 UTC strings. */
++export interface Invitation {
++  id: string;
++  email: string;
++  role: AssignableRole;
++  created_at: string;
++  expires_at: string;
++}
++
++export interface InviteResult {
++  invitation: Invitation;
++  /** `false` when the hub could not hand the email to SMTP; inviting again re-sends. */
++  invitation_email_sent: boolean;
++}
++
++/** What an invitee sees before accepting. */
++export interface InvitationPreview {
++  organization_name: string;
++  email: string;
++  role: AssignableRole;
++}
++
++export interface AcceptInput {
++  token: string;
++  name: string;
++  password: string;
++}
++
++function isAssignableRole(v: unknown): v is AssignableRole {
++  return v === "owner" || v === "member";
++}
++
++export function isInvitation(v: unknown): v is Invitation {
++  return (
++    isObject(v) &&
++    typeof v.id === "string" &&
++    typeof v.email === "string" &&
++    isAssignableRole(v.role) &&
++    typeof v.created_at === "string" &&
++    typeof v.expires_at === "string"
++  );
++}
++
++function isInviteResult(v: unknown): v is InviteResult {
++  return isObject(v) && isInvitation(v.invitation) && typeof v.invitation_email_sent === "boolean";
++}
++
++function isPreview(v: unknown): v is InvitationPreview {
++  return (
++    isObject(v) &&
++    typeof v.organization_name === "string" &&
++    typeof v.email === "string" &&
++    isAssignableRole(v.role)
++  );
++}
++
++function isMembers(v: unknown): v is { members: User[] } {
++  return isObject(v) && Array.isArray(v.members) && v.members.every(isUser);
++}
++
++function isInvitations(v: unknown): v is { invitations: Invitation[] } {
++  return isObject(v) && Array.isArray(v.invitations) && v.invitations.every(isInvitation);
++}
++
++/** `GET /api/organization/members` (any role): the organization's users. */
++export async function fetchMembers(fetchImpl: Fetch = fetch): Promise<User[]> {
++  const res = await ensureOk(await request(fetchImpl, "GET", "/api/organization/members"));
++  return (await json(res, isMembers, "members")).members;
++}
++
++/** `POST /api/organization` (owner): rename the organization. */
++export async function renameOrganization(
++  name: string,
++  fetchImpl: Fetch = fetch,
++): Promise<Organization> {
++  const res = await ensureOk(await request(fetchImpl, "POST", "/api/organization", { name }));
++  return json(res, isOrganization, "rename organization");
++}
++
++/**
++ * `POST /api/organization/invitations` (owner, 201): email an invitation.
++ * Counts against the email-send limit (429, see `emailRequestErrorMessage`).
++ */
++export async function inviteMember(
++  email: string,
++  role: AssignableRole,
++  fetchImpl: Fetch = fetch,
++): Promise<InviteResult> {
++  const res = await ensureOk(
++    await request(fetchImpl, "POST", "/api/organization/invitations", { email, role }),
++  );
++  return json(res, isInviteResult, "invite");
++}
++
++/** `GET /api/organization/invitations` (owner): pending invitations. */
++export async function fetchInvitations(fetchImpl: Fetch = fetch): Promise<Invitation[]> {
++  const res = await ensureOk(await request(fetchImpl, "GET", "/api/organization/invitations"));
++  return (await json(res, isInvitations, "invitations")).invitations;
++}
++
++/** `POST /api/organization/invitations/{id}/revoke` (owner, 204). */
++export async function revokeInvitation(id: string, fetchImpl: Fetch = fetch): Promise<void> {
++  await ensureOk(
++    await request(
++      fetchImpl,
++      "POST",
++      `/api/organization/invitations/${encodeURIComponent(id)}/revoke`,
++    ),
++  );
++}
++
++/** `POST /api/organization/members/{id}/role` (owner): the updated member. */
++export async function changeRole(
++  id: string,
++  role: AssignableRole,
++  fetchImpl: Fetch = fetch,
++): Promise<User> {
++  const res = await ensureOk(
++    await request(fetchImpl, "POST", `/api/organization/members/${encodeURIComponent(id)}/role`, {
++      role,
++    }),
++  );
++  return json(res, isUser, "change role");
++}
++
++/** `POST /api/organization/members/{id}/remove` (owner, 204). */
++export async function removeMember(id: string, fetchImpl: Fetch = fetch): Promise<void> {
++  await ensureOk(
++    await request(fetchImpl, "POST", `/api/organization/members/${encodeURIComponent(id)}/remove`),
++  );
++}
++
++/**
++ * `POST /api/invitations/lookup` (anonymous): who invited the token's holder
++ * where, as what. Consumes nothing. An unusable token is a 400 `HubError`.
++ */
++export async function lookupInvitation(
++  token: string,
++  fetchImpl: Fetch = fetch,
++): Promise<InvitationPreview> {
++  const res = await ensureOk(
++    await request(fetchImpl, "POST", "/api/invitations/lookup", { token }),
++  );
++  return json(res, isPreview, "invitation lookup");
++}
++
++/**
++ * `POST /api/invitations/accept` (anonymous, 201): create the account in the
++ * inviting organization and sign in.
++ */
++export async function acceptInvitation(
++  input: AcceptInput,
++  fetchImpl: Fetch = fetch,
++): Promise<Account> {
++  const res = await ensureOk(await request(fetchImpl, "POST", "/api/invitations/accept", input));
++  return json(res, isAccount, "accept invitation");
++}
+diff --git a/apps/portal/src/pages/AcceptInvitePage.tsx b/apps/portal/src/pages/AcceptInvitePage.tsx
+new file mode 100644
+index 0000000..63a66bf
+--- /dev/null
++++ b/apps/portal/src/pages/AcceptInvitePage.tsx
+@@ -0,0 +1,77 @@
++import { useState, type FormEvent } from "react";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { useNavigate } from "@tanstack/react-router";
++import { type Account } from "@/api/auth";
++import { acceptInvitation, lookupInvitation } from "@/api/team";
++import { Field, FormError, SubmitButton } from "./AuthForm";
++
++/**
++ * Landing page for the emailed `/accept-invite?token=…` link. Looking the
++ * invitation up on load consumes nothing (mail scanners open links); the
++ * account is created only when the invitee submits the form.
++ */
++export function AcceptInvitePage({ token }: { token: string | undefined }) {
++  const queryClient = useQueryClient();
++  const navigate = useNavigate();
++  const [name, setName] = useState("");
++  const [password, setPassword] = useState("");
++  const preview = useQuery({
++    queryKey: ["invitation", token],
++    queryFn: () => lookupInvitation(token ?? ""),
++    enabled: Boolean(token),
++    retry: false,
++  });
++  const mutation = useMutation({
++    mutationFn: (t: string) => acceptInvitation({ token: t, name, password }),
++    onSuccess: (account) => {
++      queryClient.setQueryData<Account>(["me"], account);
++      void navigate({ to: "/" });
++    },
++  });
++
++  function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    if (token) mutation.mutate(token);
++  }
++
++  return (
++    <section className="max-w-sm space-y-4">
++      <h1 className="text-xl font-semibold">Join an organization</h1>
++      {!token && (
++        <p role="alert" className="text-sm text-rose-400">
++          This link has no invitation token.
++        </p>
++      )}
++      {token && preview.isPending && <p className="text-sm text-slate-400">Checking your invitation…</p>}
++      <FormError error={preview.error} />
++      {preview.data && (
++        <>
++          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
++            <dt className="text-slate-400">Organization</dt>
++            <dd>{preview.data.organization_name}</dd>
++            <dt className="text-slate-400">Email</dt>
++            <dd>{preview.data.email}</dd>
++            <dt className="text-slate-400">Role</dt>
++            <dd>{preview.data.role}</dd>
++          </dl>
++          <form onSubmit={onSubmit} className="space-y-3">
++            <Field label="Your name" name="name" autoComplete="name" value={name} onChange={setName} />
++            <Field
++              label="Password (at least 12 characters)"
++              name="password"
++              type="password"
++              autoComplete="new-password"
++              minLength={12}
++              value={password}
++              onChange={setPassword}
++            />
++            <FormError error={mutation.error} />
++            <SubmitButton pending={mutation.isPending || mutation.isSuccess}>
++              Join {preview.data.organization_name}
++            </SubmitButton>
++          </form>
++        </>
++      )}
++    </section>
++  );
++}
+diff --git a/apps/portal/src/pages/AccountPage.tsx b/apps/portal/src/pages/AccountPage.tsx
+new file mode 100644
+index 0000000..269ebad
+--- /dev/null
++++ b/apps/portal/src/pages/AccountPage.tsx
+@@ -0,0 +1,137 @@
++import { useState, type FormEvent } from "react";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { Link } from "@tanstack/react-router";
++import {
++  changePassword,
++  fetchMe,
++  signInErrorMessage,
++  updateProfile,
++  type Account,
++} from "@/api/auth";
++import { Field, FormError, SubmitButton } from "./AuthForm";
++
++/** `/account`: the signed-in user's name and password. */
++export function AccountPage() {
++  const me = useQuery({ queryKey: ["me"], queryFn: () => fetchMe(), retry: false });
++
++  return (
++    <section className="max-w-sm space-y-6">
++      <h1 className="text-xl font-semibold">Your account</h1>
++      {me.isPending && <p className="text-sm text-slate-400">Loading…</p>}
++      {me.isError && (
++        <p role="alert" className="text-sm text-rose-400">
++          Could not load your account: {me.error instanceof Error ? me.error.message : "unknown error"}
++        </p>
++      )}
++      {me.data === null && <SignInPrompt />}
++      {me.data && (
++        <>
++          <ProfileForm account={me.data} />
++          <PasswordForm />
++        </>
++      )}
++    </section>
++  );
++}
++
++export function SignInPrompt() {
++  return (
++    <p className="text-sm">
++      <Link to="/sign-in" className="text-indigo-400 hover:underline">
++        Sign in
++      </Link>{" "}
++      to see this page.
++    </p>
++  );
++}
++
++function ProfileForm({ account }: { account: Account }) {
++  const queryClient = useQueryClient();
++  const [name, setName] = useState(account.user.name);
++  const mutation = useMutation({
++    mutationFn: () => updateProfile(name),
++    onSuccess: (updated) => {
++      queryClient.setQueryData<Account>(["me"], updated);
++      setName(updated.user.name);
++    },
++  });
++
++  function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    mutation.mutate();
++  }
++
++  return (
++    <form onSubmit={onSubmit} className="space-y-3">
++      <h2 className="text-sm font-medium text-slate-400">Profile</h2>
++      <Field label="Name" name="name" autoComplete="name" value={name} onChange={setName} />
++      <div className="space-y-1 text-sm">
++        <span className="text-slate-300">Email</span>
++        <p className="text-slate-400">{account.user.email}</p>
++      </div>
++      <FormError error={mutation.error} />
++      {mutation.isSuccess && (
++        <p role="status" className="text-sm text-emerald-400">
++          Saved.
++        </p>
++      )}
++      <SubmitButton pending={mutation.isPending}>Save</SubmitButton>
++    </form>
++  );
++}
++
++function PasswordForm() {
++  const queryClient = useQueryClient();
++  const [current, setCurrent] = useState("");
++  const [next, setNext] = useState("");
++  const mutation = useMutation({
++    mutationFn: () => changePassword(current, next),
++    onSuccess: (account) => {
++      queryClient.setQueryData<Account>(["me"], account);
++      setCurrent("");
++      setNext("");
++    },
++  });
++
++  function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    mutation.mutate();
++  }
++
++  return (
++    <form onSubmit={onSubmit} className="space-y-3">
++      <h2 className="text-sm font-medium text-slate-400">Change password</h2>
++      <Field
++        label="Current password"
++        name="current-password"
++        type="password"
++        autoComplete="current-password"
++        value={current}
++        onChange={setCurrent}
++      />
++      <Field
++        label="New password (at least 12 characters)"
++        name="new-password"
++        type="password"
++        autoComplete="new-password"
++        minLength={12}
++        value={next}
++        onChange={setNext}
++      />
++      <FormError error={mutation.error} describe={signInErrorMessage} />
++      {mutation.isSuccess && (
++        <p role="status" className="text-sm text-emerald-400">
++          Password changed. Every other session of your account has been signed out.
++        </p>
++      )}
++      <SubmitButton pending={mutation.isPending}>Change password</SubmitButton>
++      <p className="text-sm text-slate-400">
++        Signed in with an emailed link and never set a password?{" "}
++        <Link to="/forgot-password" className="text-indigo-400 hover:underline">
++          Use “Forgot password”
++        </Link>{" "}
++        to choose one.
++      </p>
++    </form>
++  );
++}
+diff --git a/apps/portal/src/pages/OrganizationPage.tsx b/apps/portal/src/pages/OrganizationPage.tsx
+new file mode 100644
+index 0000000..da38c53
+--- /dev/null
++++ b/apps/portal/src/pages/OrganizationPage.tsx
+@@ -0,0 +1,255 @@
++import { useState, type FormEvent } from "react";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { emailRequestErrorMessage, fetchMe, type Account, type User } from "@/api/auth";
++import {
++  changeRole,
++  fetchInvitations,
++  fetchMembers,
++  inviteMember,
++  removeMember,
++  renameOrganization,
++  revokeInvitation,
++  type AssignableRole,
++} from "@/api/team";
++import { SignInPrompt } from "./AccountPage";
++import { Field, FormError, SubmitButton } from "./AuthForm";
++
++/**
++ * `/organization`: the organization's name, its members and, for owners,
++ * invitations and member management. Hiding owner controls from members is
++ * a convenience only: the hub refuses them anyway.
++ */
++export function OrganizationPage() {
++  const me = useQuery({ queryKey: ["me"], queryFn: () => fetchMe(), retry: false });
++
++  return (
++    <section className="space-y-6">
++      <h1 className="text-xl font-semibold">Organization</h1>
++      {me.isPending && <p className="text-sm text-slate-400">Loading…</p>}
++      {me.isError && (
++        <p role="alert" className="text-sm text-rose-400">
++          Could not load your account: {me.error instanceof Error ? me.error.message : "unknown error"}
++        </p>
++      )}
++      {me.data === null && <SignInPrompt />}
++      {me.data && <Organization account={me.data} />}
++    </section>
++  );
++}
++
++function Organization({ account }: { account: Account }) {
++  const isOwner = account.user.role === "owner";
++  return (
++    <>
++      {isOwner ? (
++        <RenameForm name={account.organization.name} />
++      ) : (
++        <p className="text-sm">{account.organization.name}</p>
++      )}
++      <Members self={account.user} isOwner={isOwner} />
++      {isOwner && (
++        <>
++          <InviteForm />
++          <Invitations />
++        </>
++      )}
++    </>
++  );
++}
++
++function RenameForm({ name: initial }: { name: string }) {
++  const queryClient = useQueryClient();
++  const [name, setName] = useState(initial);
++  const mutation = useMutation({
++    mutationFn: () => renameOrganization(name),
++    onSuccess: (organization) => {
++      queryClient.setQueryData<Account | null>(["me"], (old) =>
++        old ? { ...old, organization } : old,
++      );
++      setName(organization.name);
++    },
++  });
++
++  function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    mutation.mutate();
++  }
++
++  return (
++    <form onSubmit={onSubmit} className="max-w-sm space-y-3">
++      <Field label="Organization name" name="organization" value={name} onChange={setName} />
++      <FormError error={mutation.error} />
++      {mutation.isSuccess && (
++        <p role="status" className="text-sm text-emerald-400">
++          Saved.
++        </p>
++      )}
++      <SubmitButton pending={mutation.isPending}>Rename</SubmitButton>
++    </form>
++  );
++}
++
++function Members({ self, isOwner }: { self: User; isOwner: boolean }) {
++  const members = useQuery({ queryKey: ["members"], queryFn: () => fetchMembers() });
++
++  return (
++    <div className="space-y-2">
++      <h2 className="text-sm font-medium text-slate-400">Members</h2>
++      {members.isPending && <p className="text-sm text-slate-400">Loading…</p>}
++      <FormError error={members.error} />
++      {members.data && (
++        <ul className="divide-y divide-slate-800 rounded-md border border-slate-800">
++          {members.data.map((m) => (
++            <MemberRow key={m.id} member={m} self={self} isOwner={isOwner} />
++          ))}
++        </ul>
++      )}
++    </div>
++  );
++}
++
++function MemberRow({ member, self, isOwner }: { member: User; self: User; isOwner: boolean }) {
++  const queryClient = useQueryClient();
++  const refresh = () => {
++    void queryClient.invalidateQueries({ queryKey: ["members"] });
++    // Demoting yourself changes what this page shows you.
++    if (member.id === self.id) void queryClient.invalidateQueries({ queryKey: ["me"] });
++  };
++  const role = useMutation({
++    mutationFn: (r: AssignableRole) => changeRole(member.id, r),
++    onSuccess: refresh,
++  });
++  const remove = useMutation({ mutationFn: () => removeMember(member.id), onSuccess: refresh });
++  const manageable = isOwner && member.role !== "vendor_admin";
++  const isSelf = member.id === self.id;
++
++  return (
++    <li className="space-y-1 px-3 py-2 text-sm">
++      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
++        <span className="font-medium">{member.name}</span>
++        <span className="text-slate-400">{member.email}</span>
++        {isSelf && <span className="text-slate-500">(you)</span>}
++        <span className="ml-auto flex items-center gap-2">
++          {manageable ? (
++            <select
++              aria-label={`Role of ${member.name}`}
++              value={member.role}
++              disabled={role.isPending}
++              onChange={(e) => role.mutate(e.target.value as AssignableRole)}
++              className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1"
++            >
++              <option value="owner">owner</option>
++              <option value="member">member</option>
++            </select>
++          ) : (
++            <span className="text-slate-400">{member.role}</span>
++          )}
++          {manageable && !isSelf && (
++            <button
++              type="button"
++              disabled={remove.isPending}
++              onClick={() => {
++                if (window.confirm(`Remove ${member.name} (${member.email}) from the organization?`)) {
++                  remove.mutate();
++                }
++              }}
++              className="rounded-md border border-slate-700 px-2 py-1 hover:bg-slate-800 disabled:opacity-50"
++            >
++              Remove
++            </button>
++          )}
++        </span>
++      </div>
++      <FormError error={role.error ?? remove.error} />
++    </li>
++  );
++}
++
++function InviteForm() {
++  const queryClient = useQueryClient();
++  const [email, setEmail] = useState("");
++  const [role, setRole] = useState<AssignableRole>("member");
++  const mutation = useMutation({
++    mutationFn: () => inviteMember(email, role),
++    onSuccess: () => {
++      void queryClient.invalidateQueries({ queryKey: ["invitations"] });
++      setEmail("");
++    },
++  });
++
++  function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    mutation.mutate();
++  }
++
++  return (
++    <form onSubmit={onSubmit} className="max-w-sm space-y-3">
++      <h2 className="text-sm font-medium text-slate-400">Invite someone</h2>
++      <Field
++        label="Email"
++        name="invite-email"
++        type="email"
++        autoComplete="off"
++        value={email}
++        onChange={setEmail}
++      />
++      <label className="block space-y-1 text-sm">
++        <span className="text-slate-300">Role</span>
++        <select
++          name="invite-role"
++          value={role}
++          onChange={(e) => setRole(e.target.value as AssignableRole)}
++          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100"
++        >
++          <option value="member">member</option>
++          <option value="owner">owner</option>
++        </select>
++      </label>
++      <FormError error={mutation.error} describe={emailRequestErrorMessage} />
++      {mutation.data && (
++        <p role="status" className="text-sm text-emerald-400">
++          {mutation.data.invitation_email_sent
++            ? `Invitation sent to ${mutation.data.invitation.email}. The link works once and expires in 7 days.`
++            : `The invitation for ${mutation.data.invitation.email} was created, but the email could not be sent. Invite again to re-send it.`}
++        </p>
++      )}
++      <SubmitButton pending={mutation.isPending}>Send invitation</SubmitButton>
++    </form>
++  );
++}
++
++function Invitations() {
++  const queryClient = useQueryClient();
++  const invitations = useQuery({ queryKey: ["invitations"], queryFn: () => fetchInvitations() });
++  const revoke = useMutation({
++    mutationFn: (id: string) => revokeInvitation(id),
++    onSettled: () => queryClient.invalidateQueries({ queryKey: ["invitations"] }),
++  });
++
++  return (
++    <div className="space-y-2">
++      <h2 className="text-sm font-medium text-slate-400">Pending invitations</h2>
++      <FormError error={invitations.error ?? revoke.error} />
++      {invitations.data?.length === 0 && <p className="text-sm text-slate-400">None.</p>}
++      {invitations.data && invitations.data.length > 0 && (
++        <ul className="divide-y divide-slate-800 rounded-md border border-slate-800">
++          {invitations.data.map((inv) => (
++            <li key={inv.id} className="flex flex-wrap items-center gap-3 px-3 py-2 text-sm">
++              <span>{inv.email}</span>
++              <span className="text-slate-400">{inv.role}</span>
++              <span className="text-slate-500">expires {inv.expires_at.slice(0, 10)}</span>
++              <button
++                type="button"
++                disabled={revoke.isPending}
++                onClick={() => revoke.mutate(inv.id)}
++                className="ml-auto rounded-md border border-slate-700 px-2 py-1 hover:bg-slate-800 disabled:opacity-50"
++              >
++                Revoke
++              </button>
++            </li>
++          ))}
++        </ul>
++      )}
++    </div>
++  );
++}
+diff --git a/crates/wipe-hub/migrations/0006_invitations.sql b/crates/wipe-hub/migrations/0006_invitations.sql
+new file mode 100644
+index 0000000..cb8a18d
+--- /dev/null
++++ b/crates/wipe-hub/migrations/0006_invitations.sql
+@@ -0,0 +1,25 @@
++-- Team invitations (ADR-0007 §3, portal-accounts story 4).
++-- A new table rather than an `auth_tokens` purpose: those tokens belong to an
++-- existing user, and an invitee has no user row until they accept.
++-- Only the SHA-256 of the emailed secret is stored. An invitation is pending
++-- while `accepted_at` and `revoked_at` are null and `expires_at` is in the
++-- future; accepting creates the user in `organization_id` with `role`.
++-- Roles are customer-side only: an invitation never creates a vendor admin.
++--
++-- Never edit an applied migration; add a new NNNN_name.sql.
++
++CREATE TABLE invitations (
++    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
++    organization_id uuid NOT NULL REFERENCES organizations (id) ON DELETE CASCADE,
++    email           text NOT NULL CHECK (email ~ '\S'),
++    role            text NOT NULL CHECK (role IN ('owner', 'member')),
++    token_hash      bytea NOT NULL CHECK (octet_length(token_hash) = 32),
++    invited_by      uuid REFERENCES users (id) ON DELETE SET NULL,
++    created_at      timestamptz NOT NULL DEFAULT now(),
++    expires_at      timestamptz NOT NULL,
++    accepted_at     timestamptz,
++    revoked_at      timestamptz,
++    CONSTRAINT invitations_token_hash_key UNIQUE (token_hash)
++);
++
++CREATE INDEX invitations_organization_email_idx ON invitations (organization_id, lower(email));
+diff --git a/crates/wipe-hub/src/team.rs b/crates/wipe-hub/src/team.rs
+new file mode 100644
+index 0000000..342cd48
+--- /dev/null
++++ b/crates/wipe-hub/src/team.rs
+@@ -0,0 +1,489 @@
++//! Organization and team data layer (ADR-0007 §3, portal-accounts story 4):
++//! members, roles, the organization's name and invitations.
++//!
++//! Every function that reads or writes one organization's records takes its
++//! `organization_id` first, and handlers pass the signed-in user's, from the
++//! session, never one from the request. A user or invitation id from another
++//! organization therefore matches nothing, exactly like an unknown id.
++//!
++//! - Only `owner` and `member` are assignable or targetable here; a
++//!   `vendor_admin` is never found by [`member`] and never created.
++//! - Role changes and removals run after [`lock_organization`] (`SELECT …
++//!   FOR UPDATE` on the organization row), so the at-least-one-owner check
++//!   cannot race: two owners demoting each other are serialised.
++//! - Invitation tokens are 32 OS-RNG bytes; only their SHA-256 is stored
++//!   ([`accounts::Token`]). The raw token leaves only in the invitation email.
++//! - Timestamps are RFC 3339 UTC strings formatted in SQL.
++//!
++//! Functions take any Postgres executor (or a connection, when they run more
++//! than one statement) so callers can put a write and its audit row in one
++//! transaction.
++
++use std::str::FromStr;
++use std::time::Duration;
++
++use serde::{Deserialize, Serialize};
++use uuid::Uuid;
++
++use crate::accounts::{self, CreateAccountError, Role, Token, User};
++
++/// How long an invitation link is valid.
++pub const INVITATION_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
++
++/// `to_char` format for RFC 3339 UTC, whole seconds.
++const RFC3339_UTC: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS"Z"'"#;
++
++/// A pending invitation as the API shows it. Never carries the token.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct Invitation {
++    pub id: Uuid,
++    pub email: String,
++    pub role: Role,
++    /// RFC 3339, UTC.
++    pub created_at: String,
++    /// RFC 3339, UTC.
++    pub expires_at: String,
++}
++
++/// A newly created invitation and the raw token for its email.
++pub struct IssuedInvitation {
++    pub token: String,
++    pub invitation: Invitation,
++}
++
++/// What an invitee sees before accepting: who invited them where, as what.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct InvitationPreview {
++    pub organization_name: String,
++    pub email: String,
++    pub role: Role,
++}
++
++/// An invitation that [`consume_invitation`] just marked accepted.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct AcceptedInvitation {
++    pub id: Uuid,
++    pub organization_id: Uuid,
++    pub email: String,
++    pub role: Role,
++}
++
++/// What [`remove_member`] deleted.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct RemovedMember {
++    pub email: String,
++    pub role: Role,
++    pub sessions_ended: i64,
++}
++
++pub const MSG_BAD_ROLE: &str = "role must be owner or member";
++
++/// A role an owner may assign: `owner` or `member`, nothing else.
++pub fn assignable_role(s: &str) -> Result<Role, String> {
++    match s {
++        "owner" => Ok(Role::Owner),
++        "member" => Ok(Role::Member),
++        _ => Err(MSG_BAD_ROLE.into()),
++    }
++}
++
++fn decode_role(s: &str) -> Result<Role, sqlx::Error> {
++    Role::from_str(s).map_err(|e| sqlx::Error::Decode(e.into()))
++}
++
++type UserRow = (Uuid, String, String, String, bool);
++
++fn user_of((id, email, name, role, email_verified): UserRow) -> Result<User, sqlx::Error> {
++    Ok(User {
++        id,
++        email,
++        name,
++        role: decode_role(&role)?,
++        email_verified,
++    })
++}
++
++// ---------------------------------------------------------------------------
++// Members and the organization
++
++/// Every user of the organization, ordered by name then email.
++pub async fn members<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    organization_id: Uuid,
++) -> Result<Vec<User>, sqlx::Error> {
++    let rows: Vec<UserRow> = sqlx::query_as(
++        "SELECT id, email, name, role, email_verified_at IS NOT NULL FROM users \
++         WHERE organization_id = $1 ORDER BY name, lower(email), id",
++    )
++    .bind(organization_id)
++    .fetch_all(executor)
++    .await?;
++    rows.into_iter().map(user_of).collect()
++}
++
++/// One `owner` or `member` of the organization; `None` for an unknown id,
++/// another organization's user or a `vendor_admin`.
++pub async fn member<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    organization_id: Uuid,
++    user_id: Uuid,
++) -> Result<Option<User>, sqlx::Error> {
++    let row: Option<UserRow> = sqlx::query_as(
++        "SELECT id, email, name, role, email_verified_at IS NOT NULL FROM users \
++         WHERE organization_id = $1 AND id = $2 AND role IN ('owner', 'member')",
++    )
++    .bind(organization_id)
++    .bind(user_id)
++    .fetch_optional(executor)
++    .await?;
++    row.map(user_of).transpose()
++}
++
++/// Set a user's own name; `false` if they are not in the organization.
++pub async fn set_user_name<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    organization_id: Uuid,
++    user_id: Uuid,
++    name: &str,
++) -> Result<bool, sqlx::Error> {
++    let done = sqlx::query("UPDATE users SET name = $3 WHERE organization_id = $1 AND id = $2")
++        .bind(organization_id)
++        .bind(user_id)
++        .bind(name)
++        .execute(executor)
++        .await?;
++    Ok(done.rows_affected() > 0)
++}
++
++/// Lock the organization row (`FOR UPDATE`) until the transaction ends and
++/// return its name. Every role change, removal and rename takes this lock
++/// first, so owner counts read after it are stable.
++pub async fn lock_organization<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    organization_id: Uuid,
++) -> Result<Option<String>, sqlx::Error> {
++    sqlx::query_scalar("SELECT name FROM organizations WHERE id = $1 FOR UPDATE")
++        .bind(organization_id)
++        .fetch_optional(executor)
++        .await
++}
++
++/// Rename the organization.
++pub async fn rename_organization<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    organization_id: Uuid,
++    name: &str,
++) -> Result<(), sqlx::Error> {
++    sqlx::query("UPDATE organizations SET name = $2 WHERE id = $1")
++        .bind(organization_id)
++        .bind(name)
++        .execute(executor)
++        .await?;
++    Ok(())
++}
++
++/// How many `owner`s the organization has.
++pub async fn owner_count<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    organization_id: Uuid,
++) -> Result<i64, sqlx::Error> {
++    sqlx::query_scalar("SELECT count(*) FROM users WHERE organization_id = $1 AND role = 'owner'")
++        .bind(organization_id)
++        .fetch_one(executor)
++        .await
++}
++
++/// Set an `owner`'s or `member`'s role to `role` (`owner` or `member`);
++/// `false` if no such member.
++pub async fn set_role<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    organization_id: Uuid,
++    user_id: Uuid,
++    role: Role,
++) -> Result<bool, sqlx::Error> {
++    debug_assert!(matches!(role, Role::Owner | Role::Member));
++    let done = sqlx::query(
++        "UPDATE users SET role = $3 \
++         WHERE organization_id = $1 AND id = $2 AND role IN ('owner', 'member') \
++           AND $3 IN ('owner', 'member')",
++    )
++    .bind(organization_id)
++    .bind(user_id)
++    .bind(role.as_str())
++    .execute(executor)
++    .await?;
++    Ok(done.rows_affected() > 0)
++}
++
++/// Delete an `owner` or `member` (their sessions and emailed tokens cascade);
++/// `None` if no such member.
++pub async fn remove_member<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    organization_id: Uuid,
++    user_id: Uuid,
++) -> Result<Option<RemovedMember>, sqlx::Error> {
++    let row: Option<(String, String, i64)> = sqlx::query_as(
++        "WITH s AS (SELECT count(*) AS n FROM sessions WHERE user_id = $2) \
++         DELETE FROM users \
++         WHERE organization_id = $1 AND id = $2 AND role IN ('owner', 'member') \
++         RETURNING email, role, (SELECT n FROM s)",
++    )
++    .bind(organization_id)
++    .bind(user_id)
++    .fetch_optional(executor)
++    .await?;
++    row.map(|(email, role, sessions_ended)| {
++        Ok(RemovedMember {
++            email,
++            role: decode_role(&role)?,
++            sessions_ended,
++        })
++    })
++    .transpose()
++}
++
++/// Whether `email` (any case) belongs to a user of this organization.
++pub async fn is_member_email<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    organization_id: Uuid,
++    email: &str,
++) -> Result<bool, sqlx::Error> {
++    sqlx::query_scalar(
++        "SELECT EXISTS (SELECT 1 FROM users \
++         WHERE organization_id = $1 AND lower(email) = lower($2))",
++    )
++    .bind(organization_id)
++    .bind(email.trim())
++    .fetch_one(executor)
++    .await
++}
++
++// ---------------------------------------------------------------------------
++// Invitations
++
++/// Invite `email` as `role`: revoke this organization's other pending
++/// invitations for the same address (any case), delete its expired
++/// unaccepted ones, and insert a new one valid for [`INVITATION_TTL`]. Call
++/// inside a transaction.
++pub async fn create_invitation(
++    conn: &mut sqlx::PgConnection,
++    organization_id: Uuid,
++    email: &str,
++    role: Role,
++    invited_by: Uuid,
++) -> Result<IssuedInvitation, sqlx::Error> {
++    debug_assert!(matches!(role, Role::Owner | Role::Member));
++    sqlx::query(
++        "UPDATE invitations SET revoked_at = now() \
++         WHERE organization_id = $1 AND lower(email) = lower($2) \
++           AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now()",
++    )
++    .bind(organization_id)
++    .bind(email)
++    .execute(&mut *conn)
++    .await?;
++    sqlx::query(
++        "DELETE FROM invitations \
++         WHERE organization_id = $1 AND accepted_at IS NULL AND expires_at <= now()",
++    )
++    .bind(organization_id)
++    .execute(&mut *conn)
++    .await?;
++    let token = Token::generate();
++    let (id, created_at, expires_at): (Uuid, String, String) = sqlx::query_as(&format!(
++        "INSERT INTO invitations (organization_id, email, role, token_hash, invited_by, expires_at) \
++         VALUES ($1, $2, $3, $4, $5, now() + make_interval(secs => $6)) \
++         RETURNING id, to_char(created_at AT TIME ZONE 'UTC', {RFC3339_UTC}), \
++                   to_char(expires_at AT TIME ZONE 'UTC', {RFC3339_UTC})"
++    ))
++    .bind(organization_id)
++    .bind(email)
++    .bind(role.as_str())
++    .bind(&token.hash[..])
++    .bind(invited_by)
++    .bind(INVITATION_TTL.as_secs_f64())
++    .fetch_one(&mut *conn)
++    .await?;
++    Ok(IssuedInvitation {
++        token: token.raw,
++        invitation: Invitation {
++            id,
++            email: email.to_string(),
++            role,
++            created_at,
++            expires_at,
++        },
++    })
++}
++
++/// The organization's pending invitations (not accepted, revoked or
++/// expired), oldest first.
++pub async fn pending_invitations<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    organization_id: Uuid,
++) -> Result<Vec<Invitation>, sqlx::Error> {
++    let rows: Vec<(Uuid, String, String, String, String)> = sqlx::query_as(&format!(
++        "SELECT id, email, role, to_char(created_at AT TIME ZONE 'UTC', {RFC3339_UTC}), \
++                to_char(expires_at AT TIME ZONE 'UTC', {RFC3339_UTC}) \
++         FROM invitations \
++         WHERE organization_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL \
++           AND expires_at > now() \
++         ORDER BY created_at, id"
++    ))
++    .bind(organization_id)
++    .fetch_all(executor)
++    .await?;
++    rows.into_iter()
++        .map(|(id, email, role, created_at, expires_at)| {
++            Ok(Invitation {
++                id,
++                email,
++                role: decode_role(&role)?,
++                created_at,
++                expires_at,
++            })
++        })
++        .collect()
++}
++
++/// Revoke one of the organization's pending invitations; returns its email,
++/// or `None` if there is no such pending invitation in this organization.
++pub async fn revoke_invitation<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    organization_id: Uuid,
++    invitation_id: Uuid,
++) -> Result<Option<String>, sqlx::Error> {
++    sqlx::query_scalar(
++        "UPDATE invitations SET revoked_at = now() \
++         WHERE organization_id = $1 AND id = $2 \
++           AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now() \
++         RETURNING email",
++    )
++    .bind(organization_id)
++    .bind(invitation_id)
++    .fetch_optional(executor)
++    .await
++}
++
++/// The pending invitation a raw token belongs to (any organization: the
++/// token is the credential), without using it up. `None` for an unknown,
++/// malformed, accepted, revoked or expired token.
++pub async fn peek_invitation<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    raw: &str,
++) -> Result<Option<InvitationPreview>, sqlx::Error> {
++    let Some(hash) = accounts::hash_token(raw) else {
++        return Ok(None);
++    };
++    let row: Option<(String, String, String)> = sqlx::query_as(
++        "SELECT o.name, i.email, i.role FROM invitations i \
++         JOIN organizations o ON o.id = i.organization_id \
++         WHERE i.token_hash = $1 AND i.accepted_at IS NULL AND i.revoked_at IS NULL \
++           AND i.expires_at > now()",
++    )
++    .bind(&hash[..])
++    .fetch_optional(executor)
++    .await?;
++    row.map(|(organization_name, email, role)| {
++        Ok(InvitationPreview {
++            organization_name,
++            email,
++            role: decode_role(&role)?,
++        })
++    })
++    .transpose()
++}
++
++/// Mark a pending invitation accepted: one atomic statement, so of any
++/// number of concurrent uses exactly one gets it. `None` for an unknown,
++/// malformed, accepted, revoked or expired token.
++pub async fn consume_invitation<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    raw: &str,
++) -> Result<Option<AcceptedInvitation>, sqlx::Error> {
++    let Some(hash) = accounts::hash_token(raw) else {
++        return Ok(None);
++    };
++    let row: Option<(Uuid, Uuid, String, String)> = sqlx::query_as(
++        "UPDATE invitations SET accepted_at = now() \
++         WHERE token_hash = $1 AND accepted_at IS NULL AND revoked_at IS NULL \
++           AND expires_at > now() \
++         RETURNING id, organization_id, email, role",
++    )
++    .bind(&hash[..])
++    .fetch_optional(executor)
++    .await?;
++    row.map(|(id, organization_id, email, role)| {
++        Ok(AcceptedInvitation {
++            id,
++            organization_id,
++            email,
++            role: decode_role(&role)?,
++        })
++    })
++    .transpose()
++}
++
++/// Create the invited user in the invitation's organization with its role,
++/// email already verified (following the emailed link proves the mailbox).
++/// A taken email (an account anywhere) is
++/// [`CreateAccountError::DuplicateEmail`], which aborts the transaction.
++pub async fn create_invited_user<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    invitation: &AcceptedInvitation,
++    name: &str,
++    password_hash: &str,
++) -> Result<Uuid, CreateAccountError> {
++    sqlx::query_scalar(
++        "INSERT INTO users (organization_id, email, name, password_hash, role, email_verified_at) \
++         VALUES ($1, $2, $3, $4, $5, now()) RETURNING id",
++    )
++    .bind(invitation.organization_id)
++    .bind(&invitation.email)
++    .bind(name)
++    .bind(password_hash)
++    .bind(invitation.role.as_str())
++    .fetch_one(executor)
++    .await
++    .map_err(|e| match &e {
++        sqlx::Error::Database(d) if d.constraint() == Some("users_email_lower_key") => {
++            CreateAccountError::DuplicateEmail
++        }
++        _ => CreateAccountError::Db(e),
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn only_owner_and_member_are_assignable() {
++        assert_eq!(assignable_role("owner"), Ok(Role::Owner));
++        assert_eq!(assignable_role("member"), Ok(Role::Member));
++        for bad in ["vendor_admin", "admin", "Owner", " member", ""] {
++            assert_eq!(assignable_role(bad), Err(MSG_BAD_ROLE.to_string()), "{bad}");
++        }
++    }
++
++    #[test]
++    fn invitations_last_seven_days() {
++        assert_eq!(INVITATION_TTL.as_secs(), 7 * 24 * 60 * 60);
++    }
++
++    #[test]
++    fn invitation_json_has_no_token() {
++        let inv = Invitation {
++            id: Uuid::nil(),
++            email: "a@example.com".into(),
++            role: Role::Member,
++            created_at: "2026-11-08T00:00:00Z".into(),
++            expires_at: "2026-11-15T00:00:00Z".into(),
++        };
++        let v = serde_json::to_value(&inv).unwrap();
++        let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
++        keys.sort();
++        assert_eq!(keys, ["created_at", "email", "expires_at", "id", "role"]);
++        assert_eq!(v["role"], "member");
++    }
++}
+diff --git a/crates/wipe-hub/src/team_routes.rs b/crates/wipe-hub/src/team_routes.rs
+new file mode 100644
+index 0000000..36db160
+--- /dev/null
++++ b/crates/wipe-hub/src/team_routes.rs
+@@ -0,0 +1,515 @@
++//! Account, organization and team routes (portal-accounts story 4):
++//!
++//! - `POST /api/account/profile` — the signed-in user's own name.
++//! - `GET /api/organization/members` — any role: the organization's users.
++//! - Owner only: `POST /api/organization` (rename),
++//!   `POST|GET /api/organization/invitations`,
++//!   `POST /api/organization/invitations/:id/revoke`,
++//!   `POST /api/organization/members/:id/role`,
++//!   `POST /api/organization/members/:id/remove`.
++//! - Anonymous: `POST /api/invitations/lookup` and
++//!   `POST /api/invitations/accept`.
++//!
++//! The organization acted on is always the signed-in user's, from the
++//! session ([`CurrentUser`]); [`crate::team`] takes it first in every query.
++//! Another organization's user or invitation id is a 404 like an unknown id,
++//! and changes and audits nothing. Owner-only routes answer a `member` or
++//! `vendor_admin` 403 before reading the body, charging a throttle or
++//! writing. Role changes and removals re-check the acting owner and the
++//! owner count under the organization row lock, so an organization always
++//! keeps at least one owner. Every write shares a transaction with its audit
++//! row; the invitation email is sent after commit. Error bodies are
++//! `{"error": "<message>"}`.
++
++use std::net::SocketAddr;
++
++use axum::extract::{ConnectInfo, Path, State};
++use axum::http::header::SET_COOKIE;
++use axum::http::{HeaderMap, StatusCode};
++use axum::response::{IntoResponse, Response};
++use axum::routing::{get, post};
++use axum::{Json, Router};
++use serde::{Deserialize, Serialize};
++use serde_json::json;
++use uuid::Uuid;
++
++use crate::accounts::{self, Account, CreateAccountError, Organization, Role, User};
++use crate::audit::{self, AuditEntry};
++use crate::auth::{
++    actor, charge_mail, ip_key, portal_link, secure, session_cookie, session_token, with_peer,
++    ApiError, CurrentUser, JsonBody, MSG_DUPLICATE_EMAIL, MSG_NOT_SIGNED_IN, MSG_OWNER_ONLY,
++};
++use crate::team::{self, Invitation, InvitationPreview};
++use crate::AppState;
++
++pub const MSG_UNVERIFIED_INVITER: &str = "verify your email address before inviting members";
++pub const MSG_ALREADY_MEMBER: &str = "this person is already a member of your organization";
++pub const MSG_LAST_OWNER: &str = "an organization must keep at least one owner";
++pub const MSG_REMOVE_SELF: &str = "you cannot remove yourself from the organization";
++pub const MSG_NO_MEMBER: &str = "no such member";
++pub const MSG_NO_INVITATION: &str = "no such pending invitation";
++pub const MSG_BAD_INVITATION: &str = "this invitation is invalid or has expired";
++
++/// The portal page the invitation email links to.
++pub const ACCEPT_INVITE_PAGE: &str = "accept-invite";
++
++pub fn routes() -> Router<AppState> {
++    Router::new()
++        .route("/api/account/profile", post(update_profile))
++        .route("/api/organization", post(rename_organization))
++        .route("/api/organization/members", get(list_members))
++        .route("/api/organization/members/:id/role", post(change_role))
++        .route("/api/organization/members/:id/remove", post(remove_member))
++        .route(
++            "/api/organization/invitations",
++            get(list_invitations).post(invite),
++        )
++        .route(
++            "/api/organization/invitations/:id/revoke",
++            post(revoke_invitation),
++        )
++        .route("/api/invitations/lookup", post(lookup_invitation))
++        .route("/api/invitations/accept", post(accept_invitation))
++}
++
++fn bad_request(message: impl Into<String>) -> ApiError {
++    ApiError::new(StatusCode::BAD_REQUEST, message)
++}
++
++fn not_found(message: &str) -> ApiError {
++    ApiError::new(StatusCode::NOT_FOUND, message)
++}
++
++fn conflict(message: &str) -> ApiError {
++    ApiError::new(StatusCode::CONFLICT, message)
++}
++
++/// A path id that is not a UUID names nothing: the same 404 as an unknown id
++/// (not axum's plain-text 400).
++fn path_id(raw: &str, message: &str) -> Result<Uuid, ApiError> {
++    Uuid::parse_str(raw).map_err(|_| not_found(message))
++}
++
++fn organization_subject(organization_id: Uuid) -> String {
++    format!("organization:{organization_id}")
++}
++
++/// Under the organization lock: 403 unless the acting user is still an owner
++/// (they may have been demoted since their session was read).
++async fn require_owner_locked(
++    conn: &mut sqlx::PgConnection,
++    user: &CurrentUser,
++) -> Result<(), ApiError> {
++    match team::member(&mut *conn, user.organization_id, user.user_id).await? {
++        Some(u) if u.role == Role::Owner => Ok(()),
++        _ => Err(ApiError::new(StatusCode::FORBIDDEN, MSG_OWNER_ONLY)),
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Profile
++
++#[derive(Debug, Deserialize)]
++pub struct NameRequest {
++    pub name: String,
++}
++
++async fn update_profile(
++    State(state): State<AppState>,
++    user: CurrentUser,
++    JsonBody(req): JsonBody<NameRequest>,
++) -> Result<Json<Account>, ApiError> {
++    let name = accounts::validate_name("name", &req.name).map_err(bad_request)?;
++    let mut tx = state.pool.begin().await?;
++    if !team::set_user_name(&mut *tx, user.organization_id, user.user_id, &name).await? {
++        return Err(ApiError::new(StatusCode::UNAUTHORIZED, MSG_NOT_SIGNED_IN));
++    }
++    let who = actor(user.user_id);
++    // The name itself stays out of the append-only log.
++    audit::record(
++        &mut *tx,
++        &AuditEntry {
++            actor: &who,
++            action: "account.profile_updated",
++            subject: &who,
++            detail: json!({}),
++        },
++    )
++    .await?;
++    let account = accounts::account(&mut *tx, user.organization_id, user.user_id)
++        .await?
++        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, MSG_NOT_SIGNED_IN))?;
++    tx.commit().await?;
++    Ok(Json(account))
++}
++
++// ---------------------------------------------------------------------------
++// Organization and members
++
++async fn list_members(
++    State(state): State<AppState>,
++    user: CurrentUser,
++) -> Result<Json<serde_json::Value>, ApiError> {
++    let members = team::members(&state.pool, user.organization_id).await?;
++    Ok(Json(json!({ "members": members })))
++}
++
++async fn rename_organization(
++    State(state): State<AppState>,
++    user: CurrentUser,
++    body: Result<JsonBody<NameRequest>, ApiError>,
++) -> Result<Json<Organization>, ApiError> {
++    user.require_owner()?;
++    let JsonBody(req) = body?;
++    let name = accounts::validate_name("name", &req.name).map_err(bad_request)?;
++    let mut tx = state.pool.begin().await?;
++    let from = team::lock_organization(&mut *tx, user.organization_id)
++        .await?
++        .ok_or_else(|| ApiError::internal("signed-in user's organization vanished"))?;
++    require_owner_locked(&mut tx, &user).await?;
++    team::rename_organization(&mut *tx, user.organization_id, &name).await?;
++    audit::record(
++        &mut *tx,
++        &AuditEntry {
++            actor: &actor(user.user_id),
++            action: "organization.renamed",
++            subject: &organization_subject(user.organization_id),
++            detail: json!({ "from": from, "to": name }),
++        },
++    )
++    .await?;
++    tx.commit().await?;
++    Ok(Json(Organization {
++        id: user.organization_id,
++        name,
++    }))
++}
++
++#[derive(Debug, Deserialize)]
++pub struct RoleRequest {
++    pub role: String,
++}
++
++async fn change_role(
++    State(state): State<AppState>,
++    user: CurrentUser,
++    Path(id): Path<String>,
++    body: Result<JsonBody<RoleRequest>, ApiError>,
++) -> Result<Json<User>, ApiError> {
++    user.require_owner()?;
++    let JsonBody(req) = body?;
++    let role = team::assignable_role(&req.role).map_err(bad_request)?;
++    let target_id = path_id(&id, MSG_NO_MEMBER)?;
++
++    let mut tx = state.pool.begin().await?;
++    team::lock_organization(&mut *tx, user.organization_id).await?;
++    let Some(target) = team::member(&mut *tx, user.organization_id, target_id).await? else {
++        return Err(not_found(MSG_NO_MEMBER));
++    };
++    if target.role == role {
++        return Ok(Json(target));
++    }
++    // The last-owner rule first, so of two owners demoting each other at
++    // once the loser hears 409, whichever check it would also fail.
++    if target.role == Role::Owner && team::owner_count(&mut *tx, user.organization_id).await? <= 1 {
++        return Err(conflict(MSG_LAST_OWNER));
++    }
++    require_owner_locked(&mut tx, &user).await?;
++    team::set_role(&mut *tx, user.organization_id, target_id, role).await?;
++    audit::record(
++        &mut *tx,
++        &AuditEntry {
++            actor: &actor(user.user_id),
++            action: "organization.member_role_changed",
++            subject: &actor(target_id),
++            detail: json!({
++                "organization_id": user.organization_id,
++                "from": target.role,
++                "to": role,
++            }),
++        },
++    )
++    .await?;
++    tx.commit().await?;
++    Ok(Json(User { role, ..target }))
++}
++
++async fn remove_member(
++    State(state): State<AppState>,
++    user: CurrentUser,
++    Path(id): Path<String>,
++) -> Result<StatusCode, ApiError> {
++    user.require_owner()?;
++    let target_id = path_id(&id, MSG_NO_MEMBER)?;
++    if target_id == user.user_id {
++        return Err(conflict(MSG_REMOVE_SELF));
++    }
++
++    let mut tx = state.pool.begin().await?;
++    team::lock_organization(&mut *tx, user.organization_id).await?;
++    let Some(target) = team::member(&mut *tx, user.organization_id, target_id).await? else {
++        return Err(not_found(MSG_NO_MEMBER));
++    };
++    if target.role == Role::Owner && team::owner_count(&mut *tx, user.organization_id).await? <= 1 {
++        return Err(conflict(MSG_LAST_OWNER));
++    }
++    require_owner_locked(&mut tx, &user).await?;
++    let removed = team::remove_member(&mut *tx, user.organization_id, target_id)
++        .await?
++        .ok_or_else(|| not_found(MSG_NO_MEMBER))?;
++    audit::record(
++        &mut *tx,
++        &AuditEntry {
++            actor: &actor(user.user_id),
++            action: "organization.member_removed",
++            subject: &actor(target_id),
++            detail: json!({
++                "organization_id": user.organization_id,
++                "email": removed.email,
++                "role": removed.role,
++                "sessions_ended": removed.sessions_ended,
++            }),
++        },
++    )
++    .await?;
++    tx.commit().await?;
++    Ok(StatusCode::NO_CONTENT)
++}
++
++// ---------------------------------------------------------------------------
++// Invitations (owner side)
++
++#[derive(Debug, Deserialize)]
++pub struct InviteRequest {
++    pub email: String,
++    pub role: String,
++}
++
++#[derive(Debug, Serialize, Deserialize)]
++pub struct InviteResponse {
++    pub invitation: Invitation,
++    pub invitation_email_sent: bool,
++}
++
++async fn invite(
++    State(state): State<AppState>,
++    peer: Option<ConnectInfo<SocketAddr>>,
++    user: CurrentUser,
++    body: Result<JsonBody<InviteRequest>, ApiError>,
++) -> Result<Response, ApiError> {
++    user.require_owner()?;
++    let JsonBody(req) = body?;
++    let inviter = accounts::account(&state.pool, user.organization_id, user.user_id)
++        .await?
++        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, MSG_NOT_SIGNED_IN))?;
++    if !inviter.user.email_verified {
++        return Err(ApiError::new(StatusCode::FORBIDDEN, MSG_UNVERIFIED_INVITER));
++    }
++    let email = accounts::validate_email(&req.email).map_err(bad_request)?;
++    let role = team::assignable_role(&req.role).map_err(bad_request)?;
++    if team::is_member_email(&state.pool, user.organization_id, &email).await? {
++        return Err(conflict(MSG_ALREADY_MEMBER));
++    }
++    let peer = ip_key(peer.map(|ConnectInfo(addr)| addr));
++    if let Err(refused) = charge_mail(&state, &email, peer.as_deref()).await? {
++        return Ok(refused);
++    }
++
++    let mut tx = state.pool.begin().await?;
++    let issued =
++        team::create_invitation(&mut tx, user.organization_id, &email, role, user.user_id).await?;
++    audit::record(
++        &mut *tx,
++        &AuditEntry {
++            actor: &actor(user.user_id),
++            action: "organization.member_invited",
++            subject: &organization_subject(user.organization_id),
++            detail: with_peer(
++                json!({
++                    "invitation_id": issued.invitation.id,
++                    "email": email,
++                    "role": role,
++                }),
++                peer.as_deref(),
++            ),
++        },
++    )
++    .await?;
++    tx.commit().await?;
++
++    let link = portal_link(
++        &state.config.public_base_url,
++        ACCEPT_INVITE_PAGE,
++        &issued.token,
++    );
++    let sent = match state
++        .mailer
++        .send_invitation(
++            &email,
++            &inviter.organization.name,
++            &inviter.user.name,
++            &link,
++        )
++        .await
++    {
++        Ok(()) => true,
++        Err(e) => {
++            // Never the token.
++            tracing::warn!(error = %e, "invitation email not sent");
++            false
++        }
++    };
++    Ok((
++        StatusCode::CREATED,
++        Json(InviteResponse {
++            invitation: issued.invitation,
++            invitation_email_sent: sent,
++        }),
++    )
++        .into_response())
++}
++
++async fn list_invitations(
++    State(state): State<AppState>,
++    user: CurrentUser,
++) -> Result<Json<serde_json::Value>, ApiError> {
++    user.require_owner()?;
++    let invitations = team::pending_invitations(&state.pool, user.organization_id).await?;
++    Ok(Json(json!({ "invitations": invitations })))
++}
++
++async fn revoke_invitation(
++    State(state): State<AppState>,
++    user: CurrentUser,
++    Path(id): Path<String>,
++) -> Result<StatusCode, ApiError> {
++    user.require_owner()?;
++    let invitation_id = path_id(&id, MSG_NO_INVITATION)?;
++    let mut tx = state.pool.begin().await?;
++    let Some(email) =
++        team::revoke_invitation(&mut *tx, user.organization_id, invitation_id).await?
++    else {
++        return Err(not_found(MSG_NO_INVITATION));
++    };
++    audit::record(
++        &mut *tx,
++        &AuditEntry {
++            actor: &actor(user.user_id),
++            action: "organization.invitation_revoked",
++            subject: &organization_subject(user.organization_id),
++            detail: json!({ "invitation_id": invitation_id, "email": email }),
++        },
++    )
++    .await?;
++    tx.commit().await?;
++    Ok(StatusCode::NO_CONTENT)
++}
++
++// ---------------------------------------------------------------------------
++// Invitations (invitee side, anonymous)
++
++#[derive(Debug, Deserialize)]
++pub struct LookupRequest {
++    pub token: String,
++}
++
++/// Who invited the token's holder, where and as what. Changes nothing.
++async fn lookup_invitation(
++    State(state): State<AppState>,
++    JsonBody(req): JsonBody<LookupRequest>,
++) -> Result<Json<InvitationPreview>, ApiError> {
++    team::peek_invitation(&state.pool, &req.token)
++        .await?
++        .map(Json)
++        .ok_or_else(|| bad_request(MSG_BAD_INVITATION))
++}
++
++#[derive(Debug, Deserialize)]
++pub struct AcceptRequest {
++    pub token: String,
++    pub name: String,
++    pub password: String,
++}
++
++/// Accept an invitation: validate (an invalid name or password never burns
++/// the token), peek the token before Argon2, then in one transaction consume
++/// it, create the user in the invitation's organization with its role and a
++/// verified email, rotate the incoming session (whoever's) and sign in. A
++/// taken email rolls everything back, leaving the invitation pending.
++async fn accept_invitation(
++    State(state): State<AppState>,
++    peer: Option<ConnectInfo<SocketAddr>>,
++    headers: HeaderMap,
++    JsonBody(req): JsonBody<AcceptRequest>,
++) -> Result<Response, ApiError> {
++    let name = accounts::validate_name("name", &req.name).map_err(bad_request)?;
++    accounts::validate_password(&req.password).map_err(bad_request)?;
++    if team::peek_invitation(&state.pool, &req.token)
++        .await?
++        .is_none()
++    {
++        return Err(bad_request(MSG_BAD_INVITATION));
++    }
++    let password_hash = accounts::hash_password(req.password).await?;
++    let peer = ip_key(peer.map(|ConnectInfo(addr)| addr));
++
++    let mut tx = state.pool.begin().await?;
++    // Another request may have used the token since the peek.
++    let Some(invitation) = team::consume_invitation(&mut *tx, &req.token).await? else {
++        return Err(bad_request(MSG_BAD_INVITATION));
++    };
++    let user_id =
++        match team::create_invited_user(&mut *tx, &invitation, &name, &password_hash).await {
++            Ok(id) => id,
++            // Dropping `tx` rolls back the consume: the invitation stays pending.
++            Err(CreateAccountError::DuplicateEmail) => return Err(conflict(MSG_DUPLICATE_EMAIL)),
++            Err(CreateAccountError::Db(e)) => return Err(e.into()),
++        };
++    let rotated = match session_token(&headers) {
++        Some(old) => accounts::delete_session(&mut *tx, &old).await?.is_some(),
++        None => false,
++    };
++    let session = accounts::create_session(&mut *tx, user_id).await?;
++    let who = actor(user_id);
++    audit::record(
++        &mut *tx,
++        &AuditEntry {
++            actor: &who,
++            action: "organization.invitation_accepted",
++            subject: &who,
++            detail: with_peer(
++                json!({
++                    "invitation_id": invitation.id,
++                    "organization_id": invitation.organization_id,
++                    "role": invitation.role,
++                    "rotated": rotated,
++                }),
++                peer.as_deref(),
++            ),
++        },
++    )
++    .await?;
++    let account = accounts::account(&mut *tx, invitation.organization_id, user_id)
++        .await?
++        .ok_or_else(|| ApiError::internal("invited user vanished"))?;
++    tx.commit().await?;
++
++    let mut resp = (StatusCode::CREATED, Json(account)).into_response();
++    resp.headers_mut()
++        .insert(SET_COOKIE, session_cookie(&session, secure(&state)));
++    Ok(resp)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn non_uuid_path_ids_are_404() {
++        let e = path_id("not-a-uuid", MSG_NO_MEMBER).unwrap_err();
++        assert_eq!(e.status, StatusCode::NOT_FOUND);
++        assert_eq!(e.message, MSG_NO_MEMBER);
++        let id = Uuid::new_v4();
++        assert_eq!(path_id(&id.to_string(), MSG_NO_INVITATION).unwrap(), id);
++    }
++}
+diff --git a/crates/wipe-hub/tests/team.rs b/crates/wipe-hub/tests/team.rs
+new file mode 100644
+index 0000000..a52d16c
+--- /dev/null
++++ b/crates/wipe-hub/tests/team.rs
+@@ -0,0 +1,1452 @@
++//! Account, organization and team management over real HTTP against a
++//! migrated test database and Mailpit (portal-accounts story 4): profile,
++//! password change, organization rename, members, roles, removal and
++//! invitations. Needs `docker compose up -d`; fails, never skips, when the
++//! compose services are down.
++
++mod support;
++
++use std::net::SocketAddr;
++use std::time::{Duration, Instant};
++
++use reqwest::header::{COOKIE, RETRY_AFTER, SET_COOKIE};
++use reqwest::{Response, StatusCode};
++use serde_json::{json, Value};
++use support::{unique_address, Mailpit, TestDb};
++use tokio::net::TcpListener;
++use uuid::Uuid;
++use wipe_hub::config::{DEFAULT_MAIL_FROM, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT};
++use wipe_hub::mail::{INVITATION_SUBJECT, PASSWORD_RESET_SUBJECT};
++use wipe_hub::{AppState, Args, Config};
++
++const PASSWORD: &str = "correct horse battery";
++const NEW_PASSWORD: &str = "a brand new passphrase";
++const BASE: &str = "http://127.0.0.1:7900";
++const MAIL_WAIT: Duration = Duration::from_secs(10);
++const PEER: &str = "ip:127.0.0.1";
++
++const OWNER_ONLY: &str = "only an organization owner can manage the team";
++const BAD_INVITATION: &str = "this invitation is invalid or has expired";
++const LAST_OWNER: &str = "an organization must keep at least one owner";
++const LOCKED: &str = "too many failed sign-in attempts; try again later";
++const MAIL_LOCKED: &str = "too many emails requested; try again later";
++
++struct Hub {
++    addr: SocketAddr,
++    http: reqwest::Client,
++    db: TestDb,
++    csrf: String,
++}
++
++async fn spawn_hub_with(smtp_port: u16) -> Hub {
++    let db = TestDb::migrated().await;
++    let args = Args {
++        addr: "127.0.0.1:0".parse().unwrap(),
++        database_url: db.url.clone(),
++        smtp_host: DEFAULT_SMTP_HOST.into(),
++        smtp_port,
++        mail_from: DEFAULT_MAIL_FROM.into(),
++        public_base_url: BASE.into(),
++        payment_provider: wipe_hub::PaymentProvider::Fake,
++        stripe_webhook_secret: None,
++        vendor_root_seed: None,
++        portal_dir: None,
++    };
++    let mut config = Config::from_args(args).unwrap();
++    config.portal_dir = None;
++    let state = AppState::new(config).unwrap();
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let addr = listener.local_addr().unwrap();
++    tokio::spawn(wipe_hub::serve_on(listener, state));
++    let http = reqwest::Client::builder()
++        .timeout(Duration::from_secs(30))
++        .build()
++        .unwrap();
++    let resp = http
++        .get(format!("http://{addr}/api/auth/csrf"))
++        .send()
++        .await
++        .unwrap();
++    let body: Value = resp.json().await.unwrap();
++    let csrf = body["csrf_token"].as_str().unwrap().to_string();
++    Hub {
++        addr,
++        http,
++        db,
++        csrf,
++    }
++}
++
++async fn spawn_hub() -> Hub {
++    spawn_hub_with(DEFAULT_SMTP_PORT).await
++}
++
++/// A signed-in user: id, email and `Cookie` value.
++#[derive(Clone)]
++struct Who {
++    id: String,
++    email: String,
++    cookie: String,
++}
++
++impl Hub {
++    fn url(&self, path: &str) -> String {
++        format!("http://{}{path}", self.addr)
++    }
++
++    fn post_req(&self, path: &str, cookie: Option<&str>) -> reqwest::RequestBuilder {
++        let csrf = format!("wipehub_csrf={}", self.csrf);
++        let cookie = match cookie {
++            Some(c) => format!("{c}; {csrf}"),
++            None => csrf,
++        };
++        self.http
++            .post(self.url(path))
++            .header(COOKIE, cookie)
++            .header("x-csrf-token", &self.csrf)
++    }
++
++    async fn post(&self, path: &str, body: Value, cookie: Option<&str>) -> Response {
++        self.post_req(path, cookie)
++            .json(&body)
++            .send()
++            .await
++            .unwrap()
++    }
++
++    async fn post_empty(&self, path: &str, cookie: Option<&str>) -> Response {
++        self.post_req(path, cookie).send().await.unwrap()
++    }
++
++    async fn get(&self, path: &str, cookie: Option<&str>) -> Response {
++        let mut req = self.http.get(self.url(path));
++        if let Some(c) = cookie {
++            req = req.header(COOKIE, c);
++        }
++        req.send().await.unwrap()
++    }
++
++    async fn me(&self, cookie: &str) -> (StatusCode, Value) {
++        let resp = self.get("/api/auth/me", Some(cookie)).await;
++        let code = resp.status();
++        (code, resp.json().await.unwrap())
++    }
++
++    /// Sign up a new organization's owner (unverified).
++    async fn sign_up(&self, email: &str, org: &str) -> Who {
++        let resp = self
++            .post(
++                "/api/auth/sign-up",
++                json!({
++                    "email": email,
++                    "password": PASSWORD,
++                    "name": "Ada Lovelace",
++                    "organization_name": org,
++                }),
++                None,
++            )
++            .await;
++        assert_eq!(resp.status(), StatusCode::CREATED);
++        let cookie = cookie_pair(&resp);
++        let body: Value = resp.json().await.unwrap();
++        Who {
++            id: body["user"]["id"].as_str().unwrap().to_string(),
++            email: email.to_string(),
++            cookie,
++        }
++    }
++
++    /// Sign up an owner and mark their email verified.
++    async fn verified_owner(&self, org: &str) -> Who {
++        let owner = self.sign_up(&unique_address(), org).await;
++        self.verify(&owner.email).await;
++        owner
++    }
++
++    async fn verify(&self, email: &str) {
++        sqlx::query("UPDATE users SET email_verified_at = now() WHERE lower(email) = lower($1)")
++            .bind(email)
++            .execute(&self.db.pool)
++            .await
++            .unwrap();
++    }
++
++    async fn sign_in(&self, email: &str, password: &str) -> Response {
++        self.post(
++            "/api/auth/sign-in",
++            json!({"email": email, "password": password}),
++            None,
++        )
++        .await
++    }
++
++    async fn invite(&self, owner: &Who, email: &str, role: &str) -> Response {
++        self.post(
++            "/api/organization/invitations",
++            json!({"email": email, "role": role}),
++            Some(&owner.cookie),
++        )
++        .await
++    }
++
++    async fn accept(&self, token: &str, password: &str, cookie: Option<&str>) -> Response {
++        self.post(
++            "/api/invitations/accept",
++            json!({"token": token, "name": "Grace Hopper", "password": password}),
++            cookie,
++        )
++        .await
++    }
++
++    async fn lookup(&self, token: &str) -> Response {
++        self.post("/api/invitations/lookup", json!({ "token": token }), None)
++            .await
++    }
++
++    /// Invite a fresh address as `role` and accept it: the new user.
++    async fn add(&self, owner: &Who, role: &str) -> Who {
++        let email = unique_address();
++        let resp = self.invite(owner, &email, role).await;
++        assert_eq!(resp.status(), StatusCode::CREATED);
++        let token = invite_tokens(&email, 1).await.remove(0);
++        let resp = self.accept(&token, PASSWORD, None).await;
++        assert_eq!(resp.status(), StatusCode::CREATED);
++        let cookie = cookie_pair(&resp);
++        let body: Value = resp.json().await.unwrap();
++        Who {
++            id: body["user"]["id"].as_str().unwrap().to_string(),
++            email,
++            cookie,
++        }
++    }
++
++    async fn members(&self, cookie: &str) -> Vec<Value> {
++        let resp = self.get("/api/organization/members", Some(cookie)).await;
++        assert_eq!(resp.status(), StatusCode::OK);
++        let body: Value = resp.json().await.unwrap();
++        body["members"].as_array().unwrap().clone()
++    }
++
++    async fn invitations(&self, cookie: &str) -> Vec<Value> {
++        let resp = self
++            .get("/api/organization/invitations", Some(cookie))
++            .await;
++        assert_eq!(resp.status(), StatusCode::OK);
++        let body: Value = resp.json().await.unwrap();
++        body["invitations"].as_array().unwrap().clone()
++    }
++
++    async fn set_role(&self, owner: &Who, id: &str, role: &str) -> Response {
++        self.post(
++            &format!("/api/organization/members/{id}/role"),
++            json!({ "role": role }),
++            Some(&owner.cookie),
++        )
++        .await
++    }
++
++    async fn remove(&self, owner: &Who, id: &str) -> Response {
++        self.post_empty(
++            &format!("/api/organization/members/{id}/remove"),
++            Some(&owner.cookie),
++        )
++        .await
++    }
++
++    async fn count(&self, table: &str) -> i64 {
++        sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
++            .fetch_one(&self.db.pool)
++            .await
++            .unwrap()
++    }
++
++    /// `(actor, subject, detail)` of every audit row for `action`, oldest first.
++    async fn audited(&self, action: &str) -> Vec<(String, String, Value)> {
++        sqlx::query_as("SELECT actor, subject, detail FROM audit_log WHERE action = $1 ORDER BY id")
++            .bind(action)
++            .fetch_all(&self.db.pool)
++            .await
++            .unwrap()
++    }
++
++    async fn actions(&self) -> Vec<String> {
++        sqlx::query_scalar("SELECT action FROM audit_log ORDER BY id")
++            .fetch_all(&self.db.pool)
++            .await
++            .unwrap()
++    }
++
++    async fn org_name(&self, owner: &Who) -> String {
++        self.me(&owner.cookie).await.1["organization"]["name"]
++            .as_str()
++            .unwrap()
++            .to_string()
++    }
++
++    /// Row counts that a refused request must leave unchanged.
++    async fn counts(&self) -> Vec<i64> {
++        let mut out = Vec::new();
++        for t in [
++            "audit_log",
++            "users",
++            "sessions",
++            "auth_throttle",
++            "auth_tokens",
++            "invitations",
++            "organizations",
++        ] {
++            out.push(self.count(t).await);
++        }
++        out
++    }
++
++    /// Every user's (id, role, name) and the organizations' names: a
++    /// snapshot that cross-organization attempts must leave alone.
++    async fn snapshot(&self) -> (Vec<(Uuid, String, String)>, Vec<String>, Vec<(Uuid, bool)>) {
++        let users = sqlx::query_as("SELECT id, role, name FROM users ORDER BY id")
++            .fetch_all(&self.db.pool)
++            .await
++            .unwrap();
++        let orgs = sqlx::query_scalar("SELECT name FROM organizations ORDER BY id")
++            .fetch_all(&self.db.pool)
++            .await
++            .unwrap();
++        let invs = sqlx::query_as(
++            "SELECT id, revoked_at IS NULL AND accepted_at IS NULL FROM invitations ORDER BY id",
++        )
++        .fetch_all(&self.db.pool)
++        .await
++        .unwrap();
++        (users, orgs, invs)
++    }
++}
++
++fn cookie_pair(resp: &Response) -> String {
++    resp.headers()
++        .get_all(SET_COOKIE)
++        .iter()
++        .map(|v| v.to_str().unwrap().to_string())
++        .find(|v| v.starts_with("wipehub_session="))
++        .expect("a wipehub_session Set-Cookie header")
++        .split(';')
++        .next()
++        .unwrap()
++        .to_string()
++}
++
++async fn error_of(resp: Response) -> (StatusCode, String) {
++    let code = resp.status();
++    let body: Value = resp.json().await.unwrap();
++    let obj = body.as_object().expect("error body is an object");
++    assert_eq!(obj.len(), 1, "{body}");
++    (code, obj["error"].as_str().unwrap().to_string())
++}
++
++fn token_in(text: &str, page: &str) -> String {
++    let prefix = format!("{BASE}/{page}?token=");
++    let start = text
++        .find(&prefix)
++        .unwrap_or_else(|| panic!("no {page} link in {text:?}"))
++        + prefix.len();
++    text[start..]
++        .chars()
++        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
++        .collect()
++}
++
++/// Wait for `n` messages to `addr` with `subject`; their texts, newest first.
++async fn mail_texts(addr: &str, subject: &str, n: usize) -> Vec<String> {
++    let mailpit = Mailpit::new();
++    let deadline = Instant::now() + MAIL_WAIT;
++    loop {
++        let found: Vec<_> = mailpit
++            .messages_to(addr)
++            .await
++            .into_iter()
++            .filter(|m| m.subject == subject)
++            .collect();
++        if found.len() >= n {
++            let mut texts = Vec::new();
++            for m in found {
++                texts.push(mailpit.message(&m.id).await.text);
++            }
++            return texts;
++        }
++        if Instant::now() >= deadline {
++            panic!("{n} {subject:?} messages to {addr} did not arrive");
++        }
++        tokio::time::sleep(Duration::from_millis(100)).await;
++    }
++}
++
++/// The tokens of `n` invitation emails to `addr`, newest first.
++async fn invite_tokens(addr: &str, n: usize) -> Vec<String> {
++    mail_texts(addr, INVITATION_SUBJECT, n)
++        .await
++        .iter()
++        .map(|t| token_in(t, "accept-invite"))
++        .collect()
++}
++
++async fn mail_count(addr: &str) -> usize {
++    Mailpit::new().messages_to(addr).await.len()
++}
++
++async fn assert_error(resp: Response, code: StatusCode, message: &str) {
++    assert_eq!(error_of(resp).await, (code, message.to_string()));
++}
++
++// ---------------------------------------------------------------------------
++// Profile and password
++
++#[tokio::test]
++async fn profile_name_is_trimmed_audited_and_validated() {
++    let hub = spawn_hub().await;
++    let owner = hub.sign_up(&unique_address(), "Engines").await;
++    let resp = hub
++        .post(
++            "/api/account/profile",
++            json!({"name": " Grace "}),
++            Some(&owner.cookie),
++        )
++        .await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let body: Value = resp.json().await.unwrap();
++    assert_eq!(body["user"]["name"], "Grace");
++    assert_eq!(body["organization"]["name"], "Engines");
++    assert_eq!(hub.me(&owner.cookie).await.1["user"]["name"], "Grace");
++    let rows = hub.audited("account.profile_updated").await;
++    let who = format!("user:{}", owner.id);
++    assert_eq!(rows, vec![(who.clone(), who, json!({}))]);
++
++    for (bad, msg) in [
++        ("  ", "name must not be blank"),
++        (
++            "Eve\nBcc: x@evil.test",
++            "name must not contain control characters",
++        ),
++    ] {
++        let resp = hub
++            .post(
++                "/api/account/profile",
++                json!({ "name": bad }),
++                Some(&owner.cookie),
++            )
++            .await;
++        assert_error(resp, StatusCode::BAD_REQUEST, msg).await;
++    }
++    assert_eq!(hub.me(&owner.cookie).await.1["user"]["name"], "Grace");
++    assert_eq!(hub.audited("account.profile_updated").await.len(), 1);
++    let resp = hub
++        .post("/api/account/profile", json!({"name": "X"}), None)
++        .await;
++    assert_error(resp, StatusCode::UNAUTHORIZED, "not signed in").await;
++}
++
++#[tokio::test]
++async fn password_change_signs_out_everywhere_else_and_keeps_this_browser() {
++    let hub = spawn_hub().await;
++    let owner = hub.sign_up(&unique_address(), "Engines").await;
++    let resp = hub.sign_in(&owner.email, PASSWORD).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let b = cookie_pair(&resp);
++
++    // A too-short new password is refused before anything is charged.
++    let throttle_before = hub.count("auth_throttle").await;
++    let resp = hub
++        .post(
++            "/api/auth/password",
++            json!({"current_password": PASSWORD, "new_password": "a".repeat(11)}),
++            Some(&owner.cookie),
++        )
++        .await;
++    assert_error(
++        resp,
++        StatusCode::BAD_REQUEST,
++        "password must be at least 12 characters",
++    )
++    .await;
++    assert_eq!(hub.count("auth_throttle").await, throttle_before);
++
++    let resp = hub
++        .post(
++            "/api/auth/password",
++            json!({"current_password": PASSWORD, "new_password": NEW_PASSWORD}),
++            Some(&owner.cookie),
++        )
++        .await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let c = cookie_pair(&resp);
++    let body: Value = resp.json().await.unwrap();
++    assert_eq!(body["user"]["id"], json!(owner.id));
++
++    assert_eq!(hub.me(&owner.cookie).await.0, StatusCode::UNAUTHORIZED);
++    assert_eq!(hub.me(&b).await.0, StatusCode::UNAUTHORIZED);
++    assert_eq!(hub.me(&c).await.0, StatusCode::OK);
++    assert_eq!(
++        hub.sign_in(&owner.email, PASSWORD).await.status(),
++        StatusCode::UNAUTHORIZED
++    );
++    assert_eq!(
++        hub.sign_in(&owner.email, NEW_PASSWORD).await.status(),
++        StatusCode::OK
++    );
++    let who = format!("user:{}", owner.id);
++    assert_eq!(
++        hub.audited("auth.password_changed").await,
++        vec![(who.clone(), who, json!({"sessions_ended": 2, "peer": PEER}))]
++    );
++}
++
++#[tokio::test]
++async fn wrong_current_passwords_lock_the_email_like_sign_in() {
++    let hub = spawn_hub().await;
++    let owner = hub.sign_up(&unique_address(), "Engines").await;
++    for _ in 0..5 {
++        let resp = hub
++            .post(
++                "/api/auth/password",
++                json!({"current_password": "not my password", "new_password": NEW_PASSWORD}),
++                Some(&owner.cookie),
++            )
++            .await;
++        assert_error(
++            resp,
++            StatusCode::BAD_REQUEST,
++            "current password is incorrect",
++        )
++        .await;
++    }
++    let failed = hub.audited("auth.password_change_failed").await;
++    assert_eq!(failed.len(), 5);
++    assert_eq!(
++        failed[0].2,
++        json!({"reason": "wrong_password", "peer": PEER})
++    );
++    let locked = hub.audited("auth.sign_in_locked").await;
++    assert_eq!(locked.len(), 1, "{locked:?}");
++    assert_eq!(locked[0].1, format!("email:{}", owner.email.to_lowercase()));
++
++    // Even the right password is now refused, and so is sign-in.
++    let resp = hub
++        .post(
++            "/api/auth/password",
++            json!({"current_password": PASSWORD, "new_password": NEW_PASSWORD}),
++            Some(&owner.cookie),
++        )
++        .await;
++    assert!(resp.headers().get(RETRY_AFTER).is_some());
++    assert_error(resp, StatusCode::TOO_MANY_REQUESTS, LOCKED).await;
++    let resp = hub.sign_in(&owner.email, PASSWORD).await;
++    assert_error(resp, StatusCode::TOO_MANY_REQUESTS, LOCKED).await;
++    // The session itself is untouched.
++    assert_eq!(hub.me(&owner.cookie).await.0, StatusCode::OK);
++}
++
++#[tokio::test]
++async fn a_password_change_retires_outstanding_reset_links() {
++    let hub = spawn_hub().await;
++    let owner = hub.sign_up(&unique_address(), "Engines").await;
++    let resp = hub
++        .post(
++            "/api/auth/password-reset",
++            json!({"email": owner.email}),
++            None,
++        )
++        .await;
++    assert_eq!(resp.status(), StatusCode::ACCEPTED);
++    let reset = token_in(
++        &mail_texts(&owner.email, PASSWORD_RESET_SUBJECT, 1).await[0],
++        "reset-password",
++    );
++    let resp = hub
++        .post(
++            "/api/auth/password",
++            json!({"current_password": PASSWORD, "new_password": NEW_PASSWORD}),
++            Some(&owner.cookie),
++        )
++        .await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let resp = hub
++        .post(
++            "/api/auth/password-reset/complete",
++            json!({"token": reset, "password": "yet another passphrase"}),
++            None,
++        )
++        .await;
++    assert_error(
++        resp,
++        StatusCode::BAD_REQUEST,
++        "this password reset link is invalid or has expired",
++    )
++    .await;
++    assert_eq!(
++        hub.sign_in(&owner.email, NEW_PASSWORD).await.status(),
++        StatusCode::OK
++    );
++}
++
++#[tokio::test]
++async fn a_magic_link_account_without_a_password_cannot_change_it() {
++    let hub = spawn_hub().await;
++    let owner = hub.sign_up(&unique_address(), "Engines").await;
++    sqlx::query("UPDATE users SET password_hash = '!unusable' WHERE id = $1::uuid")
++        .bind(&owner.id)
++        .execute(&hub.db.pool)
++        .await
++        .unwrap();
++    let resp = hub
++        .post(
++            "/api/auth/password",
++            json!({"current_password": "!unusable", "new_password": NEW_PASSWORD}),
++            Some(&owner.cookie),
++        )
++        .await;
++    assert_error(
++        resp,
++        StatusCode::BAD_REQUEST,
++        "current password is incorrect",
++    )
++    .await;
++}
++
++// ---------------------------------------------------------------------------
++// Organization and members
++
++#[tokio::test]
++async fn owners_rename_the_organization_and_members_cannot() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let member = hub.add(&owner, "member").await;
++
++    let resp = hub
++        .post(
++            "/api/organization",
++            json!({"name": " Difference Engines "}),
++            Some(&owner.cookie),
++        )
++        .await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let body: Value = resp.json().await.unwrap();
++    assert_eq!(body["name"], "Difference Engines");
++    let rows = hub.audited("organization.renamed").await;
++    assert_eq!(rows.len(), 1);
++    assert_eq!(rows[0].0, format!("user:{}", owner.id));
++    assert!(rows[0].1.starts_with("organization:"), "{}", rows[0].1);
++    assert_eq!(
++        rows[0].2,
++        json!({"from": "Engines", "to": "Difference Engines"})
++    );
++
++    let resp = hub
++        .post(
++            "/api/organization",
++            json!({"name": "Hijacked"}),
++            Some(&member.cookie),
++        )
++        .await;
++    assert_error(resp, StatusCode::FORBIDDEN, OWNER_ONLY).await;
++    assert_eq!(hub.org_name(&owner).await, "Difference Engines");
++}
++
++#[tokio::test]
++async fn the_member_list_is_the_organizations_own() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("A").await;
++    let member = hub.add(&owner, "member").await;
++    let _other = hub.verified_owner("B").await;
++
++    for cookie in [&owner.cookie, &member.cookie] {
++        let members = hub.members(cookie).await;
++        let mut ids: Vec<&str> = members.iter().map(|m| m["id"].as_str().unwrap()).collect();
++        ids.sort();
++        let mut want = vec![owner.id.as_str(), member.id.as_str()];
++        want.sort();
++        assert_eq!(ids, want);
++        // Ordered by name: "Ada Lovelace" before "Grace Hopper".
++        assert_eq!(members[0]["name"], "Ada Lovelace");
++        assert_eq!(members[1]["role"], "member");
++        assert!(members[0].get("password_hash").is_none());
++    }
++    assert_error(
++        hub.get("/api/organization/members", None).await,
++        StatusCode::UNAUTHORIZED,
++        "not signed in",
++    )
++    .await;
++}
++
++// ---------------------------------------------------------------------------
++// Invitations
++
++#[tokio::test]
++async fn a_verified_owner_invites_by_email() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let email = unique_address();
++    let resp = hub.invite(&owner, &format!("  {email} "), "member").await;
++    assert_eq!(resp.status(), StatusCode::CREATED);
++    let body: Value = resp.json().await.unwrap();
++    assert_eq!(body["invitation_email_sent"], true);
++    let inv = &body["invitation"];
++    assert_eq!(inv["email"], json!(email));
++    assert_eq!(inv["role"], "member");
++    let mut keys: Vec<_> = inv.as_object().unwrap().keys().cloned().collect();
++    keys.sort();
++    assert_eq!(keys, ["created_at", "email", "expires_at", "id", "role"]);
++    let created = inv["created_at"].as_str().unwrap();
++    assert!(created.ends_with('Z') && created.len() == 20, "{created}");
++
++    let texts = mail_texts(&email, INVITATION_SUBJECT, 1).await;
++    assert_eq!(texts.len(), 1);
++    assert!(texts[0].contains("Ada Lovelace"), "{}", texts[0]);
++    assert!(texts[0].contains("Engines"), "{}", texts[0]);
++    let token = token_in(&texts[0], "accept-invite");
++    assert_eq!(token.len(), 43);
++
++    let pending = hub.invitations(&owner.cookie).await;
++    assert_eq!(pending, vec![inv.clone()]);
++    let rows = hub.audited("organization.member_invited").await;
++    assert_eq!(rows.len(), 1);
++    assert_eq!(rows[0].0, format!("user:{}", owner.id));
++    assert_eq!(
++        rows[0].2,
++        json!({"invitation_id": inv["id"], "email": email, "role": "member", "peer": PEER})
++    );
++    // The raw token is nowhere in the audit log.
++    let all: Vec<String> = sqlx::query_scalar("SELECT detail::text FROM audit_log")
++        .fetch_all(&hub.db.pool)
++        .await
++        .unwrap();
++    assert!(all.iter().all(|d| !d.contains(&token)));
++}
++
++#[tokio::test]
++async fn members_get_403_on_every_owner_route_and_nothing_changes() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let member = hub.add(&owner, "member").await;
++    let other = hub.add(&owner, "member").await;
++    let target = unique_address();
++    hub.invite(&owner, &unique_address(), "member").await;
++    let inv_id = hub.invitations(&owner.cookie).await[0]["id"]
++        .as_str()
++        .unwrap()
++        .to_string();
++    let before = hub.counts().await;
++    let snapshot = hub.snapshot().await;
++
++    let posts: Vec<(String, Value)> = vec![
++        ("/api/organization".into(), json!({"name": "Hijacked"})),
++        (
++            "/api/organization/invitations".into(),
++            json!({"email": target, "role": "owner"}),
++        ),
++        (
++            format!("/api/organization/invitations/{inv_id}/revoke"),
++            json!({}),
++        ),
++        (
++            format!("/api/organization/members/{}/role", other.id),
++            json!({"role": "owner"}),
++        ),
++        (
++            format!("/api/organization/members/{}/role", member.id),
++            json!({"role": "owner"}),
++        ),
++        (
++            format!("/api/organization/members/{}/remove", owner.id),
++            json!({}),
++        ),
++        // Even a malformed body is refused for the role first.
++        ("/api/organization".into(), json!({"nope": 1})),
++    ];
++    for (path, body) in &posts {
++        let resp = hub.post(path, body.clone(), Some(&member.cookie)).await;
++        assert_eq!(
++            error_of(resp).await,
++            (StatusCode::FORBIDDEN, OWNER_ONLY.into()),
++            "{path}"
++        );
++    }
++    assert_error(
++        hub.get("/api/organization/invitations", Some(&member.cookie))
++            .await,
++        StatusCode::FORBIDDEN,
++        OWNER_ONLY,
++    )
++    .await;
++    assert_eq!(hub.counts().await, before);
++    assert_eq!(hub.snapshot().await, snapshot);
++    assert_eq!(mail_count(&target).await, 0);
++}
++
++#[tokio::test]
++async fn an_unverified_owner_cannot_invite() {
++    let hub = spawn_hub().await;
++    let owner = hub.sign_up(&unique_address(), "Engines").await;
++    let email = unique_address();
++    let resp = hub.invite(&owner, &email, "member").await;
++    assert_error(
++        resp,
++        StatusCode::FORBIDDEN,
++        "verify your email address before inviting members",
++    )
++    .await;
++    assert_eq!(hub.count("invitations").await, 0);
++    assert_eq!(mail_count(&email).await, 0);
++}
++
++#[tokio::test]
++async fn inviting_an_existing_member_or_a_bad_role_is_refused() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let member = hub.add(&owner, "member").await;
++    let throttle = hub.count("auth_throttle").await;
++    for email in [owner.email.to_uppercase(), member.email.to_uppercase()] {
++        let resp = hub.invite(&owner, &email, "member").await;
++        assert_error(
++            resp,
++            StatusCode::CONFLICT,
++            "this person is already a member of your organization",
++        )
++        .await;
++    }
++    // One invitation email to the member, from `add`; none since.
++    assert_eq!(mail_count(&member.email).await, 1);
++    for role in ["vendor_admin", "admin"] {
++        let resp = hub.invite(&owner, &unique_address(), role).await;
++        assert_error(
++            resp,
++            StatusCode::BAD_REQUEST,
++            "role must be owner or member",
++        )
++        .await;
++    }
++    let resp = hub.invite(&owner, "not an address", "member").await;
++    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
++    assert_eq!(hub.count("auth_throttle").await, throttle);
++    assert_eq!(hub.count("invitations").await, 1);
++}
++
++#[tokio::test]
++async fn inviting_again_replaces_the_pending_invitation() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let email = unique_address();
++    assert_eq!(
++        hub.invite(&owner, &email, "member").await.status(),
++        StatusCode::CREATED
++    );
++    let first = invite_tokens(&email, 1).await.remove(0);
++    assert_eq!(
++        hub.invite(&owner, &email.to_uppercase(), "owner")
++            .await
++            .status(),
++        StatusCode::CREATED
++    );
++    let tokens = invite_tokens(&email, 2).await;
++    let second = tokens.into_iter().find(|t| *t != first).unwrap();
++    let pending = hub.invitations(&owner.cookie).await;
++    assert_eq!(pending.len(), 1);
++    assert_eq!(pending[0]["role"], "owner");
++
++    assert_error(
++        hub.accept(&first, PASSWORD, None).await,
++        StatusCode::BAD_REQUEST,
++        BAD_INVITATION,
++    )
++    .await;
++    let resp = hub.accept(&second, PASSWORD, None).await;
++    assert_eq!(resp.status(), StatusCode::CREATED);
++    let body: Value = resp.json().await.unwrap();
++    assert_eq!(body["user"]["role"], "owner");
++}
++
++#[tokio::test]
++async fn invitations_share_the_per_address_email_limit() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let email = unique_address();
++    for _ in 0..3 {
++        assert_eq!(
++            hub.invite(&owner, &email, "member").await.status(),
++            StatusCode::CREATED
++        );
++    }
++    for _ in 0..2 {
++        let resp = hub
++            .post("/api/auth/magic-link", json!({"email": email}), None)
++            .await;
++        assert_eq!(resp.status(), StatusCode::ACCEPTED);
++    }
++    let resp = hub.invite(&owner, &email, "member").await;
++    assert!(resp.headers().get(RETRY_AFTER).is_some());
++    assert_error(resp, StatusCode::TOO_MANY_REQUESTS, MAIL_LOCKED).await;
++    assert_eq!(hub.audited("organization.member_invited").await.len(), 3);
++}
++
++#[tokio::test]
++async fn an_invitation_is_created_even_when_smtp_is_down() {
++    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let port = l.local_addr().unwrap().port();
++    drop(l);
++    let hub = spawn_hub_with(port).await;
++    // Sign-up's own verification email fails too; that is fine here.
++    let owner = hub.verified_owner("Engines").await;
++    let resp = hub.invite(&owner, &unique_address(), "member").await;
++    assert_eq!(resp.status(), StatusCode::CREATED);
++    let body: Value = resp.json().await.unwrap();
++    assert_eq!(body["invitation_email_sent"], false);
++    assert_eq!(hub.invitations(&owner.cookie).await.len(), 1);
++}
++
++#[tokio::test]
++async fn an_invitee_looks_up_then_accepts_and_joins() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let email = unique_address();
++    hub.invite(&owner, &email, "member").await;
++    let token = invite_tokens(&email, 1).await.remove(0);
++
++    let resp = hub.lookup(&token).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let body: Value = resp.json().await.unwrap();
++    assert_eq!(
++        body,
++        json!({"organization_name": "Engines", "email": email, "role": "member"})
++    );
++    // Looking up consumes nothing.
++    assert_eq!(hub.lookup(&token).await.status(), StatusCode::OK);
++
++    // Someone else's session in this browser is rotated away.
++    let resp = hub.accept(&token, PASSWORD, Some(&owner.cookie)).await;
++    assert_eq!(resp.status(), StatusCode::CREATED);
++    let cookie = cookie_pair(&resp);
++    let body: Value = resp.json().await.unwrap();
++    assert_eq!(body["user"]["email"], json!(email));
++    assert_eq!(body["user"]["name"], "Grace Hopper");
++    assert_eq!(body["user"]["role"], "member");
++    assert_eq!(body["user"]["email_verified"], true);
++    assert_eq!(body["organization"]["name"], "Engines");
++    let (code, me) = hub.me(&cookie).await;
++    assert_eq!(code, StatusCode::OK);
++    assert_eq!(me, body);
++    assert_eq!(hub.me(&owner.cookie).await.0, StatusCode::UNAUTHORIZED);
++
++    let owner = Who {
++        cookie: cookie_pair(&hub.sign_in(&owner.email, PASSWORD).await),
++        ..owner
++    };
++    let members = hub.members(&owner.cookie).await;
++    assert!(members.iter().any(|m| m["email"] == json!(email)));
++    assert!(hub.invitations(&owner.cookie).await.is_empty());
++    assert_eq!(hub.sign_in(&email, PASSWORD).await.status(), StatusCode::OK);
++
++    let id = body["user"]["id"].as_str().unwrap();
++    let rows = hub.audited("organization.invitation_accepted").await;
++    assert_eq!(rows.len(), 1);
++    assert_eq!(rows[0].0, format!("user:{id}"));
++    assert_eq!(rows[0].1, format!("user:{id}"));
++    assert_eq!(rows[0].2["role"], "member");
++    assert_eq!(rows[0].2["rotated"], true);
++    assert_eq!(rows[0].2["peer"], PEER);
++    assert_eq!(rows[0].2["organization_id"], body["organization"]["id"]);
++}
++
++#[tokio::test]
++async fn used_revoked_and_expired_invitations_are_refused() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let (used, revoked, expired) = (unique_address(), unique_address(), unique_address());
++    for e in [&used, &revoked, &expired] {
++        hub.invite(&owner, e, "member").await;
++    }
++    let used_t = invite_tokens(&used, 1).await.remove(0);
++    let revoked_t = invite_tokens(&revoked, 1).await.remove(0);
++    let expired_t = invite_tokens(&expired, 1).await.remove(0);
++
++    assert_eq!(
++        hub.accept(&used_t, PASSWORD, None).await.status(),
++        StatusCode::CREATED
++    );
++    let pending = hub.invitations(&owner.cookie).await;
++    let id_of = |email: &str| {
++        pending.iter().find(|i| i["email"] == json!(email)).unwrap()["id"]
++            .as_str()
++            .unwrap()
++            .to_string()
++    };
++    let revoked_id = id_of(&revoked);
++    let resp = hub
++        .post_empty(
++            &format!("/api/organization/invitations/{revoked_id}/revoke"),
++            Some(&owner.cookie),
++        )
++        .await;
++    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
++    let rows = hub.audited("organization.invitation_revoked").await;
++    assert_eq!(
++        rows[0].2,
++        json!({"invitation_id": revoked_id, "email": revoked})
++    );
++    // Revoking again: no longer pending.
++    let resp = hub
++        .post_empty(
++            &format!("/api/organization/invitations/{revoked_id}/revoke"),
++            Some(&owner.cookie),
++        )
++        .await;
++    assert_error(resp, StatusCode::NOT_FOUND, "no such pending invitation").await;
++
++    sqlx::query("UPDATE invitations SET expires_at = now() - interval '1 second' WHERE email = $1")
++        .bind(&expired)
++        .execute(&hub.db.pool)
++        .await
++        .unwrap();
++
++    for token in [
++        &used_t,
++        &revoked_t,
++        &expired_t,
++        &"A".repeat(43),
++        &"garbage".to_string(),
++    ] {
++        assert_error(
++            hub.lookup(token).await,
++            StatusCode::BAD_REQUEST,
++            BAD_INVITATION,
++        )
++        .await;
++        assert_error(
++            hub.accept(token, PASSWORD, None).await,
++            StatusCode::BAD_REQUEST,
++            BAD_INVITATION,
++        )
++        .await;
++    }
++    assert!(hub.invitations(&owner.cookie).await.is_empty());
++}
++
++#[tokio::test]
++async fn an_invitation_accepted_concurrently_joins_once() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let email = unique_address();
++    hub.invite(&owner, &email, "member").await;
++    let token = invite_tokens(&email, 1).await.remove(0);
++    let users = hub.count("users").await;
++
++    let mut tasks = tokio::task::JoinSet::new();
++    for _ in 0..5 {
++        let req = hub
++            .post_req("/api/invitations/accept", None)
++            .json(&json!({"token": token, "name": "Grace", "password": PASSWORD}));
++        tasks.spawn(async move { req.send().await.unwrap().status() });
++    }
++    let mut codes = Vec::new();
++    while let Some(code) = tasks.join_next().await {
++        codes.push(code.unwrap());
++    }
++    codes.sort();
++    assert_eq!(
++        codes,
++        [
++            StatusCode::CREATED,
++            StatusCode::BAD_REQUEST,
++            StatusCode::BAD_REQUEST,
++            StatusCode::BAD_REQUEST,
++            StatusCode::BAD_REQUEST,
++        ]
++    );
++    assert_eq!(hub.count("users").await, users + 1);
++}
++
++#[tokio::test]
++async fn invalid_accept_input_never_burns_the_token() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let email = unique_address();
++    hub.invite(&owner, &email, "member").await;
++    let token = invite_tokens(&email, 1).await.remove(0);
++    assert_error(
++        hub.accept(&token, &"a".repeat(11), None).await,
++        StatusCode::BAD_REQUEST,
++        "password must be at least 12 characters",
++    )
++    .await;
++    let resp = hub
++        .post(
++            "/api/invitations/accept",
++            json!({"token": token, "name": "\u{7}", "password": PASSWORD}),
++            None,
++        )
++        .await;
++    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
++    assert_eq!(
++        hub.accept(&token, PASSWORD, None).await.status(),
++        StatusCode::CREATED
++    );
++}
++
++#[tokio::test]
++async fn accepting_with_an_address_taken_elsewhere_is_409_and_keeps_the_invitation() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let email = unique_address();
++    hub.invite(&owner, &email, "member").await;
++    let token = invite_tokens(&email, 1).await.remove(0);
++    hub.sign_up(&email.to_uppercase(), "Elsewhere").await;
++    let users = hub.count("users").await;
++    let sessions = hub.count("sessions").await;
++
++    assert_error(
++        hub.accept(&token, PASSWORD, None).await,
++        StatusCode::CONFLICT,
++        "an account with this email already exists",
++    )
++    .await;
++    assert_eq!(hub.count("users").await, users);
++    assert_eq!(hub.count("sessions").await, sessions);
++    assert_eq!(hub.invitations(&owner.cookie).await.len(), 1);
++    assert_eq!(hub.lookup(&token).await.status(), StatusCode::OK);
++    assert!(hub
++        .audited("organization.invitation_accepted")
++        .await
++        .is_empty());
++}
++
++// ---------------------------------------------------------------------------
++// Roles and removal
++
++#[tokio::test]
++async fn owners_promote_and_demote_members() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let member = hub.add(&owner, "member").await;
++
++    let resp = hub.set_role(&owner, &member.id, "owner").await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let body: Value = resp.json().await.unwrap();
++    assert_eq!(body["role"], "owner");
++    assert_eq!(body["id"], json!(member.id));
++    assert_eq!(hub.me(&member.cookie).await.1["user"]["role"], "owner");
++
++    let resp = hub.set_role(&owner, &member.id, "member").await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    assert_eq!(hub.me(&member.cookie).await.1["user"]["role"], "member");
++
++    // Same role: 200, no write, no audit.
++    let resp = hub.set_role(&owner, &member.id, "member").await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let rows = hub.audited("organization.member_role_changed").await;
++    assert_eq!(rows.len(), 2);
++    assert_eq!(rows[0].0, format!("user:{}", owner.id));
++    assert_eq!(rows[0].1, format!("user:{}", member.id));
++    assert_eq!(rows[0].2["from"], "member");
++    assert_eq!(rows[0].2["to"], "owner");
++    assert_eq!(rows[1].2["from"], "owner");
++    assert_eq!(rows[1].2["to"], "member");
++
++    assert_error(
++        hub.set_role(&owner, &member.id, "vendor_admin").await,
++        StatusCode::BAD_REQUEST,
++        "role must be owner or member",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn a_demotion_applies_to_the_next_request() {
++    let hub = spawn_hub().await;
++    let a = hub.verified_owner("Engines").await;
++    let b = hub.add(&a, "owner").await;
++    assert_eq!(
++        hub.get("/api/organization/invitations", Some(&b.cookie))
++            .await
++            .status(),
++        StatusCode::OK
++    );
++    assert_eq!(
++        hub.set_role(&a, &b.id, "member").await.status(),
++        StatusCode::OK
++    );
++    assert_error(
++        hub.get("/api/organization/invitations", Some(&b.cookie))
++            .await,
++        StatusCode::FORBIDDEN,
++        OWNER_ONLY,
++    )
++    .await;
++    assert_error(
++        hub.set_role(&b, &a.id, "member").await,
++        StatusCode::FORBIDDEN,
++        OWNER_ONLY,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn the_last_owner_cannot_demote_or_remove_themselves() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let audit = hub.count("audit_log").await;
++    assert_error(
++        hub.set_role(&owner, &owner.id, "member").await,
++        StatusCode::CONFLICT,
++        LAST_OWNER,
++    )
++    .await;
++    assert_error(
++        hub.remove(&owner, &owner.id).await,
++        StatusCode::CONFLICT,
++        "you cannot remove yourself from the organization",
++    )
++    .await;
++    assert_eq!(hub.me(&owner.cookie).await.1["user"]["role"], "owner");
++    assert_eq!(hub.count("audit_log").await, audit);
++
++    // With a second owner, demoting yourself is allowed.
++    let other = hub.add(&owner, "owner").await;
++    assert_eq!(
++        hub.set_role(&owner, &owner.id, "member").await.status(),
++        StatusCode::OK
++    );
++    assert_error(
++        hub.set_role(&other, &other.id, "member").await,
++        StatusCode::CONFLICT,
++        LAST_OWNER,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn two_owners_demoting_each_other_at_once_leave_one_owner() {
++    for _ in 0..3 {
++        let hub = spawn_hub().await;
++        let a = hub.verified_owner("Engines").await;
++        let b = hub.add(&a, "owner").await;
++        let ra = hub
++            .post_req(
++                &format!("/api/organization/members/{}/role", b.id),
++                Some(&a.cookie),
++            )
++            .json(&json!({"role": "member"}));
++        let rb = hub
++            .post_req(
++                &format!("/api/organization/members/{}/role", a.id),
++                Some(&b.cookie),
++            )
++            .json(&json!({"role": "member"}));
++        let (x, y) = tokio::join!(ra.send(), rb.send());
++        let mut codes = [x.unwrap().status(), y.unwrap().status()];
++        codes.sort();
++        assert_eq!(codes, [StatusCode::OK, StatusCode::CONFLICT]);
++        let owners: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE role = 'owner'")
++            .fetch_one(&hub.db.pool)
++            .await
++            .unwrap();
++        assert_eq!(owners, 1);
++    }
++}
++
++#[tokio::test]
++async fn removing_a_member_signs_them_out_and_frees_the_address() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let member = hub.add(&owner, "member").await;
++    assert_eq!(hub.me(&member.cookie).await.0, StatusCode::OK);
++
++    let resp = hub.remove(&owner, &member.id).await;
++    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
++    assert_eq!(hub.me(&member.cookie).await.0, StatusCode::UNAUTHORIZED);
++    assert_eq!(hub.members(&owner.cookie).await.len(), 1);
++    let rows = hub.audited("organization.member_removed").await;
++    assert_eq!(rows.len(), 1);
++    assert_eq!(rows[0].0, format!("user:{}", owner.id));
++    assert_eq!(rows[0].1, format!("user:{}", member.id));
++    assert_eq!(rows[0].2["email"], json!(member.email));
++    assert_eq!(rows[0].2["role"], "member");
++    assert_eq!(rows[0].2["sessions_ended"], 1);
++
++    assert_error(
++        hub.remove(&owner, &member.id).await,
++        StatusCode::NOT_FOUND,
++        "no such member",
++    )
++    .await;
++    // The address can start its own organization.
++    hub.sign_up(&member.email, "Fresh Start").await;
++}
++
++#[tokio::test]
++async fn another_organizations_ids_are_404_and_change_nothing() {
++    let hub = spawn_hub().await;
++    let a = hub.verified_owner("A").await;
++    let b = hub.verified_owner("B").await;
++    let b_member = hub.add(&b, "member").await;
++    hub.invite(&b, &unique_address(), "member").await;
++    let b_inv = hub.invitations(&b.cookie).await[0]["id"]
++        .as_str()
++        .unwrap()
++        .to_string();
++    let before = hub.counts().await;
++    let snapshot = hub.snapshot().await;
++
++    for id in [&b.id, &b_member.id] {
++        assert_error(
++            hub.set_role(&a, id, "member").await,
++            StatusCode::NOT_FOUND,
++            "no such member",
++        )
++        .await;
++        assert_error(
++            hub.set_role(&a, id, "owner").await,
++            StatusCode::NOT_FOUND,
++            "no such member",
++        )
++        .await;
++        assert_error(
++            hub.remove(&a, id).await,
++            StatusCode::NOT_FOUND,
++            "no such member",
++        )
++        .await;
++    }
++    let resp = hub
++        .post_empty(
++            &format!("/api/organization/invitations/{b_inv}/revoke"),
++            Some(&a.cookie),
++        )
++        .await;
++    assert_error(resp, StatusCode::NOT_FOUND, "no such pending invitation").await;
++    // Ids that are not UUIDs are the same 404s.
++    assert_error(
++        hub.remove(&a, "not-a-uuid").await,
++        StatusCode::NOT_FOUND,
++        "no such member",
++    )
++    .await;
++    let resp = hub
++        .post_empty("/api/organization/invitations/123/revoke", Some(&a.cookie))
++        .await;
++    assert_error(resp, StatusCode::NOT_FOUND, "no such pending invitation").await;
++
++    assert_eq!(hub.counts().await, before);
++    assert_eq!(hub.snapshot().await, snapshot);
++    assert_eq!(hub.invitations(&b.cookie).await.len(), 1);
++    assert_eq!(hub.members(&b.cookie).await.len(), 2);
++}
++
++#[tokio::test]
++async fn vendor_admins_are_never_targets_and_cannot_manage() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let org: Uuid = sqlx::query_scalar("SELECT organization_id FROM users WHERE id = $1::uuid")
++        .bind(&owner.id)
++        .fetch_one(&hub.db.pool)
++        .await
++        .unwrap();
++    let hash = wipe_hub::accounts::hash_password(PASSWORD.into())
++        .await
++        .unwrap();
++    let admin_email = unique_address();
++    let admin: Uuid = sqlx::query_scalar(
++        "INSERT INTO users (organization_id, email, name, password_hash, role, email_verified_at) \
++         VALUES ($1, $2, 'Vendor', $3, 'vendor_admin', now()) RETURNING id",
++    )
++    .bind(org)
++    .bind(&admin_email)
++    .bind(&hash)
++    .fetch_one(&hub.db.pool)
++    .await
++    .unwrap();
++    let id = admin.to_string();
++    assert_error(
++        hub.set_role(&owner, &id, "member").await,
++        StatusCode::NOT_FOUND,
++        "no such member",
++    )
++    .await;
++    assert_error(
++        hub.remove(&owner, &id).await,
++        StatusCode::NOT_FOUND,
++        "no such member",
++    )
++    .await;
++
++    let resp = hub.sign_in(&admin_email, PASSWORD).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let admin_who = Who {
++        id: id.clone(),
++        email: admin_email,
++        cookie: cookie_pair(&resp),
++    };
++    assert_error(
++        hub.invite(&admin_who, &unique_address(), "member").await,
++        StatusCode::FORBIDDEN,
++        OWNER_ONLY,
++    )
++    .await;
++    let role: String = sqlx::query_scalar("SELECT role FROM users WHERE id = $1")
++        .bind(admin)
++        .fetch_one(&hub.db.pool)
++        .await
++        .unwrap();
++    assert_eq!(role, "vendor_admin");
++}
++
++#[tokio::test]
++async fn the_whole_team_lifecycle_is_visible_and_audited_in_order() {
++    let hub = spawn_hub().await;
++    let owner = hub.verified_owner("Engines").await;
++    let invitee = hub.add(&owner, "member").await;
++    let listed = |members: Vec<Value>| {
++        members
++            .into_iter()
++            .find(|m| m["id"] == json!(invitee.id))
++            .map(|m| m["role"].as_str().unwrap().to_string())
++    };
++    assert_eq!(
++        listed(hub.members(&owner.cookie).await).as_deref(),
++        Some("member")
++    );
++    assert_eq!(hub.me(&invitee.cookie).await.1["user"]["role"], "member");
++
++    hub.set_role(&owner, &invitee.id, "owner").await;
++    assert_eq!(
++        listed(hub.members(&owner.cookie).await).as_deref(),
++        Some("owner")
++    );
++    assert_eq!(hub.me(&invitee.cookie).await.1["user"]["role"], "owner");
++
++    hub.set_role(&owner, &invitee.id, "member").await;
++    assert_eq!(
++        listed(hub.members(&owner.cookie).await).as_deref(),
++        Some("member")
++    );
++
++    assert_eq!(
++        hub.remove(&owner, &invitee.id).await.status(),
++        StatusCode::NO_CONTENT
++    );
++    assert_eq!(listed(hub.members(&owner.cookie).await), None);
++    assert_eq!(hub.me(&invitee.cookie).await.0, StatusCode::UNAUTHORIZED);
++
++    let team: Vec<String> = hub
++        .actions()
++        .await
++        .into_iter()
++        .filter(|a| a.starts_with("organization."))
++        .collect();
++    assert_eq!(
++        team,
++        [
++            "organization.member_invited",
++            "organization.invitation_accepted",
++            "organization.member_role_changed",
++            "organization.member_role_changed",
++            "organization.member_removed",
++        ]
++    );
++}

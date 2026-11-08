@@ -3,7 +3,7 @@
 //! (portal-accounts story 2) uses `email:<address>` and `ip:<peer>`; the
 //! email-send throttle on every route that sends mail (story 3) uses
 //! `mail:to:<address>` and `mail:ip:<peer>` ([`MAIL_KEY_PREFIX`]), with its
-//! own limits. Email sends are always final, so their charges are confirmed
+//! own limits; invitations (story 4) also charge `mail:org:<organization id>`. Email sends are always final, so their charges are confirmed
 //! in the same transaction instead of waiting for a check.
 //!
 //! The protocol, per key, around one expensive check (e.g. Argon2):
@@ -48,6 +48,8 @@ pub const SIGN_IN_LOCKOUT: Duration = Duration::from_secs(15 * 60);
 pub const MAIL_ADDRESS_LIMIT: i32 = 5;
 /// Email-sending requests per client IP (or IPv6 /64) per window.
 pub const MAIL_IP_LIMIT: i32 = 20;
+/// Invitation emails per organization per window (`mail:org:<id>`).
+pub const MAIL_ORG_LIMIT: i32 = 20;
 /// The fixed window email sends are counted in.
 pub const MAIL_WINDOW: Duration = Duration::from_secs(60 * 60);
 /// How long an email-send lock lasts once engaged.
@@ -309,6 +311,7 @@ mod tests {
         assert!(SIGN_IN_WINDOW <= PURGE_AFTER);
         assert_eq!(MAIL_ADDRESS_LIMIT, 5);
         assert_eq!(MAIL_IP_LIMIT, 20);
+        assert_eq!(MAIL_ORG_LIMIT, 20);
         assert_eq!(MAIL_WINDOW.as_secs(), 3600);
         assert_eq!(MAIL_LOCKOUT.as_secs(), 3600);
         assert!(MAIL_WINDOW <= PURGE_AFTER);
@@ -343,5 +346,6 @@ mod tests {
         check_charge_args(SIGN_IN_IP_LIMIT, PURGE_AFTER);
         check_charge_args(MAIL_ADDRESS_LIMIT, MAIL_WINDOW);
         check_charge_args(MAIL_IP_LIMIT, MAIL_WINDOW);
+        check_charge_args(MAIL_ORG_LIMIT, MAIL_WINDOW);
     }
 }
