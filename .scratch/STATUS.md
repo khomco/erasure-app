@@ -23,7 +23,7 @@ phases are blocked on decisions rather than on code.
 | T0.2 ADR-0006 site | ✅ decided 2026-11-05 (ADR-0006, ADR-0007) |
 | T0.3 ADR-0007 hub persistence + tenancy | ✅ decided 2026-11-05 (Postgres, organizations); vendor-root custody still open — D5 |
 | T0.4 ADR-0009 identity / auth / RBAC / PXE | not started — D2 |
-| T0.5 evaluation stance | default decided **and implemented** by ADR-0005 §5; needs ratification — D3 |
+| T0.5 evaluation stance | ✅ decided 2026-11-08 by ADR-0012: ADR-0005 §5 ratified, plus a customer opt-in `stop` lapse policy |
 | (new) CI | none exists; not blocking — ADR-0006 makes every check runnable locally |
 
 ## Surfaces
@@ -36,7 +36,7 @@ in `DECISIONS.md` · **HW** needs real hardware · **→x** waits for item x.
 | **W** website + docs | no | marketing site + lead capture (`marketing-site`, `lead-capture`); drift tests | docs pages after the site exists; W3.4 on HW |
 | **A** control plane | no | the commercial hub: accounts, offerings, Stripe, licence delivery, downloads (ADR-0007) | fleet console and station sync on D6; production keys on D5 |
 | **O** operator portal | partly (single-select bay map, per-card attention states) | O1.4 batch start, O2.1 exception inbox, O3.3 scanner input (`bench-throughput-inbox`); O3.5 licence status (`licence-visibility`) | O1.1–O1.3 on D2; O2.2 on D10; O4 on D11 |
-| **L** licensing tiers | partly (chain, entitlements, offline lease) | lease persistence, FileCounter, free-tier count (`licensing-as-built`); bench status + expiry warning (`licence-visibility`) | L1.1/L1.2 on D3; L2 on D4; L3 on D5/D6 |
+| **L** licensing tiers | partly (chain, entitlements, offline lease) | lease persistence, FileCounter, free-tier count (`licensing-as-built`); bench status + expiry warning (`licence-visibility`) | L2 on D4; L3 on D5/D6; the opt-in lapse policy (ADR-0012) is queued as `licence-delivery` story 4 and `licence-visibility` story 5 |
 
 ## Engine (CONTEXT §11 v0.2)
 

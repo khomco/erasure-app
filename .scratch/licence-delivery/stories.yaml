@@ -11,3 +11,9 @@
   title: Admin issue, inspect and revoke
   description: >-
     CAP-4.
+- id: "4"
+  title: Customer lapse policy in issued licences
+  description: >-
+    CAP-6 (ADR-0012). lapse_policy field in the signed licence body (default
+    evaluation), owner-only portal setting with audit, carried into every
+    issued and reissued licence.

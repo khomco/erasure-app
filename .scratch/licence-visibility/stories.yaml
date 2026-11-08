@@ -9,10 +9,15 @@
 - id: "3"
   title: Licence banner and expiry warning
   description: >-
-    CAP-3. Persistent Layout banner for any non-Valid status, plus an expiry
-    warning threshold.
+    CAP-3. Persistent Layout banner for any non-Valid status, plus expiry
+    warnings at 30, 7 and 1 days.
 - id: "4"
   title: Install a licence file at runtime
   description: >-
     CAP-4. POST /api/license with validation and hot-swap.
+  spec_checkpoint: true
+- id: "5"
+  title: Refuse new jobs on a lapsed licence under the stop policy
+  description: >-
+    CAP-5 (ADR-0012). Needs licence-delivery story 4's lapse_policy field.
   spec_checkpoint: true

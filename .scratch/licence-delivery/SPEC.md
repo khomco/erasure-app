@@ -1,6 +1,6 @@
 ---
 id: SPEC-licence-delivery
-companions: [../../docs/adr/0006-web-presence-and-local-first-verification.md, ../../docs/adr/0007-hub-accounts-payments-persistence.md, ../../docs/adr/0005-licensing-and-attestation.md]
+companions: [../../docs/adr/0006-web-presence-and-local-first-verification.md, ../../docs/adr/0007-hub-accounts-payments-persistence.md, ../../docs/adr/0005-licensing-and-attestation.md, ../../docs/adr/0012-opt-in-hard-stop-on-licence-lapse.md]
 sources: []
 ---
 
@@ -29,10 +29,18 @@ The delivery half of the sale. ADR-0005 already issues licences offline from a v
 - **CAP-5**
   - **intent:** Customers can tell a station is genuinely theirs.
   - **success:** The portal shows how to read the instance key id on a station (`GET /api/public_key`, startup log) and the vendor root public key to publish to auditors.
+- **CAP-6**
+  - **intent:** A customer can choose that its stations stop rather than issue `evaluation` certificates once their licence lapses (ADR-0012).
+  - **success:**
+    - `wipe-license`'s signed licence body gains `lapse_policy`: `evaluation` | `stop`. It has a serde default of `evaluation`, so existing licence files still verify and behave as before.
+    - An organization owner sets the organization's policy on the portal's Stations page. The page explains what `stop` does, that a running job always finishes, and that existing licence files must be reinstalled to pick up a change.
+    - The change is audited (`org.lapse_policy_changed`, old and new value).
+    - Every licence issued or reissued afterwards carries the policy, and the portal offers reissued files for every registered station.
+    - Members and vendor admins can see the policy but cannot change it for a customer.
 
 ## Constraints
 
-- The hub never gates erasure: a revoked or expired licence only changes how future certs are marked (ROADMAP §0.2). Revocation distribution to stations is out of scope and the portal says so.
+- The hub never gates erasure: a revoked or expired licence only changes how future certs are marked (ROADMAP §0.2). The one exception is the customer's own opt-in `stop` lapse policy (CAP-6, ADR-0012), which the hub only writes into licences and never enforces itself. Revocation distribution to stations is out of scope and the portal says so.
 - Vendor root is file-held in development with a warning on every start (ADR-0007, not decided for production).
 - Licence issuance uses `wipe-license` functions directly; no copy of the signing logic.
 
