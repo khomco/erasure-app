@@ -889,8 +889,10 @@ and resolve. None of these have a decided answer.
   ADR candidate 0010.*
 - **What does the free tier actually withhold?** Time limit, volume
   limit, feature limit, or nothing but the `evaluation` marking on the
-  certificate? *ROADMAP L-R1 recommends the last, on the grounds that
-  the marking is the business model and a time bomb contradicts §0.2.*
+  certificate? **Resolved 2026-11-08 (ADR-0012):** nothing but the
+  marking, with no time bomb. A customer may opt in to a `stop` lapse
+  policy, under which a lapsed station refuses to start new jobs instead of
+  issuing `evaluation` certificates.
 - **Does the control plane share a store with the Enterprise data
   model?** v0.2 #4 proposes SQLite on the station; the hub needs
   Postgres. Two stores for two jobs is defensible and must be stated,

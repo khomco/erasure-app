@@ -61,6 +61,15 @@ never be able to stop a drive from being sanitized.
 Anything in **L** or **A** that would gate erasure is out of scope by default
 and needs an explicit decision to enter scope.
 
+**One decided exception — the customer's choice, never the vendor's
+([ADR-0012](adr/0012-opt-in-hard-stop-on-licence-lapse.md)):** an
+organization may opt in to a `stop` lapse policy. The policy is carried inside
+its signed licence, and its stations then refuse to *start* new jobs once that
+licence has expired, been revoked or had its clock rolled back. Even then:
+- a job already running always finishes;
+- an unreachable hub or licence server never triggers it;
+- without the opt-in, everything above holds unchanged.
+
 ### 0.3 The archive is an index, never an authority
 
 Certificates are offline-verifiable by construction (ADR-0005; `verify-cert`
@@ -459,7 +468,7 @@ it: three tiers a customer can buy, activate, renew and outgrow.
 ### 4.2 Requirements
 
 - **L-R1 Evaluation is not crippled.** Decide and publish exactly what free
-  means. Recommended stance: unlimited erasures, unlimited time, no fleet/hub
+  means. Stance (ratified by ADR-0012, 2026-11-08): unlimited erasures, unlimited time, no fleet/hub
   features, certificates permanently and visibly `evaluation`. Rationale: §0.2
   says we never block a wipe, and a time-bombed evaluation contradicts the
   posture the product is sold on. The certificate marking is the entire
@@ -473,9 +482,14 @@ it: three tiers a customer can buy, activate, renew and outgrow.
 - **L-R4 Activation UX** in the operator portal: paste/upload a licence file,
   or enter an activation code that fetches it (A2). Must work with no network,
   by file, forever.
-- **L-R5 Expiry and renewal.** Warn at N days. At expiry, the station keeps
-  erasing and drops to `evaluation` certificates — with an unmissable banner.
-  Never a hard stop (§0.2).
+- **L-R5 Expiry and renewal.** Warn at 30, 7 and 1 days. At expiry, the station keeps
+  erasing and drops to `evaluation` certificates, with an unmissable banner.
+  The exception is a licence carrying the customer's opt-in `stop` lapse policy
+  (ADR-0012). Its station then refuses to start new jobs, but never interrupts a
+  running one.
+  Annual offerings renew automatically as Stripe subscriptions (D15). A
+  connected station fetching its renewed licence by itself waits on D6
+  (ADR-0008).
 - **L-R6 Revocation** with its honest limit stated in the docs (A2.3).
 - **L-R7 Upgrade paths**: machine → site, adding features mid-term, replacing a
   dead station's licence without a support call being the only route.
@@ -518,7 +532,7 @@ distribution and expiry behaviour).
 ### 4.4 Phases
 
 **L1 — Evaluation and per-machine, joined up**
-- L1.1 Decide and document the evaluation stance (L-R1).
+- ~~L1.1 Decide and document the evaluation stance (L-R1).~~ Decided by ADR-0012 (2026-11-08).
 - L1.2 Entitlement matrix generator + CI coverage test (L-R8).
 - L1.3 Activation UX in the operator portal (file-based, offline).
 - L1.4 Licence status surface at the bench (O-R9 / O3.5).
@@ -560,7 +574,7 @@ in a coherent state; nothing later invalidates something earlier.
 | **T0.2** ADR 0006 (site architecture + drift gates) | W2 cannot start without the gate contract |
 | **T0.3** ADR 0007 (control-plane persistence + tenancy) | A1 is a schema decision first |
 | **T0.4** ADR 0009 (operator identity, auth, RBAC, PXE first boot) | O1 and every attribution claim |
-| **T0.5** Decide the evaluation stance (L1.1) | Appears on the pricing page and in the product. **Default already chosen and implemented** by ADR-0005 §5 (never block, mark `evaluation`, no time bomb); needs ratification only — `.scratch/DECISIONS.md` D3 |
+| ~~**T0.5** Decide the evaluation stance (L1.1)~~ | **Decided 2026-11-08 (ADR-0012).** The ADR-0005 §5 default is ratified: never time-bombed, certificates marked `evaluation`. It adds a customer opt-in `stop` lapse policy. |
 
 ### T1 — Sell it honestly
 

@@ -146,6 +146,11 @@ problem than being unusable.
 
 ### 5. Free tier (default chosen, flagged for override)
 
+> **Ratified and amended by [ADR-0012](0012-opt-in-hard-stop-on-licence-lapse.md)
+> (2026-11-08).** What follows remains the default. An organization may opt in to a `stop`
+> lapse policy, carried in its signed licence, under which a lapsed station refuses to start
+> new jobs instead of producing `evaluation` certificates.
+
 **A station with no license still erases, and still produces a fully valid,
 offline-verifiable certificate — signed by its own self-generated key, with
 no attestation chain.** Such certs carry `attestation: null` and an explicit
