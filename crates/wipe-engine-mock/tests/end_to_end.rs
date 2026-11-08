@@ -248,3 +248,184 @@ async fn attach_with_no_id_takes_the_most_recently_detached() {
     let back = backend.attach(None).expect("something to re-attach");
     assert_eq!(back.id, devs[1].id, "last one pulled is first one back");
 }
+
+// ---- Manifest linking (destruction-cert-integrity story 1) -------------
+
+fn destruction(device_id: &str) -> wipe_common::DestructionEvent {
+    wipe_common::DestructionEvent {
+        id: uuid::Uuid::new_v4(),
+        device_id: DeviceId(device_id.into()),
+        at: time::OffsetDateTime::now_utc(),
+        method: wipe_common::DestructMethod::Shred,
+        operator: op(),
+        supervisor: None,
+        manifest_ref: None,
+        photo_refs: Vec::new(),
+        notes: None,
+        station_id: None,
+    }
+}
+
+fn destruction_events(job: &Job) -> Vec<&wipe_common::DestructionEvent> {
+    job.activities
+        .iter()
+        .filter_map(|a| match a {
+            JobActivity::Destruction(d) => Some(d),
+            _ => None,
+        })
+        .collect()
+}
+
+fn mock_runner() -> JobRunner {
+    let backend = Arc::new(MockBackend::with_catalog(
+        wipe_engine_mock::default_devices_public(),
+        MockTiming::fast(),
+    ));
+    JobRunner::new(backend)
+}
+
+#[tokio::test]
+async fn link_to_manifest_stamps_job_and_latest_destruction_event() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    runner
+        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .unwrap();
+    runner
+        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .unwrap();
+    let mut rx = runner.subscribe();
+
+    let mid = uuid::Uuid::new_v4();
+    runner.link_to_manifest(mid, &[id]).unwrap();
+
+    let job = runner.get(id).unwrap();
+    assert_eq!(job.state, JobState::PendingCoSign);
+    assert_eq!(job.manifest_id, Some(mid));
+    let events = destruction_events(&job);
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].manifest_ref, None,
+        "superseded event stays as recorded"
+    );
+    assert_eq!(events[1].manifest_ref, Some(mid));
+    assert!(
+        rx.try_recv().is_err(),
+        "linking must not broadcast (a JobStateChanged would re-sign the certificate)"
+    );
+}
+
+#[tokio::test]
+async fn link_to_manifest_with_a_queued_job_stamps_nothing() {
+    let runner = mock_runner();
+    let pending = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    runner
+        .escalate_to_destroy(pending, destruction("dev-nvme-0"))
+        .unwrap();
+    let queued = runner.create_job(job_spec("dev-sata-0")).await.unwrap();
+
+    let err = runner
+        .link_to_manifest(uuid::Uuid::new_v4(), &[pending, queued])
+        .unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+
+    for id in [pending, queued] {
+        let job = runner.get(id).unwrap();
+        assert_eq!(job.manifest_id, None);
+        assert!(destruction_events(&job)
+            .iter()
+            .all(|d| d.manifest_ref.is_none()));
+    }
+}
+
+#[tokio::test]
+async fn link_to_manifest_refuses_an_already_linked_job() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    runner
+        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .unwrap();
+    let first = uuid::Uuid::new_v4();
+    runner.link_to_manifest(first, &[id]).unwrap();
+
+    let err = runner
+        .link_to_manifest(uuid::Uuid::new_v4(), &[id])
+        .unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+
+    let job = runner.get(id).unwrap();
+    assert_eq!(job.manifest_id, Some(first));
+    assert_eq!(destruction_events(&job)[0].manifest_ref, Some(first));
+}
+
+#[tokio::test]
+async fn escalating_a_linked_job_is_refused_and_appends_nothing() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    runner
+        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .unwrap();
+    let mid = uuid::Uuid::new_v4();
+    runner.link_to_manifest(mid, &[id]).unwrap();
+    let before = runner.get(id).unwrap().activities.len();
+    let mut rx = runner.subscribe();
+
+    let err = runner
+        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+
+    let job = runner.get(id).unwrap();
+    assert_eq!(job.activities.len(), before);
+    assert_eq!(job.state, JobState::PendingCoSign);
+    assert_eq!(job.manifest_id, Some(mid));
+    assert_eq!(
+        destruction_events(&job).last().unwrap().manifest_ref,
+        Some(mid)
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn link_to_manifest_refuses_an_unknown_job_and_stamps_nothing() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    runner
+        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .unwrap();
+
+    let err = runner
+        .link_to_manifest(uuid::Uuid::new_v4(), &[id, uuid::Uuid::new_v4()])
+        .unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+
+    let job = runner.get(id).unwrap();
+    assert_eq!(job.manifest_id, None);
+    assert!(destruction_events(&job)
+        .iter()
+        .all(|d| d.manifest_ref.is_none()));
+}
+
+#[tokio::test]
+async fn link_to_manifest_refuses_a_job_listed_twice_and_stamps_nothing() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    runner
+        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .unwrap();
+
+    let err = runner
+        .link_to_manifest(uuid::Uuid::new_v4(), &[id, id])
+        .unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+
+    let job = runner.get(id).unwrap();
+    assert_eq!(job.manifest_id, None);
+    assert!(destruction_events(&job)
+        .iter()
+        .all(|d| d.manifest_ref.is_none()));
+}
+
+// A PendingCoSign Job with no DestructionEvent is not constructible through
+// the runner (only `escalate_to_destroy` enters PendingCoSign, and it
+// appends one), so that refusal has no test here.

@@ -245,6 +245,16 @@ impl AppState {
                         job_for_cert.ended_at = Some(time::OffsetDateTime::now_utc());
                     }
                 }
+                // A DestructionEvent's `manifest_ref` is stamped on the live
+                // Job at assembly and never belongs in the signed bytes. The
+                // generator runs after the escalate request has returned, so a
+                // manifest assembled in that gap would otherwise be signed in;
+                // clear it so the certificate does not depend on request timing.
+                for activity in &mut job_for_cert.activities {
+                    if let wipe_common::JobActivity::Destruction(ev) = activity {
+                        ev.manifest_ref = None;
+                    }
+                }
                 // ADR-0005: licensing decides how the cert is *marked*, never
                 // whether the erasure happened. An unlicensed, expired or
                 // quota-exhausted station still signs — the cert just says so.

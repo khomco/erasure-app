@@ -351,8 +351,10 @@ pub async fn get_manifest(
 }
 
 /// Assemble a destruction manifest from N PendingCoSign Jobs. Every Job
-/// in `job_ids` must currently be in `PendingCoSign`; each Job's
-/// DestructionEvent is updated to carry the manifest's id.
+/// in `job_ids` must currently be in `PendingCoSign` and on no other
+/// manifest. On success each Job's `manifest_id` and its latest
+/// DestructionEvent's `manifest_ref` carry the manifest's id; the stored
+/// certificates are untouched (the co-signature block records the manifest).
 pub async fn create_manifest(
     State(state): State<AppState>,
     Json(req): Json<CreateManifestRequest>,
@@ -402,17 +404,18 @@ pub async fn create_manifest(
     }
     let manifest = DestructionManifest::new(req.assembled_by, req.job_ids.clone(), req.note);
     let mid = manifest.id;
+    // Stamp the manifest on each Job and its latest DestructionEvent before
+    // storing the manifest. The preflight above scans stored manifests while
+    // the runner checks `Job::manifest_id`; the two agree today because
+    // nothing sets a manifest `Rejected`. So a runner refusal here means a
+    // concurrent request changed a Job after the preflight: another assembly
+    // linked it first, or its state moved on (e.g. it was aborted). The
+    // runner stamped nothing and no manifest is stored.
+    state
+        .runner
+        .link_to_manifest(mid, &req.job_ids)
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
     state.manifests.write().insert(mid, manifest.clone());
-    // Stamp manifest_ref on each Job's DestructionEvent and on the Job itself.
-    for jid in &req.job_ids {
-        // Note: this lives entirely in handlers' view of state; the runner
-        // exposes the Job by reference via .get() returning a clone. To
-        // persist the manifest_ref we'd want a runner setter — out of scope
-        // for v0.2's in-memory store. The cosign flow re-reads the cert
-        // and patches the co-signature with the manifest id, which is the
-        // load-bearing linkage.
-        let _ = jid;
-    }
     Ok(Json(manifest))
 }
 

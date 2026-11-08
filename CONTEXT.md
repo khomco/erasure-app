@@ -326,12 +326,21 @@ the hardware in front of them. See ADR-0002.
   Escalation is allowed from any non-terminal Job state, including
   `Queued` with no erasure attempted, not only once erasure attempts
   are exhausted. `photo_refs` is a schema slot with no capture UX
-  (v0.3 #12), and the manifest reference and `station_id` are never
-  filled in. **Today:** escalating while an erasure is Running does not
+  (v0.3 #12), and `station_id` is never filled in. The manifest
+  reference (`manifest_ref`) is stamped on the Job's latest
+  DestructionEvent when the Job is assembled onto a DestructionManifest;
+  earlier, superseded DestructionEvents keep it empty, and the signed
+  certificate's copy is always empty, regardless of how soon after
+  escalation the manifest is assembled: the certificate generator strips
+  the link before signing.
+  **Today:** escalating while an erasure is Running does not
   cancel it — the certificate is signed at PendingCoSign while the
   drive is still being written, and a VerificationEvent may be appended
   afterwards. Escalating a Job already in PendingCoSign appends another
-  DestructionEvent and re-signs, replacing the stored certificate.
+  DestructionEvent and re-signs, replacing the stored certificate —
+  unless the Job is already on a DestructionManifest, in which case the
+  escalation is refused so a new DestructionEvent cannot replace the
+  record after assembly (aborting a linked Job is still allowed).
 - **DiagnosticEvent / HealthCheckEvent** — pre-flight typed events.
   **Schema-only**: the types and `JobActivity` variants exist and
   serialise into the cert, but the runner never emits them. Whether
@@ -348,10 +357,13 @@ the hardware in front of them. See ADR-0002.
   station for Tier 1 and async remote co-sign as a Tier-2 cloud feature
   on the same schema. *Avoid: "destruction batch", "shred list".*
   **Today:** a manifest is held only in the RAM of the station it was
-  assembled on (not the lead), is lost on restart, and its id is never
-  stamped onto member Jobs or their DestructionEvents (`manifest_id` /
-  `manifest_ref` stay empty there), though each co-signature block it
-  adds to a certificate does carry it as `manifest_ref`. Co-sign happens
+  assembled on (not the lead) and is lost on restart. Assembling it
+  stamps its id onto each member Job (`manifest_id`) and that Job's
+  latest DestructionEvent (`manifest_ref`), all-or-nothing: a refused
+  assembly stamps no Job. The stored certificate is not re-signed, and
+  its copy of the DestructionEvent never carries `manifest_ref`; each
+  co-signature block the manifest adds carries it as `manifest_ref`.
+  A Job on a manifest cannot be escalated to destroy again. Co-sign happens
   on that same station with its own key; the signer and role sit
   outside the signed bytes and `verify-cert` never checks co-signatures
   (see **PendingCoSign**). There is no reject route (`Rejected` is never
@@ -747,7 +759,7 @@ folder or in `.scratch/DECISIONS.md`.
 | Surface | Ref | State | As-built gaps |
 | --- | --- | --- | --- |
 | Outer-Job composition — `Job` → `ErasureEvent`, new outer `Job` + `JobState`, `JobActivity` sum type, `JobEvent` → `JobUpdate` | §11 #2 / ADR-0001 | ✅ partial | One ErasureEvent per Job (no retries/fallback); `Quarantined` never entered; `station_id` never recorded |
-| Destroy path — `DestructionEvent`, `PendingCoSign`, `DestructionManifest`, supervisor co-sign | ADR-0001 | ✅ partial | Co-sign uses the **station** key, and signer/role sit outside the signed bytes — it is a second signature, not an independent one; `verify-cert` ignores co-signatures; `manifest_id` never stamped. A never-erased Job can no longer be finalised uncertified (c779361), but how to certify it is open |
+| Destroy path — `DestructionEvent`, `PendingCoSign`, `DestructionManifest`, supervisor co-sign | ADR-0001 | ✅ partial | Co-sign uses the **station** key, and signer/role sit outside the signed bytes — it is a second signature, not an independent one; `verify-cert` ignores co-signatures. `manifest_id` / `manifest_ref` are stamped on assembly (not inside the signed cert), and a Job on a manifest cannot be re-escalated. A never-erased Job can no longer be finalised uncertified (c779361), but how to certify it is open |
 | Certificate schema v2 — `activities` chain and explicit `AssetDisposition` | ADR-0001 | ✅ partial | v1 certs do **not** verify under v2 (see the ADR-0001 addendum) |
 | REST: escalate-to-destroy, manifests, co-sign | ADR-0001 | ✅ | |
 | React UI: activity timeline on Job Detail + Manifests page | ADR-0001 | ✅ | |
@@ -1134,7 +1146,8 @@ and resolve. None of these have a decided answer.
   supervisor is a recorded name, not an independent signer), its signer
   and role sit outside the signed bytes, `verify-cert` never checks it,
   and the manifest lives in the RAM of the station that assembled it.
-  **Not** a Batch.
+  Assembly stamps the manifest id on each member Job (`manifest_id`)
+  and its latest DestructionEvent (`manifest_ref`). **Not** a Batch.
 - **AssetDisposition** — the resolved terminal outcome
   (Erased / Destroyed / Quarantined) stated explicitly on the cert.
 - **Enclosure / Bank / Bay** — the physical bench hierarchy: an

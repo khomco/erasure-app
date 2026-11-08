@@ -200,7 +200,13 @@ attempt) — which flow channel → WebSocket → frontend.
    signer, role, `manifest_ref` and timestamp sit outside the signed
    bytes, so they can be edited without breaking any signature, and the
    co-signature proves nothing beyond the station's primary signature.
-   `manifest_ref` is also never stamped on the Job itself.
+   Assembling the manifest stamps its id on each member Job
+   (`manifest_id`) and that Job's latest DestructionEvent
+   (`manifest_ref`), but never inside the signed certificate: the cert
+   generator strips the link from the copy it signs, and a Job already
+   on a manifest cannot be escalated to destroy again, so a new
+   DestructionEvent cannot replace the record after assembly (aborting
+   a linked Job is still allowed).
    [ADR-0011](adr/0011-destruction-by-operator-attestation.md) replaces
    this destroy path with one certificate signed once at completion,
    carrying the attestation inside the signed bytes; it is accepted but

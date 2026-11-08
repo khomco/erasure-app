@@ -307,7 +307,10 @@ When erasure is exhausted, `POST /api/jobs/:id/escalate-to-destroy` appends a
 certificate is generated, with `media_status.operational = false`. A Job
 with no erasure activity (escalated from `Queued`) gets no certificate, and
 co-sign then refuses to destroy it. The Job is
-then rolled into a manifest via `POST /api/manifests`, and
+then rolled into a manifest via `POST /api/manifests`, which stamps the
+manifest id on each member Job (`manifest_id`) and its latest
+`DestructionEvent` (`manifest_ref`) without re-signing the certificate; a Job
+on a manifest can no longer be escalated again. Then
 `POST /api/manifests/:id/cosign` records the supervisor, appends a
 co-signature block to each member Job's certificate, and moves those Jobs to
 `Destroyed`. The co-signature is made with the **station's own signing key**,
@@ -345,9 +348,9 @@ yet built.
 | `wipe-common/tests/catalog.rs` | 17 | Bundled enclosure catalog (ADR-0004): schema version matches the Rust constant; rejects empty banks, zero-bay banks and duplicate ids; every model expands to a topology whose `bay_count` matches; `capabilities` requires `verified_by`; "unverified" must stay absent rather than `false` |
 | `wipe-cert/src/canonical.rs` (inline) | 4 | Canonical JSON: sorted keys, nested sort, finite-only numbers, integer preservation |
 | `wipe-cert/tests/sign_verify.rs` | 8 | sign+verify happy path, unknown-key rejection, tamper detection, JSON round-trip, activity chain carries erasure + verification, a co-signature block verifies against the key that made it (a separate key in the test; the station uses its own key), deterministic public-key-id, verifying-key round-trip |
-| `wipe-engine-mock/tests/end_to_end.rs` | 8 | NVMe crypto-erase happy path reaches `Erased`; SATA failure keeps the outer Job `InProgress` for an operator decision; enumerate; broadcast stream observes outer *and* inner transitions; simulated hot-plug detach/attach (four tests) |
+| `wipe-engine-mock/tests/end_to_end.rs` | 14 | NVMe crypto-erase happy path reaches `Erased`; SATA failure keeps the outer Job `InProgress` for an operator decision; enumerate; broadcast stream observes outer *and* inner transitions; simulated hot-plug detach/attach (four tests); manifest linking stamps the Job and its latest DestructionEvent without a broadcast, refuses (stamping nothing) a Queued, unknown, already-linked or twice-listed Job, and a linked Job cannot be re-escalated (six tests) |
 | `wipe-fleet/tests/two_instance.rs` | 2 | Solo lead election, two-instance mutual discovery + cross-station election agreement |
-| `wipe-server/tests/http_e2e.rs` | 6 | Full HTTP flow → signed cert → offline verify; aborted job emits no cert; destroy-via-manifest-cosign produces two signature blocks; co-sign refuses to destroy a Job with no certificate; a Job cannot be on two manifests; an unsaved topology resolves as a dry run (asserting JSON came back, since an unrouted POST answers 200 with the landing page) |
+| `wipe-server/tests/http_e2e.rs` | 10 | Full HTTP flow → signed cert → offline verify; aborted job emits no cert; destroy-via-manifest-cosign produces two signature blocks and stamps the manifest id on the Job; co-sign refuses to destroy a Job with no certificate; a Job cannot be on two manifests; a refused manifest stamps no Job; re-escalating a Job on a manifest is refused; a certificate signed after linking omits the manifest (proved deterministically against `AppState` by `certificate_signed_after_linking_still_omits_the_manifest`; the HTTP companion only checks the wire shape); an unsaved topology resolves as a dry run (asserting JSON came back, since an unrouted POST answers 200 with the landing page) |
 | `wipe-server/tests/topology_store.rs` | 16 | All four persistence tiers (ADR-0003), with the control-plane tier reporting unavailable rather than pretending to save; the write probe against a read-only directory; corrupt-config recovery; save-survives-restart; a licence installed after construction reaches the cert generator; and that a path binding learned by identify mode keeps its bay when a *different* drive is swapped into that port |
 | `wipe-license/tests/attestation.rs` | 28 | ADR-0005 chain: vendor root → licence → instance key → cert; unknown roots, edited entitlements and swapped keys rejected; expiry, quota, machine scope and fingerprints; lease watermark and clock-rollback detection; counter seams that do not claim hardware backing; features need a grant and a live lease; install only on the named station |
 | `wipe-license/tests/end_to_end.rs` | 6 | Licensed certs verify on both axes; evaluation certs are valid and marked; the evaluation marker cannot be stripped; a stolen licence cannot launder another station's cert; attaching a chain leaves the erasure signature intact |
@@ -418,8 +421,9 @@ positions are enumeration order, not physical bays.
 - Retry and method fallback: one `ErasureEvent` per Job, no retry route.
   `Quarantined` is declared on `JobState` but nothing moves a Job into it.
 - Destruction under ADR-0011: today's co-sign uses the station key (see
-  [Destroy path](#destroy-path)) and `manifest_ref` is never stamped on Jobs;
-  ADR-0011 (accepted, not yet built) replaces this path.
+  [Destroy path](#destroy-path)) and the manifest id stamped on Jobs at
+  assembly sits outside the signed certificate; ADR-0011 (accepted, not yet
+  built) replaces this path.
 - Licence lapse policy on the station: the hub writes the ADR-0012 policy
   into licences, but no station code reads it, so `stop` is not enforced.
 - Station ↔ hub connection: `wipe-hub` exists and issues licences, but no

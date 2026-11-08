@@ -365,6 +365,29 @@ async fn destroy_path_via_manifest_cosign_produces_two_signatures() {
         .unwrap();
     let manifest_id = manifest["id"].as_str().unwrap();
 
+    // Assembly stamps the manifest on the Job and on its DestructionEvent,
+    // without changing the Job's state or its stored certificate.
+    let job: serde_json::Value = client
+        .get(format!("{base}/api/jobs/{job_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(job["state"]["state"], "pending_co_sign");
+    assert_eq!(job["manifest_id"], manifest_id);
+    assert_eq!(latest_destruction(&job)["manifest_ref"], manifest_id);
+    let after_link: serde_json::Value = client
+        .get(format!("{base}/api/jobs/{job_id}/certificate"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after_link["signature"], signed_json["signature"]);
+
     let cosign_resp = client
         .post(format!("{base}/api/manifests/{manifest_id}/cosign"))
         .json(&json!({
@@ -402,6 +425,20 @@ async fn destroy_path_via_manifest_cosign_produces_two_signatures() {
         .await
         .unwrap();
     assert_eq!(job["state"]["state"], "destroyed");
+    assert_eq!(job["manifest_id"], manifest_id);
+    assert_eq!(latest_destruction(&job)["manifest_ref"], manifest_id);
+}
+
+/// The most recent `destruction` activity in a Job's JSON.
+fn latest_destruction(job: &serde_json::Value) -> serde_json::Value {
+    job["activities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|a| a["type"] == "destruction")
+        .cloned()
+        .expect("job has a destruction activity")
 }
 
 /// The bench-setup preview POSTs an unsaved draft here for live occupancy
@@ -606,6 +643,25 @@ async fn a_job_cannot_be_on_two_manifests() {
         .await
         .unwrap();
     assert_eq!(second.status(), 409);
+    let first: serde_json::Value = first.json().await.unwrap();
+    let job: serde_json::Value = client
+        .get(format!("{base}/api/jobs/{job_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(job["manifest_id"], first["id"]);
+    let manifests: serde_json::Value = client
+        .get(format!("{base}/api/manifests"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(manifests.as_array().unwrap().len(), 1);
 
     let dup = client
         .post(format!("{base}/api/manifests"))
@@ -614,4 +670,440 @@ async fn a_job_cannot_be_on_two_manifests() {
         .await
         .unwrap();
     assert_eq!(dup.status(), 422);
+}
+
+/// A refused manifest stamps nothing: one PendingCoSign Job alongside a
+/// Queued one is a 409, neither Job carries a manifest id, and no manifest
+/// is stored.
+#[tokio::test]
+async fn a_refused_manifest_links_no_job() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let op = json!({ "id": "op-1", "display_name": "Alice", "email": "alice@example.com" });
+
+    let mut ids = Vec::new();
+    for device in ["dev-nvme-0", "dev-sata-0"] {
+        let created: serde_json::Value = client
+            .post(format!("{base}/api/jobs"))
+            .json(&json!({
+                "device_id": device,
+                "classification": "high",
+                "intent": "destroy",
+                "operator": op,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(created["job_id"].as_str().unwrap().to_string());
+    }
+    let (pending, queued) = (&ids[0], &ids[1]);
+    let resp = client
+        .post(format!("{base}/api/jobs/{pending}/escalate-to-destroy"))
+        .json(&json!({ "method": "shred", "operator": op }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let resp = client
+        .post(format!("{base}/api/manifests"))
+        .json(&json!({ "assembled_by": op, "job_ids": [pending, queued] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+
+    for id in &ids {
+        let job: serde_json::Value = client
+            .get(format!("{base}/api/jobs/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(job["manifest_id"].is_null(), "job {id} was stamped");
+    }
+    let job: serde_json::Value = client
+        .get(format!("{base}/api/jobs/{pending}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(latest_destruction(&job)["manifest_ref"].is_null());
+    let manifests: serde_json::Value = client
+        .get(format!("{base}/api/manifests"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(manifests.as_array().unwrap().is_empty());
+}
+
+/// Once a Job is on a manifest, the record the supervisor will co-sign is
+/// fixed: escalating it again is refused, appends no DestructionEvent and
+/// leaves the stored certificate in place.
+#[tokio::test]
+async fn re_escalating_a_job_on_a_manifest_is_refused() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let op = json!({ "id": "op-1", "display_name": "Alice", "email": "alice@example.com" });
+
+    let created: serde_json::Value = client
+        .post(format!("{base}/api/jobs"))
+        .json(&json!({
+            "device_id": "dev-nvme-0",
+            "classification": "high",
+            "intent": "destroy",
+            "operator": op,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let job_id = created["job_id"].as_str().unwrap().to_string();
+    client
+        .post(format!("{base}/api/jobs/{job_id}/start"))
+        .send()
+        .await
+        .unwrap();
+    // The certificate needs an erasure activity to snapshot the device.
+    let mut has_erasure = false;
+    for _ in 0..100 {
+        let job: serde_json::Value = client
+            .get(format!("{base}/api/jobs/{job_id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if job["activities"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x["type"] == "erasure"))
+        {
+            has_erasure = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(has_erasure, "job never gained an erasure activity");
+
+    let resp = client
+        .post(format!("{base}/api/jobs/{job_id}/escalate-to-destroy"))
+        .json(&json!({ "method": "disintegrate", "operator": op }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let mut cert: Option<serde_json::Value> = None;
+    for _ in 0..100 {
+        let resp = client
+            .get(format!("{base}/api/jobs/{job_id}/certificate"))
+            .send()
+            .await
+            .unwrap();
+        if resp.status().is_success() {
+            cert = Some(resp.json().await.unwrap());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let cert = cert.expect("certificate generated at pending_co_sign");
+
+    let resp = client
+        .post(format!("{base}/api/manifests"))
+        .json(&json!({ "assembled_by": op, "job_ids": [job_id] }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let before: serde_json::Value = client
+        .get(format!("{base}/api/jobs/{job_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{base}/api/jobs/{job_id}/escalate-to-destroy"))
+        .json(&json!({ "method": "shred", "operator": op }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        !resp.status().is_success(),
+        "re-escalation of a linked job succeeded: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let manifest_id = before["manifest_id"].as_str().unwrap();
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("destruction manifest") && message.contains(manifest_id),
+        "refusal should name the destruction manifest, got {body}"
+    );
+
+    // Give a (wrongly emitted) state change time to re-sign before checking.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let after: serde_json::Value = client
+        .get(format!("{base}/api/jobs/{job_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // Count destruction activities only: the erasure is still running in
+    // the background and may append its own activities meanwhile.
+    let destructions = |job: &serde_json::Value| {
+        job["activities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["type"] == "destruction")
+            .count()
+    };
+    assert_eq!(destructions(&after), 1);
+    assert_eq!(destructions(&before), 1);
+    assert_eq!(latest_destruction(&after)["method"], "disintegrate");
+    let cert_after: serde_json::Value = client
+        .get(format!("{base}/api/jobs/{job_id}/certificate"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cert_after["signature"], cert["signature"]);
+}
+
+/// Wire shape of the manifest link over HTTP: the certificate's destruction
+/// activity has `manifest_ref` null while the live Job carries it. Over
+/// HTTP the generator usually signs before the manifest arrives, so this
+/// passes even without the strip; the deterministic proof is
+/// `certificate_signed_after_linking_still_omits_the_manifest`.
+#[tokio::test]
+async fn a_manifest_assembled_before_the_certificate_is_signed_stays_out_of_it() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let op = json!({ "id": "op-1", "display_name": "Alice", "email": "alice@example.com" });
+
+    let created: serde_json::Value = client
+        .post(format!("{base}/api/jobs"))
+        .json(&json!({
+            "device_id": "dev-nvme-0",
+            "classification": "high",
+            "intent": "destroy",
+            "operator": op,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let job_id = created["job_id"].as_str().unwrap().to_string();
+    client
+        .post(format!("{base}/api/jobs/{job_id}/start"))
+        .send()
+        .await
+        .unwrap();
+    // The certificate needs an erasure activity to snapshot the device.
+    let mut has_erasure = false;
+    for _ in 0..100 {
+        let job: serde_json::Value = client
+            .get(format!("{base}/api/jobs/{job_id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if job["activities"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x["type"] == "erasure"))
+        {
+            has_erasure = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(has_erasure, "job never gained an erasure activity");
+
+    let resp = client
+        .post(format!("{base}/api/jobs/{job_id}/escalate-to-destroy"))
+        .json(&json!({ "method": "shred", "operator": op }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    // Assemble at once, without waiting for the certificate.
+    let manifest: serde_json::Value = client
+        .post(format!("{base}/api/manifests"))
+        .json(&json!({ "assembled_by": op, "job_ids": [job_id] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let manifest_id = manifest["id"]
+        .as_str()
+        .expect("manifest stored")
+        .to_string();
+
+    let mut cert: Option<serde_json::Value> = None;
+    for _ in 0..100 {
+        let resp = client
+            .get(format!("{base}/api/jobs/{job_id}/certificate"))
+            .send()
+            .await
+            .unwrap();
+        if resp.status().is_success() {
+            cert = Some(resp.json().await.unwrap());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let cert = cert.expect("certificate generated at pending_co_sign");
+    let signed_destructions: Vec<&serde_json::Value> = cert["certificate"]["activities"]
+        .as_array()
+        .expect("certificate has activities")
+        .iter()
+        .filter(|a| a["type"] == "destruction")
+        .collect();
+    assert_eq!(signed_destructions.len(), 1);
+    assert!(
+        signed_destructions[0]["manifest_ref"].is_null(),
+        "signed certificate carries the manifest link: {}",
+        signed_destructions[0]
+    );
+
+    let job: serde_json::Value = client
+        .get(format!("{base}/api/jobs/{job_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(job["manifest_id"], manifest_id.as_str());
+    assert_eq!(
+        latest_destruction(&job)["manifest_ref"],
+        manifest_id.as_str()
+    );
+}
+
+/// Deterministic companion to the test above: over HTTP the certificate
+/// generator usually wins the race, so this drives `AppState` directly and
+/// links the Job before the generator task can run at all (the
+/// single-threaded test runtime does not poll it until we yield).
+#[tokio::test]
+async fn certificate_signed_after_linking_still_omits_the_manifest() {
+    use wipe_common::{
+        Classification, DestructMethod, DestructionEvent, DeviceId, Intent, JobSpec, OperatorRef,
+    };
+
+    let backend = Arc::new(MockBackend::with_catalog(
+        wipe_engine_mock::default_devices_public(),
+        MockTiming::fast(),
+    ));
+    let state = AppState::new(backend, None, Arc::new(SigningKey::generate()));
+    let op = OperatorRef {
+        id: "op-1".into(),
+        display_name: "Alice".into(),
+        email: "alice@example.com".into(),
+    };
+    let device = DeviceId("dev-nvme-0".into());
+    let job_id = state
+        .runner
+        .create_job(JobSpec {
+            device_id: device.clone(),
+            classification: Classification::High,
+            intent: Intent::Destroy,
+            operator: op.clone(),
+            asset_tag: None,
+            site_label: None,
+            ticket_ref: None,
+            work_order_ref: None,
+            customer_ref: None,
+            contract_ref: None,
+            sanitization_profile_ref: None,
+        })
+        .await
+        .unwrap();
+    state.runner.start(job_id).unwrap();
+    // The certificate needs an erasure activity to snapshot the device.
+    let mut has_erasure = false;
+    for _ in 0..100 {
+        if state.runner.get(job_id).unwrap().latest_erasure().is_some() {
+            has_erasure = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(has_erasure, "job never gained an erasure activity");
+
+    // No await between these two calls: the generator sees the linked Job.
+    state
+        .runner
+        .escalate_to_destroy(
+            job_id,
+            DestructionEvent {
+                id: uuid::Uuid::new_v4(),
+                device_id: device,
+                at: time::OffsetDateTime::now_utc(),
+                method: DestructMethod::Shred,
+                operator: op,
+                supervisor: None,
+                manifest_ref: None,
+                photo_refs: Vec::new(),
+                notes: None,
+                station_id: None,
+            },
+        )
+        .unwrap();
+    let manifest_id = uuid::Uuid::new_v4();
+    state
+        .runner
+        .link_to_manifest(manifest_id, &[job_id])
+        .unwrap();
+
+    let mut cert = None;
+    for _ in 0..100 {
+        if let Some(c) = state.certs.read().get(&job_id).cloned() {
+            cert = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let cert = serde_json::to_value(cert.expect("certificate generated")).unwrap();
+    let destruction = cert["certificate"]["activities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["type"] == "destruction")
+        .cloned()
+        .expect("signed certificate has the destruction activity");
+    assert!(
+        destruction["manifest_ref"].is_null(),
+        "signed certificate carries the manifest link: {destruction}"
+    );
+    assert_eq!(
+        state.runner.get(job_id).unwrap().manifest_id,
+        Some(manifest_id)
+    );
 }

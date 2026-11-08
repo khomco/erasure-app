@@ -175,26 +175,40 @@ impl JobRunner {
     /// Append an operator-supplied `DestructionEvent` to a Job and move
     /// it to `PendingCoSign`. Used when erasure is exhausted and the
     /// Asset must be physically destroyed; the Job awaits supervisor
-    /// co-sign on the linked `DestructionManifest`.
+    /// co-sign on the linked `DestructionManifest`. Refused if the Job is
+    /// unknown, terminal, or already on a DestructionManifest.
     pub fn escalate_to_destroy(
         &self,
         id: Uuid,
         destruction: DestructionEvent,
     ) -> WipeResult<()> {
-        let job = self
-            .get(id)
-            .ok_or_else(|| WipeError::InvalidState(format!("job {id} not found")))?;
-        if job.state.is_terminal() {
-            return Err(WipeError::InvalidState(format!(
-                "job {id} already terminal"
-            )));
-        }
-        let from = job.state;
-        self.mutate_job(id, |j| {
-            j.activities
+        // Check and mutate under one write guard so a concurrent
+        // `link_to_manifest` cannot slip between them.
+        let from = {
+            let mut inner = self.inner.write();
+            let job = inner
+                .jobs
+                .get_mut(&id)
+                .ok_or_else(|| WipeError::InvalidState(format!("job {id} not found")))?;
+            if job.state.is_terminal() {
+                return Err(WipeError::InvalidState(format!(
+                    "job {id} already terminal"
+                )));
+            }
+            // Once a Job is on a DestructionManifest, the record the supervisor
+            // co-signs must not change: a new DestructionEvent would replace the
+            // certificate and would not carry the manifest reference.
+            if let Some(mid) = job.manifest_id {
+                return Err(WipeError::InvalidState(format!(
+                    "job {id} is on destruction manifest {mid}; it cannot be escalated again"
+                )));
+            }
+            let from = job.state;
+            job.activities
                 .push(JobActivity::Destruction(destruction.clone()));
-            j.state = wipe_common::JobState::PendingCoSign;
-        });
+            job.state = wipe_common::JobState::PendingCoSign;
+            from
+        };
         let _ = self.events.send(JobBroadcast::ActivityAdded {
             job_id: id,
             activity: JobActivity::Destruction(destruction),
@@ -231,6 +245,62 @@ impl JobRunner {
             to: wipe_common::JobState::Destroyed,
             at: OffsetDateTime::now_utc(),
         });
+        Ok(())
+    }
+
+    /// Record that `job_ids` were assembled onto DestructionManifest
+    /// `manifest_id`: stamps `Job::manifest_id` and the `manifest_ref` of
+    /// each Job's latest DestructionEvent.
+    ///
+    /// All-or-nothing: every Job is validated under one write lock before
+    /// any is changed, and the call refuses (changing nothing) if any Job is
+    /// missing, listed more than once, not in `PendingCoSign`, already on a
+    /// manifest, or has no DestructionEvent. The link changes no Job state
+    /// and emits no broadcast — a `JobStateChanged` would re-sign the
+    /// certificate.
+    pub fn link_to_manifest(&self, manifest_id: Uuid, job_ids: &[Uuid]) -> WipeResult<()> {
+        let mut inner = self.inner.write();
+        for (i, id) in job_ids.iter().enumerate() {
+            if job_ids[..i].contains(id) {
+                return Err(WipeError::InvalidState(format!("job {id} is listed twice")));
+            }
+            let job = inner
+                .jobs
+                .get(id)
+                .ok_or_else(|| WipeError::InvalidState(format!("job {id} not found")))?;
+            if job.state != wipe_common::JobState::PendingCoSign {
+                return Err(WipeError::InvalidState(format!(
+                    "job {id} not in PendingCoSign (got {:?})",
+                    job.state
+                )));
+            }
+            if let Some(other) = job.manifest_id {
+                return Err(WipeError::InvalidState(format!(
+                    "job {id} is already on destruction manifest {other}"
+                )));
+            }
+            if !job
+                .activities
+                .iter()
+                .any(|a| matches!(a, JobActivity::Destruction(_)))
+            {
+                return Err(WipeError::InvalidState(format!(
+                    "job {id} has no destruction event"
+                )));
+            }
+        }
+        for id in job_ids {
+            let job = inner.jobs.get_mut(id).expect("validated above");
+            job.manifest_id = Some(manifest_id);
+            if let Some(JobActivity::Destruction(ev)) = job
+                .activities
+                .iter_mut()
+                .rev()
+                .find(|a| matches!(a, JobActivity::Destruction(_)))
+            {
+                ev.manifest_ref = Some(manifest_id);
+            }
+        }
         Ok(())
     }
 
