@@ -1,28 +1,43 @@
 ---
 /**
- * Pricing (marketing-site story 3, CAP-2). No amounts, no currency and no
- * tiers offered as products until `offerings-and-payments` publishes prices
- * from the hub (ADR-0006 §1). Pricing principles appear only as wrapped
- * capabilities.
+ * Pricing (marketing-site story 3, CAP-2; offerings-and-payments story 5,
+ * CAP-6). A build given `PRICING_HUB_ORIGIN` lists the hub's published
+ * offerings, read once at build time (ADR-0006 §1); any failure to read them
+ * fails the build. Without it, or when the hub publishes none, the page has no
+ * amounts and no currency and says pricing is on request. No prices are typed
+ * here. Pricing principles appear only as wrapped capabilities.
  */
 import Base from "../layouts/Base.astro";
 import Capability from "../components/Capability.astro";
+import PriceList from "../components/PriceList.astro";
+import { pricingHubOrigin } from "../config";
+import { loadOfferings } from "../lib/offerings";
 import { body, grid, h1, h2, h3, item, link, prose, section } from "../lib/ui";
+
+const origin = pricingHubOrigin();
+const offerings = origin ? await loadOfferings(origin) : [];
+const priced = offerings.length > 0;
+const description = priced
+  ? "Published prices for Wipestation offerings."
+  : "Wipestation is pre-launch and has no price list yet. Early-access pricing on request.";
 ---
 
-<Base
-  title="Pricing"
-  description="Wipestation is pre-launch and has no price list yet. Early-access pricing on request."
->
+<Base title="Pricing" description={description}>
   <h1 class={h1}>Pricing</h1>
-  <div class={prose}>
-    <p class="text-lg font-semibold text-slate-900">Early-access pricing on request.</p>
-    <p>
-      Wipestation is not on sale yet, so there is no price list. Published prices will appear
-      here before launch. Until then, <a href="/early-access/" class={link}>join early access</a>
-      and we will talk about pricing with you directly.
-    </p>
-  </div>
+  {
+    priced ? (
+      <PriceList offerings={offerings} />
+    ) : (
+      <div class={prose}>
+        <p class="text-lg font-semibold text-slate-900">Early-access pricing on request.</p>
+        <p>
+          Wipestation is not on sale yet, so there is no price list. Published prices will appear
+          here before launch. Until then, <a href="/early-access/" class={link}>join early access</a>
+          and we will talk about pricing with you directly.
+        </p>
+      </div>
+    )
+  }
 
   <section class={section} aria-labelledby="principles">
     <h2 id="principles" class={h2}>How licensing is designed to work</h2>

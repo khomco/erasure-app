@@ -55,7 +55,9 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   The lead forms stay closed (no script) unless built with `PUBLIC_HUB_ORIGIN=http://localhost:7900`
   (`pnpm --filter www dev` for a local demo); `astro build` refuses that origin while
   `site.privacyNoticePublished` is `false`. Consent wording lives in `src/data/consent.ts` and
-  is pinned to `crates/wipe-hub/src/leads.rs`: change both together.
+  is pinned to `crates/wipe-hub/src/leads.rs`: change both together. `/pricing/` lists live
+  prices only when built with `PRICING_HUB_ORIGIN=http://127.0.0.1:7900`; then `build` needs a
+  reachable hub and fails if it cannot read `GET /api/offerings`. Unset, it needs no hub.
 - `wipestation serve` with no built frontend silently serves an "API only" landing page, as
   does a `--static-dir` that does not exist; run `cd apps/desktop && pnpm build` first.
 - Format only the files you touched with `rustfmt --edition 2021 <files>`. Never `--all`, and

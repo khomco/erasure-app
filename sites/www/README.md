@@ -29,8 +29,24 @@ pnpm --filter www lighthouse    # build + preview + Lighthouse in local headless
   per target and its target year (CONTEXT §13).
 - `/segments/` and `/segments/itad/`, `/segments/enterprise-it/`, `/segments/government/`: the
   three buyers in CONTEXT §2; each segment page ends with a secondary link to `/early-access/`.
-- `/pricing/`: "Early-access pricing on request", no amounts or currency; licensing principles
-  only as wrapped capabilities. Prices arrive with `offerings-and-payments`.
+- `/pricing/` (`src/pages/pricing.astro`): licensing principles as wrapped capabilities, plus
+  one of two blocks chosen at build time (offerings-and-payments story 5):
+  - **No prices** (default, `PRICING_HUB_ORIGIN` unset, or the hub publishes no offering):
+    "Early-access pricing on request", no amounts or currency. No fetch is made, so the build
+    needs no hub.
+  - **Live prices** (`PRICING_HUB_ORIGIN=http://127.0.0.1:7900`, the hub's origin, in the
+    environment or a `.env` file): the build fetches the hub's public `GET /api/offerings` once
+    (10 s timeout) and `src/components/PriceList.astro` lists each published offering: name,
+    description, price (`1,200.00 USD`, the portal's `formatPrice`) with "per year" or "one-off
+    payment", seats, scope, quota, term, and on annual offerings the hub's auto-renewal headline
+    verbatim. Licence features are not listed (ROADMAP W3.3). A network error, timeout, non-2xx
+    status or a body that fails the strict check in `src/lib/offerings.ts` fails `astro build`,
+    naming `PRICING_HUB_ORIGIN`, the URL and the cause, so a build never publishes prices it
+    could not read (ADR-0006 §1). The page is a snapshot: prices are as of the last build, so
+    rebuild the site after publishing, editing or retiring an offering. The variable is build-time only (not `PUBLIC_`) and never reaches the
+    browser; the page still ships no JavaScript. Vendor-entered names and descriptions go
+    through the site check like any copy: fix an overclaim by editing the offering in the
+    portal's admin area.
 - `/early-access/` and `/contact/`: copy plus `src/components/LeadForm.astro`, one form for both
   with the field names of the hub's `POST /api/leads` (lead-capture story 1). No email, phone or
   postal address is published. The form has two modes, chosen at build time:

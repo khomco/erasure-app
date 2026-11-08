@@ -1,0 +1,59 @@
+---
+/**
+ * The hub's published offerings, read at build time (offerings-and-payments
+ * story 5). Vendor-entered name and description are Astro-escaped text; the
+ * description keeps its line breaks as `<br>`. The renewal headline is the
+ * hub's own wording, shown verbatim on annual offerings only. Licence
+ * features are deliberately not listed (the tier→feature matrix is ROADMAP
+ * W3.3).
+ */
+import {
+  formatPrice,
+  intervalLabel,
+  quotaLabel,
+  scopeLabel,
+  seatsLabel,
+  termLabel,
+  type CatalogOffering,
+} from "../lib/offerings";
+import { body, grid, item } from "../lib/ui";
+
+interface Props {
+  offerings: CatalogOffering[];
+}
+
+const { offerings } = Astro.props;
+---
+
+<ul class={grid} data-price-list>
+  {
+    offerings.map((o) => (
+      <li class={item} data-offering={o.id}>
+        <h2 class="font-semibold">{o.name}</h2>
+        <p class="mt-1 text-lg font-semibold text-slate-900" data-price>
+          {formatPrice(o.price_minor, o.currency)}{" "}
+          <span class="text-sm font-normal text-slate-700">{intervalLabel(o.interval)}</span>
+        </p>
+        <p class={body} data-description>
+          {o.description.split(/\r?\n/).map((line, i) => (
+            <>
+              {i > 0 && <br />}
+              {line}
+            </>
+          ))}
+        </p>
+        <ul class="mt-2 list-disc pl-5 text-sm text-slate-700">
+          <li>{seatsLabel(o.grants.seats)}</li>
+          <li>{scopeLabel(o.grants.scope)}</li>
+          <li>{quotaLabel(o.grants.quota_erasures)}</li>
+          <li>{termLabel(o.grants.term_months)}</li>
+        </ul>
+        {o.interval === "annual" && o.renewal_notice && (
+          <p class="mt-2 text-sm text-slate-700" data-renewal-notice>
+            {o.renewal_notice.headline}
+          </p>
+        )}
+      </li>
+    ))
+  }
+</ul>

@@ -2,7 +2,9 @@
 //! payment-event routes (offerings-and-payments stories 2 to 4, CAP-2 to
 //! CAP-5):
 //!
-//! - `GET /api/offerings` — any signed-in user: published offerings.
+//! - `GET /api/offerings` — anyone, no session: published offerings. Any
+//!   cookie is ignored, so a stale one is not a 401; the marketing site's
+//!   pricing page reads it at build time (story 5, CAP-6). No CORS.
 //! - `POST /api/checkout {offering_id}` — a verified owner starts a
 //!   checkout: 201 `{order, checkout_url}` with the order `pending`.
 //! - `GET /api/orders`, `GET /api/orders/:id` — any role: the
@@ -36,7 +38,8 @@
 //!   is active, renewing and has a subscription. Pay, abandon, renew and
 //!   cancel refuse a hub whose public base URL is not local (503).
 //!
-//! The organization is always the session's ([`CurrentUser`]). Another
+//! Every route but the catalog and the webhook needs a session, and the
+//! organization is always the session's ([`CurrentUser`]). Another
 //! organization's order or session id is a 404 like an unknown one, and
 //! changes and audits nothing. Owner and verified-email checks run before
 //! the body is read. Nothing here marks an order paid except through
@@ -165,10 +168,7 @@ impl From<ApplyError> for ApiError {
 // ---------------------------------------------------------------------------
 // Catalog and checkout
 
-async fn catalog(
-    State(state): State<AppState>,
-    _user: CurrentUser,
-) -> Result<Json<serde_json::Value>, ApiError> {
+async fn catalog(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     let offerings = orders::catalog(&state.pool).await?;
     Ok(Json(json!({ "offerings": offerings })))
 }

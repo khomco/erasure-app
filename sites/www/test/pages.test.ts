@@ -276,6 +276,140 @@ describe("pricing page", () => {
   });
 });
 
+describe("pricing page with published offerings (PRICING_HUB_ORIGIN set)", () => {
+  const PRICING_HUB = "http://127.0.0.1:7900";
+  const headline = "Renews automatically every year at 1,200.00 USD until you cancel.";
+  const annual = {
+    id: "11111111-1111-4111-8111-111111111111",
+    name: "Station annual",
+    description: "One station.\nRenews yearly.",
+    price_minor: 120000,
+    currency: "USD",
+    interval: "annual",
+    grants: { scope: "machine", seats: 1, quota_erasures: null, features: ["hub_sync"], term_months: 12 },
+    renewal_notice: { headline, detail: "Your first year ends on 8 November 2027." },
+  };
+  const oneOff = {
+    id: "22222222-2222-4222-8222-222222222222",
+    name: "Site pack",
+    description: "Five stations at one site.",
+    price_minor: 500000,
+    currency: "JPY",
+    interval: "one_off",
+    grants: { scope: "site", seats: 5, quota_erasures: 10000, features: [], term_months: 24 },
+    renewal_notice: null,
+  };
+
+  /** Renders /pricing/ against a hub answering `offerings`; returns the HTML and the URLs fetched. */
+  async function renderPriced(offerings: unknown[]) {
+    const seen: string[] = [];
+    vi.stubEnv("PRICING_HUB_ORIGIN", PRICING_HUB);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      seen.push(String(input));
+      return new Response(JSON.stringify({ offerings }), { status: 200 });
+    });
+    try {
+      return { html: await render(Pricing, "/pricing/"), seen };
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it("lists each offering, passes the site check and ships no script", async () => {
+    const { html, seen } = await renderPriced([annual, oneOff]);
+    expect(seen).toEqual([`${PRICING_HUB}/api/offerings`]);
+    expect(checkPage(html, "/pricing/", capabilities, ORIGIN)).toEqual([]);
+    expect(html).not.toMatch(/<script/i);
+    expect(html).not.toContain(PRICING_HUB);
+    const root = parse(html);
+    expect(root.querySelectorAll("h1")).toHaveLength(1);
+    expect(root.querySelector('meta[name="description"]')!.getAttribute("content")).toBe(
+      "Published prices for Wipestation offerings.",
+    );
+    expect(root.querySelector("main")!.text).not.toContain("Early-access pricing on request");
+    // The licensing principles stay.
+    expect(root.querySelector('section[aria-labelledby="principles"]')).not.toBeNull();
+
+    const items = root.querySelectorAll("ul[data-price-list] > li[data-offering]");
+    expect(items.map((li) => li.getAttribute("data-offering"))).toEqual([annual.id, oneOff.id]);
+    const [a, o] = items;
+    const flat = (el: HTMLElement) => el.text.replace(/\s+/g, " ").trim();
+    expect(a.querySelector("h2")!.text).toBe("Station annual");
+    expect(flat(a.querySelector("[data-price]")!)).toBe("1,200.00 USD per year");
+    expect(a.querySelector("[data-description]")!.innerHTML).toMatch(/One station\.\s*<br>\s*Renews yearly\./);
+    expect(flat(a)).toContain("1 seat");
+    expect(flat(a)).toContain("Machine licence");
+    expect(flat(a)).toContain("Unlimited erasures");
+    expect(flat(a)).toContain("12-month term");
+    expect(a.querySelector("[data-renewal-notice]")!.text.trim()).toBe(headline);
+    expect(flat(a)).not.toContain("first year ends");
+    expect(flat(a)).not.toContain("hub_sync");
+
+    expect(o.querySelector("h2")!.text).toBe("Site pack");
+    expect(flat(o.querySelector("[data-price]")!)).toBe("500,000 JPY one-off payment");
+    expect(flat(o)).toContain("5 seats");
+    expect(flat(o)).toContain("Site licence");
+    expect(flat(o)).toContain("10,000 erasures");
+    expect(flat(o)).toContain("24-month term");
+    expect(o.querySelector("[data-renewal-notice]")).toBeNull();
+    expect(flat(o)).not.toContain("Renews automatically");
+  });
+
+  it("renders markup in vendor text as text", async () => {
+    const { html } = await renderPriced([{ ...oneOff, description: "<script>alert(1)</script>" }]);
+    expect(html).not.toMatch(/<script/i);
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(parse(html).querySelector("[data-description]")!.text).toBe("<script>alert(1)</script>");
+  });
+
+  it("renders a CRLF line break in vendor text as <br>", async () => {
+    const { html } = await renderPriced([{ ...oneOff, description: "a\r\nb" }]);
+    expect(parse(html).querySelector("[data-description]")!.innerHTML).toBe("a<br>b");
+    expect(html).not.toContain("\r");
+  });
+
+  it("fails the site check on an overclaim in vendor text", async () => {
+    const { html } = await renderPriced([{ ...oneOff, description: "Wipes NVMe drives." }]);
+    const violations = checkPage(html, "/pricing/", capabilities, ORIGIN);
+    expect(violations.map((v) => v.rule)).toContain("overclaim");
+  });
+
+  it("renders the default page for an empty catalog", async () => {
+    const { html, seen } = await renderPriced([]);
+    expect(seen).toHaveLength(1);
+    expect(html).toBe(await render(Pricing, "/pricing/"));
+    expect(parse(html).querySelector("main")!.text).toContain("Early-access pricing on request");
+  });
+
+  it("fails the render when the hub answers an error", async () => {
+    vi.stubEnv("PRICING_HUB_ORIGIN", PRICING_HUB);
+    vi.stubGlobal("fetch", async () => new Response("{}", { status: 401 }));
+    try {
+      await expect(render(Pricing, "/pricing/")).rejects.toThrow(
+        `pricing: could not read ${PRICING_HUB}/api/offerings (PRICING_HUB_ORIGIN): HTTP status 401`,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("makes no fetch without PRICING_HUB_ORIGIN", async () => {
+    const seen: unknown[] = [];
+    vi.stubGlobal("fetch", async (input: unknown) => {
+      seen.push(input);
+      throw new Error("no fetch expected");
+    });
+    try {
+      await render(Pricing, "/pricing/");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(seen).toEqual([]);
+  });
+});
+
 describe("standards page", () => {
   it("labels the certification roadmap as future, one planned capability per target", async () => {
     const root = parse(await render(Standards, "/standards/"));

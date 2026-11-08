@@ -139,51 +139,84 @@ async fn insert_offering(hub: &Hub, name: &str, status: &str) -> String {
 // Catalog
 
 #[tokio::test]
-async fn the_catalog_lists_published_offerings_to_signed_in_users() {
+async fn the_catalog_lists_published_offerings_to_anyone() {
     let f = fixture().await;
     let zeta = f.hub.published_offering("zeta plan").await;
     let alpha = f.hub.published_offering("Alpha plan").await;
     let one_off = f.hub.published_one_off_offering("Middle plan", 24).await;
     insert_offering(&f.hub, "Retired plan", "retired").await;
     insert_offering(&f.hub, "Draft plan", "draft").await;
+    let audit_before = f.audit_count().await;
 
-    let resp = f.hub.get("/api/offerings", None).await;
-    assert_error(resp, StatusCode::UNAUTHORIZED, NOT_SIGNED_IN).await;
+    // Anonymous: no session needed (story 5, the marketing site's build).
+    // No CORS (the site reads it at build time, not from a browser) and no
+    // cookie set, even for the site's own origin.
+    let resp = f
+        .hub
+        .http
+        .get(f.hub.url("/api/offerings"))
+        .header(reqwest::header::ORIGIN, "http://localhost:4321")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.headers()
+            .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none(),
+        "{:?}",
+        resp.headers()
+    );
+    assert!(
+        resp.headers().get(reqwest::header::SET_COOKIE).is_none(),
+        "{:?}",
+        resp.headers()
+    );
+    let anonymous = ok_json(resp).await;
+    let list = anonymous["offerings"].as_array().unwrap();
+    let ids: Vec<&str> = list.iter().map(|o| o["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, [alpha.as_str(), one_off.as_str(), zeta.as_str()]);
+    // An annual offering carries the auto-renewal notice, dated today; a
+    // one-off carries none (story 4).
+    let notice = renewal_notice_now("annual", 120000, "USD").unwrap();
+    assert_eq!(
+        notice.headline,
+        "Renews automatically every year at 1,200.00 USD until you cancel."
+    );
+    assert_eq!(list[1]["renewal_notice"], Value::Null);
+    assert_eq!(list[1]["interval"], "one_off");
+    assert_eq!(
+        list[0],
+        json!({
+            "id": alpha,
+            "name": "Alpha plan",
+            "description": "One station.",
+            "price_minor": 120000,
+            "currency": "USD",
+            "interval": "annual",
+            "grants": {
+                "scope": "machine",
+                "seats": 1,
+                "quota_erasures": null,
+                "features": ["hub_sync", "pdf_certificates"],
+                "term_months": 12
+            },
+            "renewal_notice": {"headline": notice.headline, "detail": notice.detail},
+        })
+    );
 
-    for who in [&f.owner, &f.member] {
-        let v = ok_json(f.hub.get("/api/offerings", Some(&who.cookie)).await).await;
-        let list = v["offerings"].as_array().unwrap();
-        let ids: Vec<&str> = list.iter().map(|o| o["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, [alpha.as_str(), one_off.as_str(), zeta.as_str()]);
-        // An annual offering carries the auto-renewal notice, dated today; a
-        // one-off carries none (story 4).
-        let notice = renewal_notice_now("annual", 120000, "USD").unwrap();
-        assert_eq!(
-            notice.headline,
-            "Renews automatically every year at 1,200.00 USD until you cancel."
-        );
-        assert_eq!(list[1]["renewal_notice"], Value::Null);
-        assert_eq!(list[1]["interval"], "one_off");
-        assert_eq!(
-            list[0],
-            json!({
-                "id": alpha,
-                "name": "Alpha plan",
-                "description": "One station.",
-                "price_minor": 120000,
-                "currency": "USD",
-                "interval": "annual",
-                "grants": {
-                    "scope": "machine",
-                    "seats": 1,
-                    "quota_erasures": null,
-                    "features": ["hub_sync", "pdf_certificates"],
-                    "term_months": 12
-                },
-                "renewal_notice": {"headline": notice.headline, "detail": notice.detail},
-            })
-        );
+    // Signed-in owner and member, and a stale cookie, see the same body.
+    for cookie in [
+        f.owner.cookie.as_str(),
+        f.member.cookie.as_str(),
+        "wipehub_session=not-a-real-session",
+    ] {
+        let v = ok_json(f.hub.get("/api/offerings", Some(cookie)).await).await;
+        assert_eq!(v, anonymous, "cookie {cookie}");
     }
+
+    // The read writes no audit row.
+    let audit_after = f.audit_count().await;
+    assert_eq!(audit_after, audit_before);
 }
 
 // ---------------------------------------------------------------------------

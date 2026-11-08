@@ -211,7 +211,7 @@ export function isHttpUrl(url: string): boolean {
 // ---------------------------------------------------------------------------
 // Calls
 
-/** `GET /api/offerings` (signed in): published offerings, by name. */
+/** `GET /api/offerings` (public): published offerings, by name. */
 export async function fetchCatalog(fetchImpl: Fetch = fetch): Promise<CatalogOffering[]> {
   const res = await ensureOk(await request(fetchImpl, "GET", "/api/offerings"));
   return (await json(res, isCatalog, "catalog")).offerings;

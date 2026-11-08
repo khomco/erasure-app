@@ -1,8 +1,9 @@
 //! Orders and the customer catalog (offerings-and-payments stories 2, 3 and
 //! 4, CAP-2 to CAP-4): the data layer behind [`crate::order_routes`].
 //!
-//! - **Catalog**: published offerings only, by lower-cased name, then id. An
-//!   annual offering carries the owner-approved auto-renewal notice
+//! - **Catalog**: public, no session (story 5), published offerings only,
+//!   by lower-cased name, then id. An annual offering carries the
+//!   owner-approved auto-renewal notice
 //!   ([`crate::entitlements::renewal_notice`]); a one-off carries none.
 //! - **An order snapshots** the offering's name, price, currency, interval
 //!   and grants, so retiring the offering never changes what was bought.
@@ -55,7 +56,7 @@ pub fn subject(id: Uuid) -> String {
 // ---------------------------------------------------------------------------
 // Shapes
 
-/// A published offering as a customer sees it.
+/// A published offering as anyone sees it (the catalog is public).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogOffering {
     pub id: Uuid,

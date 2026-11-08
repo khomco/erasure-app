@@ -196,8 +196,10 @@ and the drift-gate contract).
   as `/standards/`: the NIST SP 800-88 Rev. 2 / IEEE 2883-2022 self-attestation target, R2v3
   alignment, and a "Certification roadmap: future targets" section with one planned capability
   per target and its year. Shipped with product, segment, pricing, contact and legal pages.
-  W-R4 is met; W-R5 only in part: `/pricing/` says "early-access pricing on request", and the
-  generated tier→feature matrix waits for `offerings-and-payments`.*
+  W-R4 is met; W-R5 only in part: since `offerings-and-payments` story 5 (2026-11-08) a build
+  given `PRICING_HUB_ORIGIN` lists the hub's published offerings with live prices (otherwise
+  `/pricing/` still says "early-access pricing on request"); the generated tier→feature matrix
+  is still W3.3.*
 - ~~W1.4 Capability-status component + frontmatter schema (W-R12), with the
   status of the mock backend stated on the record.~~ *Shipped 2026-11-05 as a shared
   capability list (`sites/www/src/data/capabilities.ts`) with the ADR-0006 §2 vocabulary

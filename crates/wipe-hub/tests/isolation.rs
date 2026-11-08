@@ -121,7 +121,11 @@ const ROUTES: &[(&str, &str, Class)] = &[
     ("GET", "/api/organization/invitations", Customer),
     ("POST", "/api/organization/invitations", Customer),
     ("POST", "/api/organization/invitations/:id/revoke", Customer),
-    ("GET", "/api/offerings", Customer),
+    (
+        "GET",
+        "/api/offerings",
+        Anonymous("published offerings only; the public price list, no organization's records"),
+    ),
     ("POST", "/api/checkout", Customer),
     ("GET", "/api/orders", Customer),
     ("GET", "/api/orders/:id", Customer),

@@ -21,16 +21,20 @@ export const CSRF_ERROR = "missing or invalid CSRF token";
  * `PUBLIC_HUB_ORIGIN` as an origin (`scheme://host[:port]`), or `""` when it
  * is unset or blank (the forms stay closed). Anything but a bare http(s)
  * origin throws, so a typo fails the build instead of shipping a form that
- * posts nowhere.
+ * posts nowhere. `name` is the variable the errors name (the pricing page
+ * passes `PRICING_HUB_ORIGIN`, offerings-and-payments story 5).
  */
-export function parseHubOrigin(value: string | undefined | null): string {
+export function parseHubOrigin(
+  value: string | undefined | null,
+  name: string = "PUBLIC_HUB_ORIGIN",
+): string {
   const v = (value ?? "").trim();
   if (v === "") return "";
   let url: URL;
   try {
     url = new URL(v);
   } catch {
-    throw new Error(`PUBLIC_HUB_ORIGIN ${JSON.stringify(v)} is not a URL`);
+    throw new Error(`${name} ${JSON.stringify(v)} is not a URL`);
   }
   if (
     !["http:", "https:"].includes(url.protocol) ||
@@ -43,7 +47,7 @@ export function parseHubOrigin(value: string | undefined | null): string {
     v.endsWith("#")
   ) {
     throw new Error(
-      `PUBLIC_HUB_ORIGIN ${JSON.stringify(v)} must be an http(s) origin such as http://localhost:7900`,
+      `${name} ${JSON.stringify(v)} must be an http(s) origin such as http://localhost:7900`,
     );
   }
   return url.origin;
