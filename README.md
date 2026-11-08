@@ -79,6 +79,12 @@ pnpm install && pnpm --filter www build && pnpm --filter www test
 
 # Run the two-station demo end-to-end (mDNS discovery + erase + cert verify):
 ./scripts/demo.sh
+
+# Run the commerce demo end-to-end (needs `docker compose up -d`; uses its own
+# throwaway database and ports 7910/7890, overridable with HUB_PORT/STATION_PORT):
+# vendor admin + offering, customer sign-up + email verification, Fake payment,
+# release download + SHA-256 check, station licence, licensed cert verified offline.
+./scripts/commerce-demo.sh
 ```
 
 
