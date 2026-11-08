@@ -238,46 +238,72 @@ the hardware in front of them. See ADR-0002.
 
 ### Job orchestration
 
-> **Glossary and code agree.** The ADR-0001 model below shipped in
+> **Glossary and code agree on names.** The ADR-0001 model below shipped in
 > v0.2 (§11 #2): `Job` → `ErasureEvent`, a new outer `Job`,
 > `JobEvent` → `JobUpdate`. `JobEvent` no longer exists anywhere in
 > the codebase. Use these terms in code, docs and design discussion
-> without qualification.
+> without qualification. Where an entry describes more behaviour than
+> the code has, it says so in a **Today:** line.
 
 - **Job** — the goal-oriented unit of work: process this **Asset**
   (or freeform `Device`+`asset_tag` in Simple mode) to a terminal
   disposition. Composes one or more typed events and signs one
   **Certificate** covering the full evidence chain. *Avoid: erasure,
-  wipe, "the run".*
+  wipe, "the run".* **Today:** only a Job reaching `Erased` or
+  `PendingCoSign` with at least one erasure activity gets a
+  certificate; an Aborted Job, or one escalated before any erasure,
+  gets none.
 - **JobState** — outer state machine: `Queued → InProgress →
   (Erased | PendingCoSign → Destroyed | Quarantined | Aborted)`.
   Reflects the Asset's terminal disposition, not the progress of any
-  single attempt.
-- **PendingCoSign** — the audit-honest waypoint on the Destroy path: the
+  single attempt. **Today:** `Quarantined` is declared (and counts as
+  terminal) but nothing ever moves a Job into it. The diagram also
+  omits two real paths: `Queued → PendingCoSign` (escalation before
+  the Job starts) and `→ Aborted` from any non-terminal state,
+  `PendingCoSign` included.
+- **PendingCoSign** — the waypoint on the Destroy path: the
   Asset has been physically destroyed (or scheduled for it), a
   **DestructionEvent** has captured the evidence, and the Job is waiting
-  for supervisor co-sign on its **DestructionManifest**. The certificate
-  is generated *at* PendingCoSign with `media_status.operational =
-  false`; co-sign attaches the second signature and moves the Job to
-  `Destroyed`. Not a terminal state. *Avoid: "pending", "awaiting
-  approval" — the co-signature is the specific thing being waited on.*
+  for supervisor co-sign on its **DestructionManifest**. Not a terminal
+  state. *Avoid: "pending", "awaiting approval" — the co-signature is
+  the specific thing being waited on.* **Today:** the certificate is
+  signed the moment the Job enters PendingCoSign, with
+  `media_status.operational = false` and a disposition already reading
+  `Destroyed`, before any supervisor has acted; it is servable in that
+  form even if the manifest is never co-signed. Co-sign adds a second
+  signature block, but it is made with the same station signing key and
+  the supervisor is only a recorded name (`OperatorRef`), so it is not
+  an independent signature. A Job escalated before any erasure activity
+  gets no certificate at all, and co-signing a manifest containing it is
+  refused. The co-signature's signer and role sit outside the signed
+  bytes, and `verify-cert` never checks co-signatures. Aborting a
+  PendingCoSign Job is allowed, and its already-signed certificate
+  claiming `Destroyed` stays servable. ADR-0011 (destruction by operator attestation: optional
+  concurrence, one certificate signed when destruction is complete) is
+  accepted and replaces this flow, but is not built.
 - **AssetDisposition** — the resolved terminal outcome
   (`Erased | Destroyed | Quarantined`) stated explicitly on the
   certificate so an auditor never re-derives it from the activity chain.
 - **ErasureEvent** — one attempted wipe within a Job. Carries the
   inner state machine, the chosen `Method`, the captured
-  `CommandEvidence`, the resulting `VerificationReport`, and the
-  station id (so cross-station retries can be analysed). A Job may
-  contain several (retries; method fallback). A cryptographic
-  instant-purge counts as one ErasureEvent that completes in
-  milliseconds. *Avoid: erasure, wipe-attempt, "the job" — that's
-  the outer unit.*
+  `CommandEvidence` and a `station_id` slot. The model allows a Job
+  to contain several (retry, method fallback, cross-station analysis
+  by station id). A cryptographic instant-purge counts as one
+  ErasureEvent that completes in milliseconds. *Avoid: erasure,
+  wipe-attempt, "the job" — that's the outer unit.* **Today:** a Job
+  holds at most one ErasureEvent — there is no retry and no method
+  fallback (the runner's comments cite a `retry_erasure` that does not
+  exist) — and `station_id` is always empty. The sampled-read report is
+  not on the ErasureEvent; it is on the sibling **VerificationEvent**.
 - **ErasureEventState** — inner state machine: `Queued → Probing →
-  (Unfreezing) → Confirming → Running → Verifying → GeneratingCert →
-  Signing → Completed`, with `Failed` and `Aborted` as terminal
-  escapes. Note that a `Failed` ErasureEvent does **not** fail the
-  Job — the Job stays `InProgress` awaiting an operator decision
-  (retry, fall back to another Method, or escalate to Destroy).
+  (Unfreezing) → Confirming → Running → Completed`, with `Failed` and
+  `Aborted` as terminal escapes. Verification, certificate generation
+  and signing are not inner states: they happen on the outer Job. A
+  `Failed` ErasureEvent does **not** fail the Job — the Job stays
+  `InProgress` awaiting an operator decision. **Today** that decision
+  is escalate to Destroy or abort; retrying or falling back to another
+  Method is not built. A backend error mid-attempt leaves the
+  ErasureEvent stuck in whatever state it had reached, never `Failed`.
 - **JobActivity** — the sum type of everything a Job composes:
   `Diagnostic | HealthCheck | Erasure | Verification | Destruction`.
   A Job carries `activities: Vec<JobActivity>` in event order and the
@@ -286,14 +312,26 @@ the hardware in front of them. See ADR-0002.
 - **VerificationEvent** — post-erasure sampled-read check, appended by
   the runner as a sibling activity naming the ErasureEvent it ran
   against. **Live.** (This settles one of the §12 open questions in
-  favour of sibling-event over embedded-in-ErasureEvent; the inner
-  `Verifying` state still exists and is what produces the report.)
+  favour of sibling-event over embedded-in-ErasureEvent.) There is no
+  inner verification state: the runner moves the ErasureEvent to
+  `Completed`, then runs the sampled reads and appends the
+  VerificationEvent — only when the spec asks for verification (the
+  runner's default spec does), and not at all if the backend's
+  `verify()` call errors. A failed check leaves the ErasureEvent at
+  `Completed` and the Job `InProgress`, awaiting the operator.
 - **DestructionEvent** — chain-of-custody record for physical
   destruction: method, operator, optional supervisor, manifest
   reference, optional photo references, notes. **Live** — appended by
-  `escalate_to_destroy`; it is what permits a Job to reach `Destroyed`
-  once erasure attempts are exhausted. `photo_refs` is a schema slot
-  with no capture UX (v0.3 #12).
+  `escalate_to_destroy`; it is what permits a Job to reach `Destroyed`.
+  Escalation is allowed from any non-terminal Job state, including
+  `Queued` with no erasure attempted, not only once erasure attempts
+  are exhausted. `photo_refs` is a schema slot with no capture UX
+  (v0.3 #12), and the manifest reference and `station_id` are never
+  filled in. **Today:** escalating while an erasure is Running does not
+  cancel it — the certificate is signed at PendingCoSign while the
+  drive is still being written, and a VerificationEvent may be appended
+  afterwards. Escalating a Job already in PendingCoSign appends another
+  DestructionEvent and re-signs, replacing the stored certificate.
 - **DiagnosticEvent / HealthCheckEvent** — pre-flight typed events.
   **Schema-only**: the types and `JobActivity` variants exist and
   serialise into the cert, but the runner never emits them. Whether
@@ -305,10 +343,21 @@ the hardware in front of them. See ADR-0002.
   `assembled_by`, `job_ids`, `state`
   (`Pending | Signed | Rejected`), the co-signing `supervisor` and
   `signed_at`. Distinct from **Batch**: a Batch is an ad-hoc
-  operator-UX selection, a Manifest is a persisted evidentiary
-  record that a supervisor signs. Tier 1 ships local-sync co-sign at
-  the lead station; async remote co-sign is a Tier-2 cloud feature on
-  the same schema. *Avoid: "destruction batch", "shred list".*
+  operator-UX selection, a Manifest is an evidentiary record that a
+  supervisor signs. The target is local-sync co-sign at the lead
+  station for Tier 1 and async remote co-sign as a Tier-2 cloud feature
+  on the same schema. *Avoid: "destruction batch", "shred list".*
+  **Today:** a manifest is held only in the RAM of the station it was
+  assembled on (not the lead), is lost on restart, and its id is never
+  stamped onto member Jobs or their DestructionEvents (`manifest_id` /
+  `manifest_ref` stay empty there), though each co-signature block it
+  adds to a certificate does carry it as `manifest_ref`. Co-sign happens
+  on that same station with its own key; the signer and role sit
+  outside the signed bytes and `verify-cert` never checks co-signatures
+  (see **PendingCoSign**). There is no reject route (`Rejected` is never
+  set), so a manifest whose co-sign is refused stays `Pending`, and its
+  Jobs cannot join another manifest until the station restarts. Under ADR-0011 (accepted, not built) the manifest
+  stays as the batch record but co-sign becomes optional.
 - **JobSpec** — what was asked for at Job creation: target Asset (or
   Device + asset_tag in Simple mode), classification, intent, optional
   method override, verify config, operator, WorkOrder/ticket/site
@@ -403,9 +452,12 @@ is additive.
 - **StationRole** — `Member` / `Lead` / `Console` / `Hub`. Only
   `Lead` and `Member` are wipestation instances; `Console` and `Hub`
   are non-erasing participants on the same bus.
-- **Lead** — the station within a LAN that holds canonical config,
-  audit aggregation, license state. Elected deterministically by
-  `min(started_at, id)`.
+- **Lead** — the station within a LAN intended to hold canonical
+  config, audit aggregation and licence state. Elected
+  deterministically by `min(started_at, id)`. **Today:** the Lead is
+  only elected and reported (`GET /api/fleet/lead`); it holds no
+  config, audit or licence role, and every station keeps its own
+  certificates, manifests, configuration and licence.
 - **Hub** *(deferred)* — cross-site or cross-LAN coordinator. Same
   protocol as the lead, multi-tenant aware.
 - **Cloud** *(deferred)* — multi-tenant SaaS hub run by us; tier 2
@@ -498,23 +550,42 @@ consumers.
 > below is unchanged: a station pulled off the rack yields no evidence
 > and no customer data.
 
-For PXE-booted stations:
+For PXE-booted stations, the target discipline is below. Each item is a
+design target; its **Today:** line says what the code does at present.
 
 1. Read-only OS image; no writable storage that survives reboot.
+   **Today:** there is no PXE image; the station runs as an ordinary
+   binary on a writable host.
 2. All *evidence* in RAM; certs streamed to lead/hub/cloud immediately
-   on signing.
-3. License token fetched from lead/hub at boot, RAM-resident, expires
-   if check-in stops.
+   on signing. **Today:** evidence is in RAM, but certificates stay in
+   the signing station's memory, are served by
+   `GET /api/jobs/:id/certificate`, are lost on restart, and are not
+   streamed anywhere.
+3. Licence fetched from lead/hub at boot, RAM-resident, expires if
+   check-in stops. **Today:** nothing is fetched; the licence is read
+   from a `--license` file at start and checked against
+   `--vendor-root-b64`, and the lease (watermark and erasure count) is
+   reset on every start.
 4. Signing keys never on the station. Signing happens at the lead
-   (YubiKey/PIV at supervisor desk) or in the cloud (KMS).
+   (YubiKey/PIV at supervisor desk) or in the cloud (KMS). **Today:**
+   the signing key is on the station — read from the `--key-path` file
+   (generated and written there if the file does not exist yet), or
+   generated fresh on each start when no path is given — and
+   the station signs its own certificates and co-signatures.
 5. Audit answer to *"what's on this station if pulled off the rack?"*
    is *"nothing that matters"* — no certificates, no asset records, no
    customer identifiers. Possibly a bay map describing our own bench.
+   **Today:** certificates and evidence are never written to disk, but
+   a running station holds its certificates in RAM until it stops, and
+   the signing key sits on the station (item 4).
 6. Station configuration resolves through the tiered store in ADR-0003:
    local file where writable, else a control plane keyed by station id,
    else the operator is asked, else per-session ephemeral with the loss
-   stated plainly in the UI. A PXE station typically lands on tier 2 or
-   4, and stays fully functional either way.
+   stated plainly in the UI. A PXE station would land on tier 2 or 4,
+   and stays fully functional either way. **Today:** tier 2 is a stub
+   (`ControlPlaneStore::probe` always fails, there is no HTTP client
+   and `wipe-hub` serves no such route), so a PXE station lands on tier
+   3 or 4.
 
 ## 8. Operator UX model
 
@@ -732,6 +803,12 @@ keep resolving.
    `JobUpdate`, moved the cert schema to v2, and added the
    `DestructionManifest` supervisor co-sign flow. Diagnostic and
    HealthCheck landed as schema only — see #11 below for the remainder.
+   **Not built:** retrying an erasure or falling back to another Method
+   (a Job holds at most one ErasureEvent), any transition into
+   `Quarantined`, the station id on events (always empty), and an
+   independent co-signature (co-sign uses the station's own key). The
+   Destroy path itself is to be replaced by ADR-0011 (accepted, not
+   built).
 3. ~~**At-a-glance bench status on Devices page**~~ — **SHIPPED** (see
    §10.2). Device cards are joined against `/api/jobs` by `device_id`
    and colour-coded by slot status, with a "safe to disconnect"
@@ -760,9 +837,18 @@ keep resolving.
    by ADR-0005, which chose an
    attestation *chain* over a standalone token: vendor root → licence
    certificate → station instance key → erasure certificate, with
-   entitlements and an offline lease. The remaining product work — the
-   three purchasable tiers, activation, expiry, renewal, revocation —
-   is #15.
+   entitlements and an offline lease. Shipped: the chain, licence
+   verification against `--vendor-root-b64` at start, and the
+   `evaluation` marker inside the signed certificate. **Not built:**
+   lease persistence (the watermark and erasure count reset on every
+   start, so a restart defeats rollback detection and the quota),
+   a `FileCounter` (named in comments, absent; `TpmCounter` is a
+   placeholder), enforcement of `allowed_methods`, verifying a
+   certificate from the vendor root alone (`verify-cert` still needs
+   the station's `--public-key-b64`), and station-side enforcement of
+   the **Lapse policy** (ADR-0012, accepted). The remaining product
+   work — the three purchasable tiers, activation, expiry, renewal,
+   revocation — is #15.
 9. **PDF/A-3 cert wrapping** — JSON-LD inside, human-readable PDF
    outside, single attestation artifact.
 10. ~~**Configurable bay topology + bay map**~~ — **SHIPPED** (see §10.2). A station declares its
@@ -772,6 +858,13 @@ keep resolving.
     (ADR-0002), the tiered config store that lets a customer *save* one
     (ADR-0003), and model-aware enclosure artwork (ADR-0004), plus the
     bench-setup builder and learn-by-hot-swap identify mode.
+    **Gaps:** the store's tier 2 (control plane) is a stub that always
+    reports itself unavailable; the topology store and identify mode
+    (the simulator behind it) are wired by the `wipestation` CLI only,
+    so the desktop app runs no identify mode and keeps a saved layout
+    only for the session (its default ephemeral store accepts saves
+    without the tier-3 prompt and loses them on quit);
+    and no host wires the catalog overlay.
 11. **Diagnostic / HealthCheck runtime** — the remainder of ADR-0001.
     `DiagnosticEvent` and `HealthCheckEvent` shipped as schema-only
     types and `JobActivity` variants; the runner never emits them and
@@ -791,7 +884,11 @@ keep resolving.
     inventory, cert search, seat allocation) over one multi-tenant
     `wipe-hub`. Stands up the seams ADR-0003 (`ControlPlaneStore`) and
     ADR-0005 (`HttpLicenseClient`) already declare and leave
-    unimplemented. [ROADMAP](docs/ROADMAP.md) §2 (**A**).
+    unimplemented. [ROADMAP](docs/ROADMAP.md) §2 (**A**). **Today:**
+    `wipe-hub` exists (ADR-0007) with accounts, payments, entitlements,
+    station licences and releases, but serves neither seam: it has no
+    station bay-topology route and no licence check-in, and nothing on
+    a station calls it.
 14. **First-class operator portal** — the existing React/Tauri app is
     the most mature surface; what it still needs is identity and RBAC
     (#6/#7), batch work, an exception inbox, bench ergonomics for
@@ -1000,33 +1097,44 @@ and resolve. None of these have a decided answer.
   certification; different "R2" than NIST).
 - **mDNS / DNS-SD** — multicast DNS service discovery; how stations
   find each other on a LAN.
-- **Lead** — the elected canonical station on a LAN.
+- **Lead** — the elected canonical station on a LAN. Today it is only
+  elected and reported; it holds no config, audit or licence role.
 - **Sales lead** — a person who submitted the marketing site's
   early-access or contact form: one `leads` row per email address in
   `wipe-hub`, with every submission and its consent text kept. Never the
   elected **Lead** station; code identifiers stay `lead`, prose says
   "sales lead".
 - **Hub** — station-side multi-LAN / multi-site coordinator (deferred).
-  Distinct from the vendor-side `wipe-hub` (ADR-0007), which is the
-  control plane, not a station coordinator.
+  Distinct from the vendor-side `wipe-hub` (ADR-0007), which is meant
+  to become the **Control plane** (not yet: see that entry), not a
+  station coordinator.
 - **Job** — the outcome-bearing unit of processing one Asset to a
   terminal disposition (Erased / Destroyed / Quarantined / Aborted);
-  composes one or more typed events; signs one Certificate.
-- **ErasureEvent** — one attempted wipe within a Job; multiple
-  possible per Job (retries, method fallback). This is what the v0.1
-  code called `Job`.
+  composes one or more typed events; signs one Certificate (today only
+  on reaching Erased or PendingCoSign with an erasure activity, so an
+  Aborted Job or one escalated before any erasure gets none).
+- **ErasureEvent** — one attempted wipe within a Job. The model allows
+  several per Job (retry, method fallback), but today a Job holds at
+  most one: retry is not built. This is what the v0.1 code called
+  `Job`.
 - **JobActivity** — the sum type a Job composes:
   Diagnostic | HealthCheck | Erasure | Verification | Destruction.
 - **JobUpdate** — the low-level streamed record of a running event
   (state change, progress, command, warning). Renamed from `JobEvent`
   in v0.2; `JobEvent` no longer exists.
 - **PendingCoSign** — non-terminal Job state on the Destroy path:
-  destruction evidence captured, cert generated, awaiting supervisor
-  co-sign on the DestructionManifest.
+  destruction evidence captured, awaiting supervisor co-sign on the
+  DestructionManifest. Today the cert is already signed on entry,
+  claiming `Destroyed`; a Job with no erasure activity gets none.
+  ADR-0011 (accepted, not built) replaces this.
 - **DestructionManifest** — auditor-facing grouping of N PendingCoSign
   Jobs signed off by one supervisor action; on co-sign each member
-  Job's cert gains a second, independently verifiable signature and
-  the Job becomes Destroyed. **Not** a Batch.
+  Job's cert gains a second signature block and the Job becomes
+  Destroyed. Today that block is signed with the same station key (the
+  supervisor is a recorded name, not an independent signer), its signer
+  and role sit outside the signed bytes, `verify-cert` never checks it,
+  and the manifest lives in the RAM of the station that assembled it.
+  **Not** a Batch.
 - **AssetDisposition** — the resolved terminal outcome
   (Erased / Destroyed / Quarantined) stated explicitly on the cert.
 - **Enclosure / Bank / Bay** — the physical bench hierarchy: an
@@ -1051,10 +1159,73 @@ and resolve. None of these have a decided answer.
   contract); carries default SanitizationProfile.
 - **Batch** — ad-hoc operator-UX selection of devices processed with
   shared settings; **not** a WorkOrder.
-- **Control plane** — the optional server-side service (`wipe-hub`)
-  behind both admin consoles. Optional by design: an air-gapped station
-  must reach full product value with the control plane unreachable
-  forever.
+- **Control plane** — the optional server-side service behind both
+  admin consoles, and the tier-2 store and licence source a station
+  would reach. Optional by design: an air-gapped station must reach
+  full product value with the control plane unreachable forever.
+  `wipe-hub` (ADR-0007) is meant to become it, but today it is the
+  vendor's accounts, payments, licence-issuing and downloads service
+  only: it serves neither station seam (`ControlPlaneStore`,
+  `HttpLicenseClient`), and no station talks to it.
+- **Store tier** — where a station's configuration lives (ADR-0003,
+  `StoreTier`): `local_file` (survives reboot), `control_plane`
+  (keyed by station id; a stub today that always reports itself
+  unavailable), or `ephemeral` (lost on reboot, stated in the UI).
+  ADR-0003 numbers four tiers: local file, control plane, ask the
+  operator (an ephemeral store awaiting their decision), then
+  per-session ephemeral. Configuration only; evidence never goes
+  through it.
+- **Evaluation certificate** — a certificate signed with
+  `certificate.evaluation = true` inside the signed payload, so it
+  cannot be stripped: what a station without a valid licence (none,
+  expired or not yet valid, quota used up, wrong machine, clock rolled
+  back) produces. Its signature verifies offline, but only against the
+  station's public key (`verify-cert --public-key-b64`), which changes
+  on every start for a station without `--key-path` and for every
+  desktop-app certificate. Licensing decides how a certificate is
+  marked, not whether the erasure runs (ADR-0005); the one exception is
+  ADR-0012's opt-in `stop` **Lapse policy**, accepted but not yet
+  enforced by stations.
+- **Attestation chain** — vendor root key → **Licence certificate** →
+  **Instance key** → erasure certificate (ADR-0005,
+  `wipe_license::AttestationChain`). A licensed station staples the
+  licence to each certificate it signs; an evaluation certificate
+  carries none. The vendor key never signs erasure certificates.
+- **Licence certificate** — the vendor-root-signed
+  `wipe_license::LicenseCertificate` naming one **Instance key** by its
+  id and carrying the customer's entitlements and **Lapse policy**; the
+  file form is a hub **Licence**. A station loads it from `--license`
+  and checks it against `--vendor-root-b64` at start.
+- **Instance key** — the station's own Ed25519 signing key, which signs
+  its certificates; a licence binds its key id
+  (`instance_public_key_id`), and may also require a machine
+  fingerprint (`machine_binding` or machine scope; a hash of the
+  station id), failing as wrong-machine otherwise. Today the key lives
+  on the station: read from the `--key-path` file (generated and
+  written there if the file does not exist yet, so it persists
+  afterwards), or generated fresh on each start without a path (always
+  fresh in the desktop app), in which case a licence issued to an
+  earlier key no longer installs.
+- **Lease / watermark** — the station's offline enforcement state
+  (`wipe_license::LeaseState`): the highest clock time seen (the
+  watermark, for rollback detection) and the count of licensed
+  erasures. Today it is held in RAM and reset on every start, so a
+  restart clears both; no `FileCounter` exists and `TpmCounter` is a
+  placeholder.
+- **Enclosure model / catalog** — an `EnclosureModel` is one known
+  enclosure product (vendor, product, kind, bank spec, optional `art`
+  key and verified capabilities); the catalog is the set of them,
+  bundled with the binary from `data/catalog.json` (ADR-0004). A site
+  overlay exists in code but no host wires it.
+- **Shell** — two senses. (1) **Enclosure shell**: the vector artwork
+  drawn around an Enclosure's bays on the bay map, looked up in the
+  frontend shell registry by the model's `art` key. A missing key, or
+  one whose shell does not fit the enclosure's kind, falls back to a
+  generic outline for that kind, labelled as generic. (2) **Desktop
+  shell**: the Tauri host `wipestation-desktop` (`apps/desktop/src-tauri`)
+  that runs the API and UI in one window. Today it wires no topology
+  store, licence or simulator, and uses a fresh signing key and a
+  random station id on every launch.
 - **Vendor console** — our side of the control plane: licence issuance,
   entitlements, revocation, cross-tenant support and metering.
 - **Fleet console** — the customer's side: their stations, their
