@@ -2,13 +2,20 @@
 title: 'Sessions, CSRF and rate limiting'
 type: 'feature'
 created: '2026-11-06'
-status: 'ready-for-dev'
-baseline_revision: '2c55f6864b03ebc69e896be19cabadec25248ab5'
+status: 'done'
+baseline_revision: 'ae09f17f9334c8cc1ac75797801f7db3c8956c37'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context: ['{project-root}/docs/adr/0007-hub-accounts-payments-persistence.md']
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      The portal's sign-in page 429 message ("try again in N minutes") and the home page "Sign out everywhere" button are not tested where they are wired.
+    evidence: |-
+      Only apps/portal/src/api/*.test.ts exist; signInErrorMessage and signOutEverywhere are tested as functions, but removing describe={signInErrorMessage} from SignInPage or the everywhere mutation's onSuccess from HomePage fails no test. The portal has no component-test setup; adding one is beyond this story.
+    location: >-
+      apps/portal/src/pages/SignInPage.tsx, apps/portal/src/pages/HomePage.tsx
+    severity: low
 ---
 
 <intent-contract>
@@ -71,7 +78,49 @@ The portal client fetches and sends the token, and home gains a "Sign out everyw
 
 ## Owner decisions
 
-2026-11-08, answering the attempt-1 intent-gap halt (questions under `## Auto Run Result`):
+2026-11-08, answering the attempt-1 intent-gap halt (questions under `## Auto Run Result
+
+### Attempt 2 — 2026-11-08
+
+Status: done
+
+**Summary:** story 2 shipped to the owner's decisions (Q1–Q3 all (a)), starting from the attempt-1 patch. Double-submit CSRF on every mutating `/api` request; Postgres sign-in throttles charged before the password check (5 per email, 20 per IP or IPv6 /64, 15-minute window and lock), refunded on success; one `auth.sign_in_locked` row per lock plus one `auth.sign_in_lock_summary` with the refused count; session rotation on sign-in and sign-up; the localhost-only non-`Secure` cookie policy with its start-up warning; `POST /api/auth/sign-out-everywhere`; portal token handling, 429 "try again in N minutes" and a "Sign out everywhere" button.
+
+**Files changed:**
+- `crates/wipe-hub/migrations/0004_auth_throttle.sql` — `auth_throttle` table with `refused` counter and `window_started_at` index.
+- `crates/wipe-hub/src/throttle.rs` — `charge`, `confirm_failure`, `refund`, `clear`, `purge_stale` (`SKIP LOCKED`), `LockSummary`, sign-in constants.
+- `crates/wipe-hub/src/csrf.rs` — cookie/header names, token mint and well-formedness, constant-time compare, `require` middleware, `GET /api/auth/csrf`.
+- `crates/wipe-hub/src/auth.rs` — cookie policy, IP/email keys, charge-then-verify sign-in (post-charge work in its own task), rotation, sign-out-everywhere, `peer` in audit details.
+- `crates/wipe-hub/src/accounts.rs` — `delete_user_sessions`; expired-session purge in `create_session`.
+- `crates/wipe-hub/src/config.rs` — http-non-local `Secure` start-up warning.
+- `crates/wipe-hub/src/lib.rs` — CSRF layer over `/api` (including catch-alls); `serve_on` with connect info.
+- `crates/wipe-hub/Cargo.toml`, `Cargo.lock` — `tower` dev-dependency for the in-process IPv6 test.
+- `crates/wipe-hub/tests/auth.rs` — CSRF-aware helpers and a test per matrix row, plus purge, summary, `Retry-After` and repeated-header tests.
+- `apps/portal/src/api/auth.ts`, `auth.test.ts` — cached CSRF token on every POST, one retry on a CSRF 403, `Retry-After` on `HubError`, `signOutEverywhere`, `signInErrorMessage`.
+- `apps/portal/src/pages/HomePage.tsx`, `SignInPage.tsx`, `AuthForm.tsx` — "Sign out everywhere" button; lockout message.
+- `CONTEXT.md`, `README.md` — shipped behaviour, glossary entries, new limitations (shared NAT/proxy IP key, anyone can lock an email, sign-up/resend not rate-limited until story 3).
+
+**Review findings (36):**
+- Patched (7 entries): post-charge work moved into a spawned task so a disconnect still records its outcome (medium; 4 findings); IP charged before email so a locked IP creates no rows (medium); purge summaries carry no `peer` (low; 2 findings); email truncated in Rust before `lower()` (low); three tests added for the clear-path summary, `Retry-After: 1` and the repeated CSRF header (low).
+- Deferred (1): portal page-level tests for the 429 message and the "Sign out everywhere" button (no component-test setup yet).
+- Rejected: 6 false and 13 low findings, each with its reason in the 2026-11-08 triage log above.
+
+**Follow-up review recommended: true.** Patched by verdict: medium 2, low 5. Two medium entries were patched. The specific unverified risk: moving the post-charge work into a `tokio::spawn`ed task is not covered by a disconnect test, so nothing proves a client that hangs up mid-check still has its failure confirmed or its charge refunded.
+
+**Verification (after patches):**
+- `cargo test --workspace`: 273 passed, 0 failed, exit 0 (Postgres and Mailpit up).
+- `cargo clippy -p wipe-hub --all-targets --no-deps -- -D warnings`: clean.
+- `rustfmt --edition 2021 --check` on the touched `.rs` files: clean.
+- `pnpm --filter portal typecheck && test && build`: pass, 41 tests.
+- Matrix audit: every I/O matrix row has a passing test (e.g. `concurrent_guesses_get_exactly_five_password_checks`, `hammering_a_locked_email_is_counted_not_audited_then_summarised_once`, `ipv6_peers_are_throttled_by_their_slash_64`, `secure_cookie_policy_follows_the_public_base_url_host`).
+
+**Residual risks:**
+- In-flight attempts count toward the limit, so one wrong password while 19 other sign-ins from the same IP are mid-check can lock that IP (listed in CONTEXT).
+- A charge whose task fails with a database error stays counted until the window ends (errs towards locking).
+- Anyone who knows an email can lock that account's password sign-in; the IP key is shared behind a NAT or proxy (both in CONTEXT).
+
+### Attempt 1 — 2026-11-06
+`):
 - **Q1 (simultaneous guesses): (a).** Charge each attempt before the password check, and refund it on success.
 - **Q2 (IPv6): (a).** Key IPv6 peers by their /64 prefix.
 - **Q3 (audit volume): (a).** One `auth.sign_in_locked` row per lock, plus one summary row carrying the refused count. Never one row per refused attempt.
@@ -167,6 +216,9 @@ The portal client fetches and sends the token, and home gains a "Sign out everyw
 
 ## Spec Change Log
 
+- 2026-11-08 (implementation, attempt 2): `throttle::charge` takes `&mut PgConnection` (a transaction derefs to one) rather than a generic `PgExecutor`. Its atomic `UPDATE … FROM (SELECT … FOR UPDATE)` needs a fallback `INSERT … ON CONFLICT DO NOTHING` when the key has no row yet, i.e. up to two statements, and a generic `Acquire` bound made the axum handler future non-`Send`. `confirm_failure`, `refund`, `clear` and `purge_stale` stay generic over the executor. The summary audit rows are written by the sign-in handler from the `LockSummary` values the throttle functions return, in the same transaction.
+- 2026-11-08: a charge on a key whose lock has elapsed restarts its window even if the window itself has not (otherwise the AC "move `locked_until` into the past, then the correct password signs in" cannot hold).
+
 ## Review Triage Log
 
 ### 2026-11-06 — Review pass
@@ -202,6 +254,46 @@ The portal client fetches and sends the token, and home gains a "Sign out everyw
   - `[high]` `[intent_gap]` (intent) The lockout is tested only sequentially; concurrent requests in flight run past the 5th failure — Same root cause as the first blind row.
   - `[false]` `[reject]` (intent) The lock-elapsed test moves only `locked_until`, a state real time never produces — The AC prescribes exactly this; the correct-password path tested is the one the AC names.
   - `[low]` `[reject]` (intent) The start-up warning is unit-tested on `startup_warnings`, not via the binary — `main.rs` prints that function's output through the existing, story-1-tested path.
+
+### 2026-11-08 — Review pass
+- verdicts: 36 findings — high 0, medium 5, low 25, false 6, maybe-false 0
+- findings:
+  - `[medium]` `[patch]` (blind) A dropped request (client disconnect mid-Argon2) leaves its committed charge unresolved: a lock with no `auth.sign_in_locked` row and `Retry-After: 1` for the rest of the window — Verified: `charge_sign_in` commits, then the handler awaits lookup and Argon2; axum drops the future on disconnect. Fixed: everything after the charge runs in a `tokio::spawn`ed `finish_sign_in` that the handler awaits.
+  - `[medium]` `[patch]` (blind) A locked IP still inserts a fresh `email:` row per request (email charged first, then refunded to 0), so `auth_throttle` grows without bound from a locked source — Verified (test asserted the leftover `Some(0)` row). Fixed: IP key charged first, email second, IP refunded if the email refuses; test now asserts no email row.
+  - `[low]` `[patch]` (blind) Lock-summary rows carry the current request's `peer`, including `purge_stale` summaries for unrelated keys — Real for purge summaries. Fixed: purge summaries are written with no `peer`; clear/restart summaries of the request's own key keep it; the purge test asserts it.
+  - `[false]` `[reject]` (blind) Without `ConnectInfo` the IP throttle silently switches off — carried: the intent says no IP key when ConnectInfo is absent, and the only serve path (`serve_on`) supplies it.
+  - `[low]` `[reject]` (blind) CSRF token not rotated on sign-in/sign-out — carried: intent prescribes plain double-submit reusing a well-formed cookie; cookie-tossing is a documented limitation.
+  - `[low]` `[reject]` (blind) `auth.sign_up` (and sign-out rows) do not record `rotated`/`peer` — carried: intent requires `rotated` and `peer` only on sign-in audit rows.
+  - `[low]` `[patch]` (blind) `email_key` sends the whole untruncated email to Postgres and lowercases all of it before `left()` — Real (body up to the request limit). Fixed: truncated to 254 chars in Rust before binding; same key.
+  - `[low]` `[reject]` (blind) A double-submitted correct password at the limit is told "try again in 1 minute" — Needs 4 prior failures plus a double submit the disabled button prevents; changing the copy is a customer-visible copy decision.
+  - `[low]` `[reject]` (blind) Migration lacks `CHECK (refused >= 0)` and a key-length check — Only Rust writes the table and both sign-in keys are bounded; adding guards for a hypothetical story-3 caller is beyond a direct correction.
+  - `[low]` `[defer]` (blind) Portal sign-in page and home page wiring have no tests — carried from the 2026-11-06 defer; groups with the verification-gap UI row.
+  - `[low]` `[reject]` (blind) No tests that `X-Forwarded-For` is ignored, that refused attempts skip Argon2, or for a confirm-after-restart race — the code never reads proxy headers; the concurrency test's exactly-5 `auth.sign_in_failed` rows already show refusals skip the check; the race is rare and its effect is one charge.
+  - `[low]` `[reject]` (blind) "Sign out everywhere" on an already-ended session shows an error and keeps the signed-in panel — react-query refetches `me` on focus, so a tab whose session ended elsewhere normally shows signed-out first; plain sign-out has the same pre-existing behaviour.
+  - `[low]` `[reject]` (blind) Concurrent CSRF 403s each refetch the token — efficiency only, needs several simultaneous POSTs with a stale cookie.
+  - `[medium]` `[patch]` (edge) Error or dropped request after the charge commits leaks the charge — same root cause as the first blind row; fixed there.
+  - `[medium]` `[patch]` (edge) Leaked in-flight charges give `Retry-After: 1` for up to 15 minutes — same root cause as the first blind row; with outcomes always recorded, a full unlocked key now means checks really are in flight, as the intent's `Retry-After: 1` rule assumes.
+  - `[low]` `[reject]` (edge) A success refunds an IP charge into a window restarted mid-check — needs a sign-in straddling a window boundary; effect is one charge; fix needs window plumbing through the API.
+  - `[low]` `[reject]` (edge) A sign-in completing concurrently with sign-out-everywhere keeps its new session — that sign-in is by someone holding the password and is indistinguishable from signing in just after; locking the user row adds complexity for no protection.
+  - `[low]` `[reject]` (edge) Home page stuck after a 401 from sign-out-everywhere — same as the blind row; rejected there.
+  - `[low]` `[patch]` (verification-gap) The `throttle::clear` summary on success is untested — pre-verified. Added `a_success_summarises_refusals_on_the_email_key_it_clears`.
+  - `[low]` `[patch]` (verification-gap) `Retry-After: 1` for an unlocked full key is not pinned — pre-verified. Added `a_full_but_unlocked_key_answers_retry_after_one_second`.
+  - `[low]` `[patch]` (verification-gap) The "exactly one `X-CSRF-Token` value" rule is untested — pre-verified. Added repeated-header cases (valid twice; valid plus other) to the CSRF 403 test.
+  - `[low]` `[defer]` (verification-gap) Sign-in page 429 message and home page button are not tested where wired — pre-verified; the portal has no component-test setup. Added to `deferred`.
+  - `[medium]` `[patch]` (verification-gap, other) Lookup error or disconnect after the charge leaks it — same root cause as the first blind row; fixed there.
+  - `[low]` `[reject]` (verification-gap, other) An email longer than 254 chars charges the key of its 254-char prefix — needs a registered 254-char address; anyone can already charge that key with the real address.
+  - `[low]` `[reject]` (intent) `throttle::charge` takes `&mut PgConnection`, not any executor — story 3 calls it with `&mut *tx` exactly as sign-in does; a generic `Acquire` bound made the handler non-`Send` (Spec Change Log).
+  - `[false]` `[reject]` (intent) An elapsed lock restarts the window — in real time a lock (5th failure + 15 min) never ends before its window (1st charge + 15 min), so behaviour is identical; it only matters when tests move `locked_until`.
+  - `[low]` `[patch]` (intent) Summary rows record the triggering request's `peer` — same root cause as the blind summary-peer row; fixed there.
+  - `[low]` `[reject]` (intent) The `csrf.rs` test reads the portal source with `include_str!` — the spec requires a test pinning the two strings; `wipe-hub` is not published, so `cargo package` does not apply.
+  - `[false]` `[reject]` (intent) `create_session` purging expired sessions goes beyond the intent — the Code Map allows it ("optionally purge") and a test covers it.
+  - `[low]` `[reject]` (intent) The IPv6 /64 test injects `ConnectInfo` in process instead of going through `serve_on` — the IPv4 tests prove the `serve_on` wiring; a real IPv6 listener in CI adds fragility for no new coverage.
+  - `[low]` `[reject]` (intent) The CSRF cookie round trip is never exercised by a cookie-keeping client — carried from 2026-11-06.
+  - `[low]` `[reject]` (intent) The start-up warning is tested only through `startup_warnings` — carried from 2026-11-06.
+  - `[false]` `[reject]` (intent) The first-row insert race is untested under concurrency — sign-up writes no throttle row, so the concurrent-guesses test's 20 requests race on exactly that insert path.
+  - `[low]` `[reject]` (intent) Summary auditing lives in `auth.rs`, so story 3 must repeat it — the action name `auth.sign_in_lock_summary` is sign-in specific; story 3 audits its own keys under its own action.
+  - `[false]` `[reject]` (intent) The IP key is not charged when the email key refuses — no password check runs for that attempt, so there is nothing to charge; the intent's limit is on checks.
+  - `[false]` `[reject]` (intent) Portal retry-on-403 and 429 copy go beyond "only sending the header" — both are required by the spec's tasks and use only the hub's response.
 
 ## Design Notes
 

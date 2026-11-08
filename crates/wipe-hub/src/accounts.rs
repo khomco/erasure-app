@@ -437,13 +437,15 @@ pub async fn consume_verification_token(
 }
 
 /// Start a session for `user_id`; returns the raw token for the cookie.
+/// Also purges that user's expired sessions.
 pub async fn create_session<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     user_id: Uuid,
 ) -> Result<String, sqlx::Error> {
     let token = Token::generate();
     sqlx::query(
-        "INSERT INTO sessions (token_hash, user_id, expires_at) \
+        "WITH purged AS (DELETE FROM sessions WHERE user_id = $2 AND expires_at <= now()) \
+         INSERT INTO sessions (token_hash, user_id, expires_at) \
          VALUES ($1, $2, now() + make_interval(secs => $3))",
     )
     .bind(&token.hash[..])
@@ -483,6 +485,18 @@ pub async fn delete_session<'e, E: sqlx::PgExecutor<'e>>(
         .bind(&hash[..])
         .fetch_optional(executor)
         .await
+}
+
+/// End every session of `user_id`; returns how many there were.
+pub async fn delete_user_sessions<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    user_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let done = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(user_id)
+        .execute(executor)
+        .await?;
+    Ok(done.rows_affected())
 }
 
 #[cfg(test)]

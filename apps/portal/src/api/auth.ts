@@ -33,17 +33,94 @@ export interface SignUpResult extends Account {
   verification_email_sent: boolean;
 }
 
-/** An error answered by the hub; `message` is its `{"error": …}` text. */
+/**
+ * An error answered by the hub; `message` is its `{"error": …}` text.
+ * `retryAfterSecs` is the hub's `Retry-After` (whole seconds), when sent.
+ */
 export class HubError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  readonly retryAfterSecs: number | null;
+  constructor(status: number, message: string, retryAfterSecs: number | null = null) {
     super(message);
     this.name = "HubError";
     this.status = status;
+    this.retryAfterSecs = retryAfterSecs;
   }
 }
 
+/** `Retry-After` as whole seconds; `null` when absent or not delay-seconds. */
+function retryAfter(res: Response): number | null {
+  const v = res.headers.get("Retry-After")?.trim();
+  return v && /^\d+$/.test(v) ? Number(v) : null;
+}
+
+/**
+ * What the sign-in form shows for an error: a sign-in lockout (429) says
+ * how long to wait, rounded up to whole minutes; anything else is the
+ * error's own message.
+ */
+export function signInErrorMessage(error: unknown): string {
+  if (error instanceof HubError && error.status === 429 && error.retryAfterSecs !== null) {
+    const minutes = Math.max(1, Math.ceil(error.retryAfterSecs / 60));
+    return `Too many failed sign-in attempts. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`;
+  }
+  return error instanceof Error ? error.message : "Something went wrong";
+}
+
 type Fetch = typeof fetch;
+
+/** The hub's 403 text for a missing or mismatched CSRF token (crates/wipe-hub/src/csrf.rs). */
+export const CSRF_ERROR = "missing or invalid CSRF token";
+
+let cachedCsrf: Promise<string> | null = null;
+
+/**
+ * The double-submit CSRF token from `GET /api/auth/csrf`, fetched once and
+ * cached for the page's life. The hub sets the matching cookie; every POST
+ * echoes the token in `X-CSRF-Token`.
+ */
+function csrfToken(fetchImpl: Fetch): Promise<string> {
+  if (cachedCsrf === null) {
+    const pending = fetchCsrf(fetchImpl);
+    cachedCsrf = pending;
+    // A failed fetch is not cached: the next POST tries again.
+    pending.catch(() => {
+      if (cachedCsrf === pending) cachedCsrf = null;
+    });
+  }
+  return cachedCsrf;
+}
+
+async function fetchCsrf(fetchImpl: Fetch): Promise<string> {
+  const res = await ensureOk(
+    await fetchImpl("/api/auth/csrf", {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+    }),
+  );
+  const body = await json(
+    res,
+    (v): v is { csrf_token: string } => isObject(v) && typeof v.csrf_token === "string",
+    "csrf",
+  );
+  return body.csrf_token;
+}
+
+/** Test only: forget the cached CSRF token. */
+export function resetCsrfCache(): void {
+  cachedCsrf = null;
+}
+
+async function isCsrfRejection(res: Response): Promise<boolean> {
+  if (res.status !== 403) return false;
+  try {
+    const body: unknown = await res.clone().json();
+    return isObject(body) && body.error === CSRF_ERROR;
+  } catch {
+    return false;
+  }
+}
 
 async function request(
   fetchImpl: Fetch,
@@ -51,13 +128,21 @@ async function request(
   path: string,
   body?: unknown,
 ): Promise<Response> {
-  const headers: Record<string, string> = { Accept: "application/json" };
-  const init: RequestInit = { method, headers, credentials: "same-origin" };
-  if (body !== undefined) {
-    headers["Content-Type"] = "application/json";
-    init.body = JSON.stringify(body);
-  }
-  return fetchImpl(path, init);
+  const send = async (): Promise<Response> => {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    const init: RequestInit = { method, headers, credentials: "same-origin" };
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    if (method === "POST") headers["X-CSRF-Token"] = await csrfToken(fetchImpl);
+    return fetchImpl(path, init);
+  };
+  const res = await send();
+  if (method !== "POST" || !(await isCsrfRejection(res))) return res;
+  // The cached token went stale (e.g. the cookie expired): refetch and retry once.
+  resetCsrfCache();
+  return send();
 }
 
 /** Throws a `HubError` carrying the hub's `error` message for a non-2xx. */
@@ -70,7 +155,7 @@ async function ensureOk(res: Response): Promise<Response> {
   } catch {
     // Not JSON: keep the generic message.
   }
-  throw new HubError(res.status, message);
+  throw new HubError(res.status, message, retryAfter(res));
 }
 
 async function json<T>(res: Response, guard: (v: unknown) => v is T, what: string): Promise<T> {
@@ -90,7 +175,11 @@ export async function signUp(input: SignUpInput, fetchImpl: Fetch = fetch): Prom
   return json(res, isSignUpResult, "sign-up");
 }
 
-/** `POST /api/auth/sign-in`. A wrong email or password is a 401 `HubError`. */
+/**
+ * `POST /api/auth/sign-in`. A wrong email or password is a 401 `HubError`;
+ * too many failures is a 429 `HubError` with the hub's message and its
+ * `Retry-After` in `retryAfterSecs` (see `signInErrorMessage`).
+ */
 export async function signIn(
   email: string,
   password: string,
@@ -105,6 +194,11 @@ export async function signIn(
 /** `POST /api/auth/sign-out` (204). */
 export async function signOut(fetchImpl: Fetch = fetch): Promise<void> {
   await ensureOk(await request(fetchImpl, "POST", "/api/auth/sign-out"));
+}
+
+/** `POST /api/auth/sign-out-everywhere` (204): end every session of this user. */
+export async function signOutEverywhere(fetchImpl: Fetch = fetch): Promise<void> {
+  await ensureOk(await request(fetchImpl, "POST", "/api/auth/sign-out-everywhere"));
 }
 
 /** `GET /api/auth/me`: the signed-in account, or `null` when signed out (401). */

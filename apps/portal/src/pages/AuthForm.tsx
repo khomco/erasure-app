@@ -35,11 +35,22 @@ export function Field({
   );
 }
 
-export function FormError({ error }: { error: unknown }) {
+export function FormError({
+  error,
+  describe,
+}: {
+  error: unknown;
+  /** Turns the error into its message; defaults to `error.message`. */
+  describe?: (error: unknown) => string;
+}) {
   if (!error) return null;
   return (
     <p role="alert" className="text-sm text-rose-400">
-      {error instanceof Error ? error.message : "Something went wrong"}
+      {describe
+        ? describe(error)
+        : error instanceof Error
+          ? error.message
+          : "Something went wrong"}
     </p>
   );
 }

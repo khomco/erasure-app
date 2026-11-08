@@ -45,3 +45,5 @@ lettre = { version = "=0.11.19", default-features = false, features = ["builder"
 [dev-dependencies]
 reqwest = { workspace = true }
 tempfile = { workspace = true }
+# In-process requests with a chosen peer address (IPv6 throttle test).
+tower = { workspace = true }

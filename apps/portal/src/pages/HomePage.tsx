@@ -1,6 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { fetchMe, resendVerification, signOut, type Account } from "@/api/auth";
+import {
+  fetchMe,
+  resendVerification,
+  signOut,
+  signOutEverywhere,
+  type Account,
+} from "@/api/auth";
 import { fetchHealth, type HealthReport } from "@/api/health";
 
 export function HomePage() {
@@ -79,7 +85,12 @@ function SignedIn({ account }: { account: Account }) {
     mutationFn: () => signOut(),
     onSuccess: () => queryClient.setQueryData(["me"], null),
   });
+  const everywhere = useMutation({
+    mutationFn: () => signOutEverywhere(),
+    onSuccess: () => queryClient.setQueryData(["me"], null),
+  });
   const resend = useMutation({ mutationFn: () => resendVerification() });
+  const signingOut = out.isPending || everywhere.isPending;
   const { user, organization } = account;
 
   return (
@@ -116,17 +127,35 @@ function SignedIn({ account }: { account: Account }) {
           )}
         </div>
       )}
-      <button
-        type="button"
-        onClick={() => out.mutate()}
-        disabled={out.isPending}
-        className="rounded-md border border-slate-700 px-3 py-1 hover:bg-slate-800 disabled:opacity-50"
-      >
-        Sign out
-      </button>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={() => out.mutate()}
+          disabled={signingOut}
+          className="rounded-md border border-slate-700 px-3 py-1 hover:bg-slate-800 disabled:opacity-50"
+        >
+          Sign out
+        </button>
+        <button
+          type="button"
+          onClick={() => everywhere.mutate()}
+          disabled={signingOut}
+          title="End every session of this account, on every device"
+          className="rounded-md border border-slate-700 px-3 py-1 hover:bg-slate-800 disabled:opacity-50"
+        >
+          Sign out everywhere
+        </button>
+      </div>
       {out.isError && (
         <p role="alert" className="text-rose-400">
           {out.error instanceof Error ? out.error.message : "Could not sign out"}
+        </p>
+      )}
+      {everywhere.isError && (
+        <p role="alert" className="text-rose-400">
+          {everywhere.error instanceof Error
+            ? everywhere.error.message
+            : "Could not sign out everywhere"}
         </p>
       )}
     </div>

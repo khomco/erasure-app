@@ -1,10 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
+  CSRF_ERROR,
   HubError,
   fetchMe,
   resendVerification,
+  resetCsrfCache,
   signIn,
+  signInErrorMessage,
   signOut,
+  signOutEverywhere,
   signUp,
   verifyEmail,
   type Account,
@@ -25,24 +29,59 @@ interface Call {
   url: string;
   method: string;
   body: unknown;
+  /** The `X-CSRF-Token` header sent, or `null`. */
+  csrf: string | null;
 }
 
-/** A fetch that records its call and answers `status` with `body`. */
-function respond(status: number, body?: string) {
+type Answer = { status: number; body?: string; headers?: Record<string, string> };
+
+/**
+ * A fake hub. `GET /api/auth/csrf` answers `csrf-1`, `csrf-2`, … (one per
+ * call, counted in `csrfFetches`); every other call is recorded in `calls`
+ * and answered by `answer` (given the call's index among them).
+ */
+function fakeHub(answer: (call: Call, index: number) => Answer) {
   const calls: Call[] = [];
+  let csrfFetches = 0;
   const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    calls.push({
-      url: String(input),
-      method: init?.method ?? "GET",
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url === "/api/auth/csrf" && method === "GET") {
+      csrfFetches += 1;
+      return new Response(JSON.stringify({ csrf_token: `csrf-${csrfFetches}` }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    const call: Call = {
+      url,
+      method,
       body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
-    });
+      csrf: headers["X-CSRF-Token"] ?? null,
+    };
+    calls.push(call);
+    const { status, body, headers: extra } = answer(call, calls.length - 1);
     return new Response(body ?? null, {
       status,
-      headers: body ? { "Content-Type": "application/json" } : {},
+      headers: { ...(body ? { "Content-Type": "application/json" } : {}), ...extra },
     });
   }) as typeof fetch;
-  return { impl, calls };
+  return {
+    impl,
+    calls,
+    get csrfFetches() {
+      return csrfFetches;
+    },
+  };
 }
+
+/** A fake hub answering every non-CSRF call with `status` and `body`. */
+function respond(status: number, body?: string) {
+  return fakeHub(() => ({ status, body }));
+}
+
+beforeEach(() => resetCsrfCache());
 
 function hubError(status: number, message: string) {
   return respond(status, JSON.stringify({ error: message }));
@@ -70,7 +109,9 @@ describe("signUp", () => {
     const f = respond(201, JSON.stringify({ ...account, verification_email_sent: true }));
     const r = await signUp(input, f.impl);
     expect(r).toEqual({ ...account, verification_email_sent: true });
-    expect(f.calls).toEqual([{ url: "/api/auth/sign-up", method: "POST", body: input }]);
+    expect(f.calls).toEqual([
+      { url: "/api/auth/sign-up", method: "POST", body: input, csrf: "csrf-1" },
+    ]);
   });
 
   it("surfaces a 409 duplicate email", async () => {
@@ -98,6 +139,7 @@ describe("signIn", () => {
         url: "/api/auth/sign-in",
         method: "POST",
         body: { email: "ada@example.com", password: "pw" },
+        csrf: "csrf-1",
       },
     ]);
   });
@@ -107,9 +149,59 @@ describe("signIn", () => {
     await expectHubError(signIn("a@b.co", "x", f.impl), 401, "invalid email or password");
   });
 
+  it("surfaces a 429 lockout with the hub's message", async () => {
+    const f = hubError(429, "too many failed sign-in attempts; try again later");
+    await expectHubError(
+      signIn("a@b.co", "x", f.impl),
+      429,
+      "too many failed sign-in attempts; try again later",
+    );
+  });
+
   it("falls back to a generic message for a non-JSON error", async () => {
     const f = respond(502, undefined);
     await expectHubError(signIn("a@b.co", "x", f.impl), 502, "request failed (HTTP 502)");
+  });
+
+  it("carries Retry-After on a 429 and says how many minutes to wait", async () => {
+    const locked = (retryAfter?: string) =>
+      fakeHub(() => ({
+        status: 429,
+        body: JSON.stringify({ error: "too many failed sign-in attempts; try again later" }),
+        headers:
+          retryAfter === undefined ? undefined : ({ "Retry-After": retryAfter } as Record<string, string>),
+      }));
+    const errorFor = (retryAfter?: string) =>
+      signIn("a@b.co", "x", locked(retryAfter).impl).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+
+    const err = await errorFor("895");
+    expect(err).toBeInstanceOf(HubError);
+    expect((err as HubError).retryAfterSecs).toBe(895);
+    expect(signInErrorMessage(err)).toBe(
+      "Too many failed sign-in attempts. Try again in 15 minutes.",
+    );
+    expect(signInErrorMessage(await errorFor("1"))).toBe(
+      "Too many failed sign-in attempts. Try again in 1 minute.",
+    );
+    expect(signInErrorMessage(await errorFor("61"))).toBe(
+      "Too many failed sign-in attempts. Try again in 2 minutes.",
+    );
+    // No usable Retry-After: the hub's own message.
+    for (const header of [undefined, "Wed, 21 Oct 2015 07:28:00 GMT"]) {
+      const e = await errorFor(header);
+      expect((e as HubError).retryAfterSecs).toBeNull();
+      expect(signInErrorMessage(e)).toBe("too many failed sign-in attempts; try again later");
+    }
+  });
+
+  it("describes other errors by their message", () => {
+    expect(signInErrorMessage(new HubError(401, "invalid email or password"))).toBe(
+      "invalid email or password",
+    );
+    expect(signInErrorMessage("nope")).toBe("Something went wrong");
   });
 });
 
@@ -117,7 +209,9 @@ describe("signOut", () => {
   it("posts and resolves on 204", async () => {
     const f = respond(204);
     await expect(signOut(f.impl)).resolves.toBeUndefined();
-    expect(f.calls).toEqual([{ url: "/api/auth/sign-out", method: "POST", body: undefined }]);
+    expect(f.calls).toEqual([
+      { url: "/api/auth/sign-out", method: "POST", body: undefined, csrf: "csrf-1" },
+    ]);
   });
 
   it("surfaces an error", async () => {
@@ -130,7 +224,8 @@ describe("fetchMe", () => {
   it("returns the account when signed in", async () => {
     const f = respond(200, JSON.stringify(account));
     expect(await fetchMe(f.impl)).toEqual(account);
-    expect(f.calls[0]).toMatchObject({ url: "/api/auth/me", method: "GET" });
+    expect(f.calls).toEqual([{ url: "/api/auth/me", method: "GET", body: undefined, csrf: null }]);
+    expect(f.csrfFetches).toBe(0);
   });
 
   it("returns null when not signed in", async () => {
@@ -154,7 +249,7 @@ describe("verifyEmail", () => {
     const f = respond(200, JSON.stringify({ email_verified: true }));
     await verifyEmail("tok", f.impl);
     expect(f.calls).toEqual([
-      { url: "/api/auth/verify-email", method: "POST", body: { token: "tok" } },
+      { url: "/api/auth/verify-email", method: "POST", body: { token: "tok" }, csrf: "csrf-1" },
     ]);
   });
 
@@ -173,7 +268,7 @@ describe("resendVerification", () => {
     const f = respond(202, JSON.stringify({ verification_email_sent: true }));
     await resendVerification(f.impl);
     expect(f.calls).toEqual([
-      { url: "/api/auth/verification-email", method: "POST", body: undefined },
+      { url: "/api/auth/verification-email", method: "POST", body: undefined, csrf: "csrf-1" },
     ]);
   });
 
@@ -183,5 +278,95 @@ describe("resendVerification", () => {
     [502, "the verification email could not be sent; try again later"],
   ])("surfaces %i", async (status, message) => {
     await expectHubError(resendVerification(hubError(status, message).impl), status, message);
+  });
+});
+
+describe("signOutEverywhere", () => {
+  it("posts and resolves on 204", async () => {
+    const f = respond(204);
+    await expect(signOutEverywhere(f.impl)).resolves.toBeUndefined();
+    expect(f.calls).toEqual([
+      { url: "/api/auth/sign-out-everywhere", method: "POST", body: undefined, csrf: "csrf-1" },
+    ]);
+  });
+
+  it("surfaces 401 when not signed in", async () => {
+    const f = hubError(401, "not signed in");
+    await expectHubError(signOutEverywhere(f.impl), 401, "not signed in");
+  });
+});
+
+describe("CSRF token", () => {
+  const posts: [string, (f: typeof fetch) => Promise<unknown>][] = [
+    ["sign-up", (f) => signUp({ email: "a", password: "b", name: "c", organization_name: "d" }, f)],
+    ["sign-in", (f) => signIn("a@b.co", "pw", f)],
+    ["sign-out", (f) => signOut(f)],
+    ["sign-out-everywhere", (f) => signOutEverywhere(f)],
+    ["verify-email", (f) => verifyEmail("tok", f)],
+    ["verification-email", (f) => resendVerification(f)],
+  ];
+
+  it.each(posts)("%s sends X-CSRF-Token from /api/auth/csrf", async (_, call) => {
+    const f = respond(500, JSON.stringify({ error: "internal error" }));
+    await call(f.impl).catch(() => undefined);
+    expect(f.csrfFetches).toBe(1);
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0].method).toBe("POST");
+    expect(f.calls[0].csrf).toBe("csrf-1");
+  });
+
+  it("is fetched once and reused across POSTs", async () => {
+    const f = respond(204);
+    await signOut(f.impl);
+    await signOut(f.impl);
+    await resendVerification(f.impl).catch(() => undefined);
+    expect(f.csrfFetches).toBe(1);
+    expect(f.calls.map((c) => c.csrf)).toEqual(["csrf-1", "csrf-1", "csrf-1"]);
+  });
+
+  it("refetches and retries once after a CSRF 403", async () => {
+    const f = fakeHub((_, i) =>
+      i === 0
+        ? { status: 403, body: JSON.stringify({ error: CSRF_ERROR }) }
+        : { status: 200, body: JSON.stringify(account) },
+    );
+    expect(await signIn("ada@example.com", "pw", f.impl)).toEqual(account);
+    expect(f.csrfFetches).toBe(2);
+    expect(f.calls.map((c) => [c.url, c.csrf, c.body])).toEqual([
+      ["/api/auth/sign-in", "csrf-1", { email: "ada@example.com", password: "pw" }],
+      ["/api/auth/sign-in", "csrf-2", { email: "ada@example.com", password: "pw" }],
+    ]);
+  });
+
+  it("gives up after a second CSRF 403", async () => {
+    const f = hubError(403, CSRF_ERROR);
+    await expectHubError(signOut(f.impl), 403, CSRF_ERROR);
+    expect(f.calls).toHaveLength(2);
+    expect(f.csrfFetches).toBe(2);
+  });
+
+  it("does not retry other 403s", async () => {
+    const f = hubError(403, "forbidden");
+    await expectHubError(signOut(f.impl), 403, "forbidden");
+    expect(f.calls).toHaveLength(1);
+    expect(f.csrfFetches).toBe(1);
+  });
+
+  it("does not cache a failed token fetch", async () => {
+    let fail = true;
+    const calls: string[] = [];
+    const impl = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url === "/api/auth/csrf") {
+        if (fail) return new Response(null, { status: 502 });
+        return new Response(JSON.stringify({ csrf_token: "good" }), { status: 200 });
+      }
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    await expectHubError(signOut(impl), 502, "request failed (HTTP 502)");
+    fail = false;
+    await signOut(impl);
+    expect(calls).toEqual(["/api/auth/csrf", "/api/auth/csrf", "/api/auth/sign-out"]);
   });
 });

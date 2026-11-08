@@ -253,6 +253,14 @@ pub fn startup_warnings(config: &Config) -> Vec<String> {
                 .to_string(),
         ),
     }
+    let base = &config.public_base_url;
+    if base.scheme() == "http" && crate::auth::secure_cookies(base) {
+        out.push(format!(
+            "--public-base-url {base} is http on a non-local host: session and CSRF cookies \
+             are marked Secure, which browsers will not keep over http, so nobody can sign in; \
+             serve the hub over https or use a localhost URL for development"
+        ));
+    }
     if config.portal_dir.is_none() {
         let looked = std::env::current_dir()
             .map(|cwd| cwd.join(DEFAULT_PORTAL_DIR))
@@ -592,6 +600,32 @@ mod tests {
             .unwrap_or_else(|| panic!("{warnings:?}"));
         assert!(w.contains(PORTAL_BUILD_HINT), "{w}");
         assert!(w.contains("--portal-dir"), "{w}");
+    }
+
+    #[test]
+    fn http_on_a_non_local_host_warns_about_secure_cookies() {
+        let warned = |base: &str| {
+            let mut a = args();
+            a.public_base_url = base.into();
+            let c = Config::from_args(a).unwrap();
+            startup_warnings(&c)
+                .into_iter()
+                .filter(|w| w.contains("Secure"))
+                .collect::<Vec<_>>()
+        };
+        let w = warned("http://hub.example.com");
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("http://hub.example.com"), "{w:?}");
+        assert!(w[0].contains("browsers will not keep"), "{w:?}");
+        for quiet in [
+            "http://127.0.0.1:7900",
+            "http://localhost:5174",
+            "http://portal.localhost",
+            "https://hub.example.com",
+            "https://localhost",
+        ] {
+            assert!(warned(quiet).is_empty(), "{quiet}");
+        }
     }
 
     #[test]

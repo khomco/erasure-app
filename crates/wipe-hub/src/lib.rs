@@ -13,10 +13,13 @@ pub mod accounts;
 pub mod audit;
 pub mod auth;
 pub mod config;
+pub mod csrf;
 pub mod db;
 pub mod health;
 pub mod mail;
+pub mod throttle;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -68,7 +71,10 @@ pub fn router(state: AppState) -> Router {
         // must never get `index.html` back with a 200.
         .route("/api", any(api_not_found))
         .route("/api/", any(api_not_found))
-        .route("/api/*rest", any(api_not_found));
+        .route("/api/*rest", any(api_not_found))
+        // After the catch-alls, so unknown `/api` paths are covered too: every
+        // mutating `/api` request needs the double-submit CSRF token.
+        .layer(axum::middleware::from_fn(csrf::require));
 
     let site = match &state.config.portal_dir {
         Some(dir) => {
@@ -106,7 +112,12 @@ async fn portal_not_built() -> impl IntoResponse {
 
 /// Serve on an already-bound listener (tests bind port 0).
 pub async fn serve_on(listener: TcpListener, state: AppState) -> anyhow::Result<()> {
-    axum::serve(listener, router(state)).await?;
+    // Peer addresses feed the per-IP sign-in throttle.
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
