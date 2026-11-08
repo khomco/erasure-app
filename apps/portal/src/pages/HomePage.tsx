@@ -119,6 +119,12 @@ function SignedIn({ account }: { account: Account }) {
         <Link to="/organization" className="text-indigo-400 hover:underline">
           Organization and team
         </Link>
+        {/* A convenience only: the hub refuses the admin area to everyone else. */}
+        {user.role === "vendor_admin" && (
+          <Link to="/admin" className="text-indigo-400 hover:underline">
+            Admin area
+          </Link>
+        )}
       </p>
       <div className="flex gap-2">
         <button

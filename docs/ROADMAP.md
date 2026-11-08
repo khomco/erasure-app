@@ -316,6 +316,7 @@ and **0008** (station ↔ hub protocol and the reconciliation contract).
 - A1.2 Licence issuance API over the ADR-0005 chain (the signing logic already
   exists and is tested — this is custody, workflow and attribution around it).
 - A1.3 Vendor console UI: customers, licences, entitlements, issue/inspect.
+  *Customers part shipped 2026-11-08: search and audited views (portal-accounts story 5); licences and entitlements to come.*
 - A1.4 Vendor action audit log.
 - A1.5 Key custody decision and implementation — where the vendor root lives
   (HSM/KMS vs file), because a leaked root invalidates the entire trust model.

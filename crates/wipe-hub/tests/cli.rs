@@ -227,3 +227,10 @@ fn bad_portal_dir_refuses_to_start() {
     );
     assert!(stderr.contains("pnpm build"), "{stderr}");
 }
+
+#[test]
+fn admin_create_without_an_email_exits_non_zero() {
+    let out = hub().args(["admin", "create"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(combined(&out).contains("--email"), "{}", combined(&out));
+}

@@ -9,9 +9,13 @@
 //! Everything here panics (never skips) when a compose service is unreachable,
 //! and the message says `run docker compose up -d`.
 //!
+//! - [`hub`]: an in-process hub over real HTTP with CSRF-aware helpers.
+//!
 //! Use from a test file with `mod support;`.
 
 #![allow(dead_code)]
+
+pub mod hub;
 
 use std::time::{Duration, Instant};
 

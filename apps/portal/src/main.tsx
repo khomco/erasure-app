@@ -13,6 +13,8 @@ import {
 import "./index.css";
 import { AcceptInvitePage } from "./pages/AcceptInvitePage";
 import { AccountPage } from "./pages/AccountPage";
+import { AdminOrganizationPage } from "./pages/AdminOrganizationPage";
+import { AdminPage } from "./pages/AdminPage";
 import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
 import { HomePage } from "./pages/HomePage";
 import { MagicLinkPage } from "./pages/MagicLinkPage";
@@ -151,6 +153,22 @@ const acceptInviteRoute = createRoute({
   },
 });
 
+// Vendor admins only; the hub enforces it (the home page merely hides the link).
+const adminRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin",
+  component: AdminPage,
+});
+
+const adminOrganizationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/organizations/$id",
+  component: function AdminOrganizationRoute() {
+    const { id } = adminOrganizationRoute.useParams();
+    return <AdminOrganizationPage id={id} />;
+  },
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   signUpRoute,
@@ -163,6 +181,8 @@ const routeTree = rootRoute.addChildren([
   accountRoute,
   organizationRoute,
   acceptInviteRoute,
+  adminRoute,
+  adminOrganizationRoute,
 ]);
 
 const router = createRouter({ routeTree });

@@ -212,3 +212,34 @@ async fn invitations_accept_owner_and_member_roles_and_32_byte_unique_hashes() {
         assert!(indexes.iter().any(|i| i == want), "{want} in {indexes:?}");
     }
 }
+
+#[tokio::test]
+async fn at_most_one_organization_is_the_vendor_organization() {
+    let t = TestDb::migrated().await;
+    let insert = |name: &'static str, is_vendor: bool| {
+        let pool = t.pool.clone();
+        async move {
+            sqlx::query("INSERT INTO organizations (name, is_vendor) VALUES ($1, $2)")
+                .bind(name)
+                .bind(is_vendor)
+                .execute(&pool)
+                .await
+        }
+    };
+    // The flag defaults to false, and any number of customers may exist.
+    sqlx::query("INSERT INTO organizations (name) VALUES ('Customer')")
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    insert("Another customer", false).await.unwrap();
+    insert("Vendor staff", true).await.unwrap();
+    match insert("Second vendor", true).await.unwrap_err() {
+        sqlx::Error::Database(d) => assert_eq!(d.constraint(), Some("organizations_one_vendor")),
+        other => panic!("expected a unique violation, got {other:?}"),
+    }
+    let vendors: i64 = sqlx::query_scalar("SELECT count(*) FROM organizations WHERE is_vendor")
+        .fetch_one(&t.pool)
+        .await
+        .unwrap();
+    assert_eq!(vendors, 1);
+}

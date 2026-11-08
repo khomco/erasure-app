@@ -83,6 +83,50 @@ pub struct Args {
     pub portal_dir: Option<PathBuf>,
 }
 
+/// Raw `wipe-hub admin create` flags (portal-accounts story 5). The
+/// connection and mail flags are `serve`'s, with the same env twins and
+/// defaults.
+#[derive(Debug, Clone, Parser)]
+pub struct AdminCreateArgs {
+    /// Email address of the new vendor admin; the set-password link goes here.
+    #[arg(long)]
+    pub email: String,
+    /// Display name. Defaults to the email's local part.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Postgres connection URL.
+    #[arg(
+        long,
+        env = "WIPE_HUB_DATABASE_URL",
+        default_value = DEFAULT_DATABASE_URL,
+        hide_env_values = true
+    )]
+    pub database_url: String,
+    /// SMTP host for outgoing mail (Mailpit locally).
+    #[arg(long, env = "WIPE_HUB_SMTP_HOST", default_value = DEFAULT_SMTP_HOST)]
+    pub smtp_host: String,
+    /// SMTP port for outgoing mail.
+    #[arg(long, env = "WIPE_HUB_SMTP_PORT", default_value_t = DEFAULT_SMTP_PORT)]
+    pub smtp_port: u16,
+    /// Sender of every email the hub sends, as a mailbox
+    /// (`Name <address>` or a bare address).
+    #[arg(long, env = "WIPE_HUB_MAIL_FROM", default_value = DEFAULT_MAIL_FROM)]
+    pub mail_from: String,
+    /// Absolute URL the hub is reached at, used in the emailed link.
+    #[arg(long, env = "WIPE_HUB_PUBLIC_BASE_URL", default_value = DEFAULT_PUBLIC_BASE_URL)]
+    pub public_base_url: String,
+}
+
+/// `--mail-from` as a mailbox, or [`ConfigError::BadMailFrom`].
+pub fn parse_mail_from(value: &str) -> Result<Mailbox, ConfigError> {
+    value.trim().parse().map_err(
+        |e: lettre::address::AddressError| ConfigError::BadMailFrom {
+            value: value.to_string(),
+            reason: e.to_string(),
+        },
+    )
+}
+
 /// A loaded vendor root and where it came from.
 pub struct FileVendorRoot {
     pub path: PathBuf,
@@ -134,16 +178,7 @@ pub enum ConfigError {
 impl Config {
     pub fn from_args(args: Args) -> Result<Self, ConfigError> {
         let public_base_url = parse_base_url(&args.public_base_url)?;
-        let mail_from: Mailbox =
-            args.mail_from
-                .trim()
-                .parse()
-                .map_err(
-                    |e: lettre::address::AddressError| ConfigError::BadMailFrom {
-                        value: args.mail_from.clone(),
-                        reason: e.to_string(),
-                    },
-                )?;
+        let mail_from = parse_mail_from(&args.mail_from)?;
 
         let stripe_webhook_secret = args
             .stripe_webhook_secret
@@ -274,7 +309,7 @@ pub fn startup_warnings(config: &Config) -> Vec<String> {
     out
 }
 
-fn parse_base_url(value: &str) -> Result<Url, ConfigError> {
+pub fn parse_base_url(value: &str) -> Result<Url, ConfigError> {
     let bad = |reason: String| ConfigError::BadPublicBaseUrl {
         value: value.to_string(),
         reason,
@@ -529,6 +564,44 @@ mod tests {
             seen += 1;
         }
         assert_eq!(seen, expected.len());
+    }
+
+    #[test]
+    fn admin_create_shares_serves_connection_flags() {
+        use clap::CommandFactory;
+        let serve = Args::command();
+        let admin = AdminCreateArgs::command();
+        let shared = [
+            "database_url",
+            "smtp_host",
+            "smtp_port",
+            "mail_from",
+            "public_base_url",
+        ];
+        for id in shared {
+            let find = |cmd: &clap::Command| {
+                let arg = cmd
+                    .get_arguments()
+                    .find(|a| a.get_id().as_str() == id)
+                    .unwrap_or_else(|| panic!("--{id} missing"))
+                    .clone();
+                (
+                    arg.get_env().map(|e| e.to_os_string()),
+                    arg.get_default_values().to_vec(),
+                )
+            };
+            assert_eq!(find(&admin), find(&serve), "--{id}");
+        }
+        for arg in admin.get_arguments() {
+            let id = arg.get_id().as_str();
+            assert!(
+                shared.contains(&id) || matches!(id, "email" | "name" | "help"),
+                "unexpected --{id}"
+            );
+        }
+        assert!(AdminCreateArgs::try_parse_from(["create"]).is_err());
+        let a = AdminCreateArgs::try_parse_from(["create", "--email", "a@b.com"]).unwrap();
+        assert_eq!(a.name, None);
     }
 
     fn built_portal(root: &Path) -> PathBuf {

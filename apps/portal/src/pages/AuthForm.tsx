@@ -10,6 +10,7 @@ export function Field({
   type = "text",
   autoComplete,
   minLength,
+  required = true,
   value,
   onChange,
 }: {
@@ -18,6 +19,8 @@ export function Field({
   type?: string;
   autoComplete?: string;
   minLength?: number;
+  /** Defaults to `true`; a search box that may be empty passes `false`. */
+  required?: boolean;
   value: string;
   onChange: (v: string) => void;
 }) {
@@ -27,7 +30,7 @@ export function Field({
       <input
         name={name}
         type={type}
-        required
+        required={required}
         autoComplete={autoComplete}
         minLength={minLength}
         value={value}

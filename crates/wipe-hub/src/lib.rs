@@ -10,6 +10,8 @@
 //! A station never needs the hub to erase, sign or verify.
 
 pub mod accounts;
+pub mod admin;
+pub mod admin_routes;
 pub mod audit;
 pub mod auth;
 pub mod config;
@@ -70,6 +72,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health::health))
         .merge(auth::routes())
         .merge(team_routes::routes())
+        .merge(admin_routes::routes())
         // Unknown API paths are JSON 404s, portal or not: a typo in a client
         // must never get `index.html` back with a 200.
         .route("/api", any(api_not_found))
