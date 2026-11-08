@@ -128,6 +128,9 @@ function SignedIn({ account }: { account: Account }) {
         <Link to="/seats" className="text-indigo-400 hover:underline">
           Licence seats
         </Link>
+        <Link to="/stations" className="text-indigo-400 hover:underline">
+          Stations
+        </Link>
         {/* A convenience only: the hub refuses the admin area to everyone else. */}
         {user.role === "vendor_admin" && (
           <Link to="/admin" className="text-indigo-400 hover:underline">

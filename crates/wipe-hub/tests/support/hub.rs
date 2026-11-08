@@ -88,6 +88,19 @@ pub async fn spawn_hub_args(edit: impl FnOnce(&mut Args)) -> Hub {
     }
 }
 
+/// A hub that signs licences with a fresh file-held vendor root (licence-
+/// delivery story 1): the hub and that root.
+pub async fn spawn_hub_with_root() -> (Hub, wipe_license::VendorRoot) {
+    let root = wipe_license::VendorRoot::generate();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vendor-root.seed");
+    std::fs::write(&path, root.seed_bytes()).unwrap();
+    // The seed is read while the configuration is built, so the directory
+    // may go once the hub is up.
+    let hub = spawn_hub_args(|a| a.vendor_root_seed = Some(path)).await;
+    (hub, root)
+}
+
 pub async fn spawn_hub() -> Hub {
     spawn_hub_with(DEFAULT_SMTP_PORT).await
 }

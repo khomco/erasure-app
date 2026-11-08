@@ -326,6 +326,12 @@ and **0008** (station ↔ hub protocol and the reconciliation contract).
   with `owner`/`member`/`vendor_admin` roles (portal-accounts story 1).*
 - A1.2 Licence issuance API over the ADR-0005 chain (the signing logic already
   exists and is tested — this is custody, workflow and attribution around it).
+  *Customer side shipped 2026-11-08: an owner registers a station against a free
+  seat of a current entitlement and the hub signs its licence through
+  `wipe_license`, stores the exact file for download and audits who issued and
+  downloaded what (licence-delivery story 1). Still open: renewal reissue
+  (story 2) and vendor-admin issue, inspect and revoke (story 3); the root is
+  still file-held (A1.5).*
 - A1.3 Vendor console UI: customers, licences, entitlements, issue/inspect.
   *Customers part shipped 2026-11-08: search and audited views (portal-accounts story 5). Offerings part shipped 2026-11-08: vendor admins create, edit, publish and retire offerings, whose grants are what an entitlement will carry (offerings-and-payments story 1). Customers can buy them since 2026-11-08: checkout creates an order that only a verified payment-provider event marks paid, tested end to end with the in-process Fake provider (offerings-and-payments story 2). Since 2026-11-08 they can pay through Stripe: Stripe Checkout, the Stripe billing portal, and a signed `POST /api/payments/webhook` whose events are stored once by id and applied idempotently (offerings-and-payments story 3). Stripe has been exercised only against a local mock of its API and hand-built event fixtures, never a real account, and live payments wait on the sales-tax/VAT decision (DECISIONS D14). Since 2026-11-08 a paid order grants the organization one entitlement (seats, scope, quota, features, term), listed with its available licence seats at `/seats`; annual offerings are Stripe subscriptions whose paid renewals extend the term by a year, an owner cancels in Stripe's billing portal, and a full refund withdraws the seats, none of it touching an issued licence (offerings-and-payments story 4; renewals likewise exercised only against fixtures and the Fake provider's test actions). Issuing licences from entitlements is `licence-delivery`.*
 - A1.4 Vendor action audit log.
@@ -537,6 +543,10 @@ distribution and expiry behaviour).
 - ~~L1.1 Decide and document the evaluation stance (L-R1).~~ Decided by ADR-0012 (2026-11-08).
 - L1.2 Entitlement matrix generator + CI coverage test (L-R8).
 - L1.3 Activation UX in the operator portal (file-based, offline).
+  *Hub side shipped 2026-11-08: the customer portal's Stations page issues the
+  licence file and shows the `wipestation serve --license … --vendor-root-b64 …`
+  line (licence-delivery story 1). Installing it is still a start-up flag; the
+  bench UI has no activation screen.*
 - L1.4 Licence status surface at the bench (O-R9 / O3.5).
 - L1.5 Expiry warnings and the drop-to-evaluation transition (L-R5).
 - **Exit:** a customer can buy one station, activate it with no network, and

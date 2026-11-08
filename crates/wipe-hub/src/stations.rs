@@ -1,0 +1,763 @@
+//! Stations and their licences (licence-delivery story 1, CAP-1, CAP-2,
+//! ADR-0007 §5): an owner registers a station's instance key against one of
+//! the organization's current entitlements, the hub signs a licence for it
+//! with the configured vendor root, and anyone in the organization downloads
+//! the exact file. The only code that writes the `stations` and `licences`
+//! tables.
+//!
+//! - **Register** ([`register`]): with the entitlement row locked `FOR
+//!   UPDATE`, checks the entitlement is current (not refunded, term not
+//!   ended), the key is not already registered in the organization and a seat
+//!   is free (seats used = stations on the entitlement not released), then
+//!   signs through [`wipe_license::VendorRoot::issue`] and stores the station,
+//!   the licence file and two audit rows (`station.registered`,
+//!   `licence.issued`) in the caller's transaction. Nothing is written on
+//!   any refusal.
+//! - **The licence mirrors the entitlement exactly:** `customer_id` /
+//!   `customer_name` are the organization's id and name, the quota is the
+//!   order's `quota_erasures` (`None` is unlimited), the features its feature
+//!   names, every method is allowed, `not_before` = `issued_at` = now and
+//!   `not_after` = the entitlement's `term_end`. A machine entitlement's
+//!   licence names `machine_fingerprint(station_id)` (the bench's
+//!   `--station-id`); a site entitlement's names the entered site, or the
+//!   organization id when none was entered.
+//! - **Release** ([`release`]): frees the station's seat and marks its active
+//!   licence `superseded`, auditing `station.released` and
+//!   `licence.superseded`. The released licence file keeps verifying offline
+//!   until its own `not_after`: the hub does not distribute revocation or
+//!   supersession to stations, and nothing here can stop a station erasing
+//!   (ROADMAP §0.2).
+//! - **Download** ([`licence_document`]): the stored text, byte for byte, as
+//!   `wipe_license::save_license` would have written it
+//!   (`serde_json::to_string_pretty`), audited as `licence.downloaded`.
+//!
+//! Every query is scoped to the caller's organization: another
+//! organization's station, licence or entitlement is indistinguishable from
+//! an unknown one. Migration 0014 repeats the lifecycle rules as constraints
+//! and triggers.
+
+use base64::{engine::general_purpose::STANDARD_NO_PAD as B64, Engine as _};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sqlx::postgres::PgConnection;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
+use uuid::Uuid;
+use wipe_license::{
+    machine_fingerprint, AllowedMethods, Entitlements, Feature, Quota, Scope, VendorRoot,
+};
+
+use crate::admin::RFC3339_UTC;
+use crate::audit::{self, AuditEntry, AuditError};
+use crate::auth::actor;
+
+pub const MSG_NO_FREE_SEAT: &str = "every seat of this entitlement is in use; release a station \
+     or buy more seats";
+pub const MSG_STATION_ID_REQUIRED: &str = "a machine licence needs the station's id: the \
+     --station-id it was started with, or standalone if it has none";
+pub const MSG_BAD_INSTANCE_KEY: &str = "the instance key id must be ed25519: followed by 22 \
+     characters; copy it from the station";
+pub const MSG_ALREADY_REGISTERED: &str =
+    "a station with this instance key is already registered in your organization";
+pub const MSG_ENTITLEMENT_NOT_CURRENT: &str =
+    "this entitlement has ended or was refunded, so it has no seats to register";
+pub const MSG_ISSUANCE_UNAVAILABLE: &str =
+    "licence issuance is unavailable: this hub has no vendor root configured";
+pub const MSG_OWNER_ONLY_STATIONS: &str =
+    "only an organization owner can register or release stations";
+pub const MSG_ALREADY_RELEASED: &str = "this station has already been released";
+pub const MSG_NO_STATION: &str = "no such station";
+pub const MSG_NO_LICENCE: &str = "no such licence";
+
+/// The longest station id, label or site accepted.
+pub const TEXT_MAX_CHARS: usize = 200;
+
+/// The prefix of a `wipe_cert` public key id.
+pub const KEY_ID_PREFIX: &str = "ed25519:";
+
+/// Audit subject of one station.
+pub fn station_subject(id: Uuid) -> String {
+    format!("station:{id}")
+}
+
+/// Audit subject of one licence.
+pub fn licence_subject(id: Uuid) -> String {
+    format!("licence:{id}")
+}
+
+// ---------------------------------------------------------------------------
+// Shapes
+
+/// A licence as its organization sees it (never the file itself). Timestamps
+/// are RFC 3339 UTC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Licence {
+    /// The signed body's `license_id`.
+    pub id: Uuid,
+    /// The station row it was issued for.
+    pub station_id: Uuid,
+    pub entitlement_id: Uuid,
+    pub instance_key_id: String,
+    pub root_key_id: String,
+    pub not_after: String,
+    pub issued_at: String,
+    /// `active` or `superseded`.
+    pub status: String,
+    pub superseded_at: Option<String>,
+}
+
+/// A registered station and its latest licence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Station {
+    pub id: Uuid,
+    pub entitlement_id: Uuid,
+    /// The entitlement's offering name when it was ordered.
+    pub offering_name: String,
+    /// The entitlement's scope: `machine` or `site`.
+    pub scope: String,
+    pub instance_key_id: String,
+    /// The bench's `--station-id`, as entered.
+    pub station_id: Option<String>,
+    pub label: Option<String>,
+    pub site: Option<String>,
+    pub registered_at: String,
+    pub released_at: Option<String>,
+    /// The station's most recently issued licence.
+    pub licence: Option<Licence>,
+}
+
+#[derive(sqlx::FromRow)]
+struct StationRow {
+    id: Uuid,
+    entitlement_id: Uuid,
+    offering_name: String,
+    scope: String,
+    instance_key_id: String,
+    station_id: Option<String>,
+    label: Option<String>,
+    site: Option<String>,
+    registered_at: String,
+    released_at: Option<String>,
+    licence_id: Option<Uuid>,
+    root_key_id: Option<String>,
+    not_after: Option<String>,
+    issued_at: Option<String>,
+    licence_status: Option<String>,
+    superseded_at: Option<String>,
+}
+
+impl From<StationRow> for Station {
+    fn from(r: StationRow) -> Self {
+        let licence = match (r.licence_id, r.root_key_id, r.not_after, r.issued_at) {
+            (Some(id), Some(root_key_id), Some(not_after), Some(issued_at)) => Some(Licence {
+                id,
+                station_id: r.id,
+                entitlement_id: r.entitlement_id,
+                instance_key_id: r.instance_key_id.clone(),
+                root_key_id,
+                not_after,
+                issued_at,
+                status: r.licence_status.unwrap_or_default(),
+                superseded_at: r.superseded_at,
+            }),
+            _ => None,
+        };
+        Station {
+            id: r.id,
+            entitlement_id: r.entitlement_id,
+            offering_name: r.offering_name,
+            scope: r.scope,
+            instance_key_id: r.instance_key_id,
+            station_id: r.station_id,
+            label: r.label,
+            site: r.site,
+            registered_at: r.registered_at,
+            released_at: r.released_at,
+            licence,
+        }
+    }
+}
+
+/// `SELECT … FROM stations s …`, every column of [`StationRow`] with the
+/// station's latest licence; callers add the `WHERE` on `s`.
+fn select_stations() -> String {
+    format!(
+        "SELECT s.id, s.entitlement_id, o.offering_name, o.scope, s.instance_key_id, \
+                s.station_id, s.label, s.site, \
+                to_char(s.registered_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS registered_at, \
+                to_char(s.released_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS released_at, \
+                l.id AS licence_id, l.root_key_id, \
+                to_char(l.not_after AT TIME ZONE 'UTC', {RFC3339_UTC}) AS not_after, \
+                to_char(l.issued_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS issued_at, \
+                l.status AS licence_status, \
+                to_char(l.superseded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS superseded_at \
+         FROM stations s \
+         JOIN entitlements e ON e.id = s.entitlement_id \
+         JOIN orders o ON o.id = e.order_id \
+         LEFT JOIN LATERAL (SELECT * FROM licences \
+                            WHERE station_id = s.id \
+                            ORDER BY issued_at DESC, id DESC LIMIT 1) l ON true"
+    )
+}
+
+/// The organization's stations, released ones last, newest first.
+pub async fn list<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    organization_id: Uuid,
+) -> Result<Vec<Station>, sqlx::Error> {
+    let rows: Vec<StationRow> = sqlx::query_as(&format!(
+        "{} WHERE s.organization_id = $1 \
+         ORDER BY s.released_at IS NOT NULL, s.registered_at DESC, s.id DESC",
+        select_stations()
+    ))
+    .bind(organization_id)
+    .fetch_all(executor)
+    .await?;
+    Ok(rows.into_iter().map(Station::from).collect())
+}
+
+/// One of the organization's stations; `None` for another organization's.
+pub async fn get<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    organization_id: Uuid,
+    id: Uuid,
+) -> Result<Option<Station>, sqlx::Error> {
+    let row: Option<StationRow> = sqlx::query_as(&format!(
+        "{} WHERE s.organization_id = $1 AND s.id = $2",
+        select_stations()
+    ))
+    .bind(organization_id)
+    .bind(id)
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.map(Station::from))
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+
+/// What an owner asks to register.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterRequest {
+    pub entitlement_id: Uuid,
+    pub instance_key_id: String,
+    #[serde(default)]
+    pub station_id: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub site: Option<String>,
+}
+
+/// A validated [`RegisterRequest`]: trimmed, blanks as `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewStation {
+    pub entitlement_id: Uuid,
+    pub instance_key_id: String,
+    pub station_id: Option<String>,
+    pub label: Option<String>,
+    pub site: Option<String>,
+}
+
+/// Whether `id` (already trimmed) has the shape of a `wipe_cert` public key
+/// id: `ed25519:` and 22 chars of unpadded standard base64 encoding 16 bytes.
+pub fn is_instance_key_id(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix(KEY_ID_PREFIX) else {
+        return false;
+    };
+    rest.len() == 22
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+        && B64.decode(rest).is_ok_and(|bytes| bytes.len() == 16)
+}
+
+fn optional_text(field: &str, value: Option<&str>) -> Result<Option<String>, StationError> {
+    let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    if v.chars().count() > TEXT_MAX_CHARS {
+        return Err(StationError::BadRequest(format!(
+            "{field} must be at most {TEXT_MAX_CHARS} characters"
+        )));
+    }
+    Ok(Some(v.to_string()))
+}
+
+impl RegisterRequest {
+    /// Trim every field; check the key id's shape and the text lengths. The
+    /// machine-scope station id requirement needs the entitlement, so
+    /// [`register`] checks it.
+    pub fn validate(&self) -> Result<NewStation, StationError> {
+        let instance_key_id = self.instance_key_id.trim();
+        if !is_instance_key_id(instance_key_id) {
+            return Err(StationError::BadRequest(MSG_BAD_INSTANCE_KEY.into()));
+        }
+        Ok(NewStation {
+            entitlement_id: self.entitlement_id,
+            instance_key_id: instance_key_id.to_string(),
+            station_id: optional_text("station_id", self.station_id.as_deref())?,
+            label: optional_text("label", self.label.as_deref())?,
+            site: optional_text("site", self.site.as_deref())?,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+
+#[derive(Debug, thiserror::Error)]
+pub enum StationError {
+    /// 400 with this message.
+    #[error("{0}")]
+    BadRequest(String),
+    /// 404 with this message.
+    #[error("{0}")]
+    NotFound(&'static str),
+    /// 409 with this message.
+    #[error("{0}")]
+    Conflict(&'static str),
+    /// Signing or encoding failed, or stored data is unusable: a 500.
+    #[error("licence issuance failed: {0}")]
+    Issue(String),
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+    #[error(transparent)]
+    Audit(#[from] AuditError),
+}
+
+fn is_unique_violation(e: &sqlx::Error, constraint: &str) -> bool {
+    matches!(e, sqlx::Error::Database(d)
+        if d.code().as_deref() == Some("23505") && d.constraint() == Some(constraint))
+}
+
+// ---------------------------------------------------------------------------
+// Register
+
+/// The entitlement a registration draws from, locked `FOR UPDATE`.
+#[derive(sqlx::FromRow)]
+struct LockedEntitlement {
+    id: Uuid,
+    scope: String,
+    seats: i32,
+    quota_erasures: Option<i64>,
+    features: Vec<String>,
+    /// RFC 3339 UTC with microseconds: exactly the stored `term_end`.
+    term_end: String,
+    current: bool,
+}
+
+/// RFC 3339 UTC with microseconds, so a timestamp round-trips through
+/// Postgres unchanged.
+const RFC3339_UTC_MICROS: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'"#;
+
+/// What [`register`] stored.
+#[derive(Debug, Clone)]
+pub struct Registered {
+    pub station: Station,
+    pub licence: Licence,
+}
+
+/// The licence's entitlements for `ent`, held by organization `org`.
+fn licence_entitlements(
+    ent: &LockedEntitlement,
+    org_id: Uuid,
+    org_name: &str,
+    new: &NewStation,
+    now: OffsetDateTime,
+    not_after: OffsetDateTime,
+) -> Result<Entitlements, StationError> {
+    let features = ent
+        .features
+        .iter()
+        .map(|f| {
+            serde_json::from_value::<Feature>(Value::String(f.clone()))
+                .map_err(|_| StationError::Issue(format!("unknown feature {f:?} on {}", ent.id)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let quota = match ent.quota_erasures {
+        None => Quota::Unlimited,
+        Some(n) => Quota::Count {
+            erasures: u64::try_from(n)
+                .map_err(|_| StationError::Issue(format!("negative quota on {}", ent.id)))?,
+        },
+    };
+    let scope = match ent.scope.as_str() {
+        "machine" => Scope::Machine {
+            fingerprint: machine_fingerprint(
+                new.station_id
+                    .as_deref()
+                    .ok_or_else(|| StationError::BadRequest(MSG_STATION_ID_REQUIRED.into()))?,
+            ),
+        },
+        "site" => Scope::Site {
+            site_id: new.site.clone().unwrap_or_else(|| org_id.to_string()),
+        },
+        other => {
+            return Err(StationError::Issue(format!(
+                "unknown scope {other:?} on {}",
+                ent.id
+            )))
+        }
+    };
+    Ok(Entitlements {
+        customer_id: org_id.to_string(),
+        customer_name: org_name.to_string(),
+        quota,
+        scope,
+        not_before: now,
+        not_after,
+        features,
+        allowed_methods: AllowedMethods::All,
+        machine_binding: None,
+    })
+}
+
+/// Register `new` for organization `organization_id` on behalf of
+/// `user_id`, signing its licence with `root`, in the caller's transaction
+/// (which the caller commits). See the module docs for the checks; any
+/// refusal returns before the first write.
+pub async fn register(
+    conn: &mut PgConnection,
+    root: &VendorRoot,
+    organization_id: Uuid,
+    user_id: Uuid,
+    new: &NewStation,
+) -> Result<Registered, StationError> {
+    let ent: LockedEntitlement = sqlx::query_as(&format!(
+        "SELECT e.id, o.scope, o.seats, o.quota_erasures, o.features, \
+                to_char(e.term_end AT TIME ZONE 'UTC', {RFC3339_UTC_MICROS}) AS term_end, \
+                (e.status <> 'refunded' AND e.term_end > now()) AS current \
+         FROM entitlements e JOIN orders o ON o.id = e.order_id \
+         WHERE e.organization_id = $1 AND e.id = $2 \
+         FOR UPDATE OF e"
+    ))
+    .bind(organization_id)
+    .bind(new.entitlement_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or(StationError::NotFound(
+        crate::order_routes::MSG_NO_ENTITLEMENT,
+    ))?;
+    if !ent.current {
+        return Err(StationError::Conflict(MSG_ENTITLEMENT_NOT_CURRENT));
+    }
+    if ent.scope == "machine" && new.station_id.is_none() {
+        return Err(StationError::BadRequest(MSG_STATION_ID_REQUIRED.into()));
+    }
+    let registered: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM stations \
+                        WHERE organization_id = $1 AND instance_key_id = $2 \
+                          AND released_at IS NULL)",
+    )
+    .bind(organization_id)
+    .bind(&new.instance_key_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if registered {
+        return Err(StationError::Conflict(MSG_ALREADY_REGISTERED));
+    }
+    // The entitlement row lock serializes registrations against it, so this
+    // count cannot go stale before the insert below.
+    let used: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM stations WHERE entitlement_id = $1 AND released_at IS NULL",
+    )
+    .bind(ent.id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if used >= i64::from(ent.seats) {
+        return Err(StationError::Conflict(MSG_NO_FREE_SEAT));
+    }
+    let org_name: String = sqlx::query_scalar("SELECT name FROM organizations WHERE id = $1")
+        .bind(organization_id)
+        .fetch_one(&mut *conn)
+        .await?;
+
+    // Microsecond precision, so the stored `issued_at` equals the signed one.
+    let now = OffsetDateTime::now_utc();
+    let now = now
+        .replace_nanosecond(now.nanosecond() / 1_000 * 1_000)
+        .map_err(|e| StationError::Issue(e.to_string()))?;
+    let not_after = OffsetDateTime::parse(&ent.term_end, &Rfc3339)
+        .map_err(|e| StationError::Issue(format!("term_end {:?}: {e}", ent.term_end)))?;
+    if not_after <= now {
+        // The term ended between the database's clock and ours.
+        return Err(StationError::Conflict(MSG_ENTITLEMENT_NOT_CURRENT));
+    }
+    let entitlements = licence_entitlements(&ent, organization_id, &org_name, new, now, not_after)?;
+
+    let station_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO stations (organization_id, entitlement_id, instance_key_id, station_id, \
+                               label, site, registered_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+    )
+    .bind(organization_id)
+    .bind(ent.id)
+    .bind(&new.instance_key_id)
+    .bind(&new.station_id)
+    .bind(&new.label)
+    .bind(&new.site)
+    .bind(user_id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|e| {
+        // A registration of the same key against another entitlement won
+        // the race: the partial unique index has the last word.
+        if is_unique_violation(&e, "stations_active_key_idx") {
+            StationError::Conflict(MSG_ALREADY_REGISTERED)
+        } else {
+            e.into()
+        }
+    })?;
+
+    let licence_id = Uuid::new_v4();
+    let certificate = root
+        .issue(
+            licence_id.to_string(),
+            new.instance_key_id.clone(),
+            entitlements,
+            now,
+        )
+        .map_err(|e| StationError::Issue(e.to_string()))?;
+    // Exactly what `wipe_license::save_license` writes.
+    let document = serde_json::to_string_pretty(&certificate)
+        .map_err(|e| StationError::Issue(e.to_string()))?;
+    let issued_at = now
+        .format(&Rfc3339)
+        .map_err(|e| StationError::Issue(e.to_string()))?;
+    let root_key_id = certificate.body.root_key_id.clone();
+    sqlx::query(
+        "INSERT INTO licences (id, organization_id, station_id, entitlement_id, \
+                               instance_key_id, root_key_id, not_after, issued_at, document) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7::text::timestamptz, $8::text::timestamptz, $9)",
+    )
+    .bind(licence_id)
+    .bind(organization_id)
+    .bind(station_id)
+    .bind(ent.id)
+    .bind(&new.instance_key_id)
+    .bind(&root_key_id)
+    .bind(&ent.term_end)
+    .bind(&issued_at)
+    .bind(&document)
+    .execute(&mut *conn)
+    .await?;
+
+    let who = actor(user_id);
+    audit::record(
+        &mut *conn,
+        &AuditEntry {
+            actor: &who,
+            action: "station.registered",
+            subject: &station_subject(station_id),
+            detail: json!({
+                "entitlement_id": ent.id,
+                "instance_key_id": new.instance_key_id,
+                "station_id": new.station_id,
+                "label": new.label,
+                "site": new.site,
+            }),
+        },
+    )
+    .await?;
+    let station = get(&mut *conn, organization_id, station_id)
+        .await?
+        .ok_or_else(|| StationError::Issue("a registered station vanished".into()))?;
+    let licence = station
+        .licence
+        .clone()
+        .ok_or_else(|| StationError::Issue("an issued licence vanished".into()))?;
+    audit::record(
+        &mut *conn,
+        &AuditEntry {
+            actor: &who,
+            action: "licence.issued",
+            subject: &licence_subject(licence_id),
+            detail: json!({
+                "station_id": station_id,
+                "entitlement_id": ent.id,
+                "instance_key_id": new.instance_key_id,
+                "root_key_id": root_key_id,
+                "not_after": licence.not_after,
+            }),
+        },
+    )
+    .await?;
+    Ok(Registered { station, licence })
+}
+
+// ---------------------------------------------------------------------------
+// Release
+
+/// Release the organization's station `id` on behalf of `user_id`, in the
+/// caller's transaction: 404 [`MSG_NO_STATION`] for an unknown or foreign
+/// one, 409 [`MSG_ALREADY_RELEASED`] if it is released. Its seat is free
+/// again and its active licence is `superseded`; audits `station.released`
+/// and `licence.superseded {reason: "station released"}`.
+pub async fn release(
+    conn: &mut PgConnection,
+    organization_id: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<Station, StationError> {
+    let released: Option<bool> = sqlx::query_scalar(
+        "SELECT released_at IS NOT NULL FROM stations \
+         WHERE organization_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(organization_id)
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    match released {
+        None => return Err(StationError::NotFound(MSG_NO_STATION)),
+        Some(true) => return Err(StationError::Conflict(MSG_ALREADY_RELEASED)),
+        Some(false) => {}
+    }
+    let (entitlement_id, instance_key_id): (Uuid, String) = sqlx::query_as(
+        "UPDATE stations SET released_by = $2, released_at = now() WHERE id = $1 \
+         RETURNING entitlement_id, instance_key_id",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let superseded: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE licences SET status = 'superseded', superseded_at = now() \
+         WHERE station_id = $1 AND status = 'active' RETURNING id",
+    )
+    .bind(id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let who = actor(user_id);
+    audit::record(
+        &mut *conn,
+        &AuditEntry {
+            actor: &who,
+            action: "station.released",
+            subject: &station_subject(id),
+            detail: json!({
+                "entitlement_id": entitlement_id,
+                "instance_key_id": instance_key_id,
+            }),
+        },
+    )
+    .await?;
+    for licence_id in superseded {
+        audit::record(
+            &mut *conn,
+            &AuditEntry {
+                actor: &who,
+                action: "licence.superseded",
+                subject: &licence_subject(licence_id),
+                detail: json!({ "station_id": id, "reason": "station released" }),
+            },
+        )
+        .await?;
+    }
+    get(&mut *conn, organization_id, id)
+        .await?
+        .ok_or_else(|| StationError::Issue("a released station vanished".into()))
+}
+
+// ---------------------------------------------------------------------------
+// Download
+
+/// The stored file of the organization's licence `id` and an audit row
+/// `licence.downloaded {station_id}` by `user_id`, in the caller's
+/// transaction; `None` (nothing audited) for an unknown or foreign licence.
+pub async fn licence_document(
+    conn: &mut PgConnection,
+    organization_id: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<Option<String>, StationError> {
+    let row: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT station_id, document FROM licences WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((station_id, document)) = row else {
+        return Ok(None);
+    };
+    audit::record(
+        &mut *conn,
+        &AuditEntry {
+            actor: &actor(user_id),
+            action: "licence.downloaded",
+            subject: &licence_subject(id),
+            detail: json!({ "station_id": station_id }),
+        },
+    )
+    .await?;
+    Ok(Some(document))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(key: &str) -> RegisterRequest {
+        RegisterRequest {
+            entitlement_id: Uuid::nil(),
+            instance_key_id: key.into(),
+            station_id: None,
+            label: None,
+            site: None,
+        }
+    }
+
+    #[test]
+    fn real_key_ids_are_accepted() {
+        let id = wipe_cert::SigningKey::generate().public_key_id();
+        assert!(is_instance_key_id(&id), "{id}");
+        let v = RegisterRequest {
+            station_id: Some("  bench-1 ".into()),
+            label: Some("   ".into()),
+            site: Some(" Floor 2 ".into()),
+            ..req(&format!("  {id}\n"))
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(v.instance_key_id, id);
+        assert_eq!(v.station_id.as_deref(), Some("bench-1"));
+        assert_eq!(v.label, None);
+        assert_eq!(v.site.as_deref(), Some("Floor 2"));
+    }
+
+    #[test]
+    fn malformed_key_ids_are_refused() {
+        for bad in [
+            "",
+            "ed25519:",
+            "ed25519:AAAAAAAAAAAAAAAAAAAAA",
+            "ed25519:AAAAAAAAAAAAAAAAAAAAAAA",
+            "ed25519:AAAAAAAAAAAAAAAAAAAA==",
+            "ed25519:AAAAAAAAAAAAAAAAAAAA-_",
+            "rsa:AAAAAAAAAAAAAAAAAAAAAA",
+            "ED25519:AAAAAAAAAAAAAAAAAAAAAA",
+            // Non-canonical trailing bits.
+            "ed25519:AAAAAAAAAAAAAAAAAAAAAB",
+        ] {
+            assert!(!is_instance_key_id(bad), "{bad}");
+            assert!(matches!(
+                req(bad).validate(),
+                Err(StationError::BadRequest(m)) if m == MSG_BAD_INSTANCE_KEY
+            ));
+        }
+        assert!(is_instance_key_id("ed25519:AAAAAAAAAAAAAAAAAAAAAA"));
+    }
+
+    #[test]
+    fn long_text_is_refused() {
+        let id = wipe_cert::SigningKey::generate().public_key_id();
+        let long = "x".repeat(TEXT_MAX_CHARS + 1);
+        let r = RegisterRequest {
+            label: Some(long),
+            ..req(&id)
+        };
+        assert!(matches!(r.validate(), Err(StationError::BadRequest(m)) if m.contains("label")));
+    }
+}

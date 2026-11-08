@@ -22,7 +22,7 @@ export function entitlementState(e: Entitlement): string {
 /**
  * `/seats`: the organization's licence seats. Every member sees the seats
  * its paid orders grant and each entitlement's term; refunded or ended
- * entitlements no longer count.
+ * entitlements no longer count. Stations take seats on `/stations`.
  */
 export function SeatsPage() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => fetchMe(), retry: false });
@@ -52,6 +52,9 @@ function SeatsSection() {
         </Link>
         <Link to="/buy" className="text-indigo-400 hover:underline">
           Buy
+        </Link>
+        <Link to="/stations" className="text-indigo-400 hover:underline">
+          Stations
         </Link>
       </p>
       {seats.isPending && <p className="text-sm text-slate-400">Loading…</p>}

@@ -31,6 +31,7 @@ import { OrganizationPage } from "./pages/OrganizationPage";
 import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SeatsPage } from "./pages/SeatsPage";
 import { SignInLinkPage } from "./pages/SignInLinkPage";
+import { StationsPage } from "./pages/StationsPage";
 import { SignInPage } from "./pages/SignInPage";
 import { SignUpPage } from "./pages/SignUpPage";
 import { UnsubscribePage } from "./pages/UnsubscribePage";
@@ -202,6 +203,12 @@ const seatsRoute = createRoute({
   component: SeatsPage,
 });
 
+const stationsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/stations",
+  component: StationsPage,
+});
+
 // The Fake payment provider's checkout URL: `{public_base_url}/checkout/fake?session=…`.
 const fakeCheckoutRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -284,6 +291,7 @@ const routeTree = rootRoute.addChildren([
   ordersRoute,
   orderRoute,
   seatsRoute,
+  stationsRoute,
   fakeCheckoutRoute,
   fakeBillingRoute,
   adminRoute,

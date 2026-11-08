@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 
 use reqwest::StatusCode;
 use serde_json::{json, Value};
-use support::hub::{spawn_hub, Hub, Who, NEW_PASSWORD, PASSWORD};
+use support::hub::{spawn_hub_with_root, Hub, Who, NEW_PASSWORD, PASSWORD};
 use support::unique_address;
 use uuid::Uuid;
 
@@ -144,6 +144,11 @@ const ROUTES: &[(&str, &str, Class)] = &[
         "/api/payments/fake/entitlements/:id/cancel",
         Customer,
     ),
+    ("GET", "/api/stations", Customer),
+    ("POST", "/api/stations", Customer),
+    ("POST", "/api/stations/:id/release", Customer),
+    ("GET", "/api/licences/:id/download", Customer),
+    ("GET", "/api/licensing/root", Customer),
     ("GET", "/api/admin/organizations", Admin),
     ("GET", "/api/admin/users", Admin),
     ("GET", "/api/admin/organizations/:id", Admin),
@@ -292,8 +297,9 @@ async fn tenant(hub: &Hub, org_name: &str, names: Option<(&str, &str)>, offering
 
 /// Everything stored about organization `org`, as JSON text: the
 /// organization row, its users, its invitations, its orders, its billing
-/// customers, its entitlements and their renewals, and its users' sessions
-/// and emailed tokens (hashes, expiries, `used_at`), each in full.
+/// customers, its entitlements and their renewals, its stations and
+/// licences, and its users' sessions and emailed tokens (hashes, expiries,
+/// `used_at`), each in full.
 async fn rows_of(hub: &Hub, org: Uuid) -> Vec<String> {
     let mut out = Vec::new();
     for sql in [
@@ -307,6 +313,8 @@ async fn rows_of(hub: &Hub, org: Uuid) -> Vec<String> {
         "SELECT row_to_json(r)::text FROM entitlement_renewals r \
          JOIN entitlements e ON e.id = r.entitlement_id \
          WHERE e.organization_id = $1 ORDER BY r.invoice_id",
+        "SELECT row_to_json(s)::text FROM stations s WHERE organization_id = $1 ORDER BY id",
+        "SELECT row_to_json(l)::text FROM licences l WHERE organization_id = $1 ORDER BY id",
         "SELECT row_to_json(s)::text FROM sessions s JOIN users u ON u.id = s.user_id \
          WHERE u.organization_id = $1 ORDER BY s.token_hash",
         "SELECT row_to_json(t)::text FROM auth_tokens t JOIN users u ON u.id = t.user_id \
@@ -375,7 +383,8 @@ async fn fresh_cookie(hub: &Hub, user_id: &str) -> String {
 
 #[tokio::test]
 async fn organization_a_never_sees_or_changes_organization_b() {
-    let hub = spawn_hub().await;
+    // With a vendor root, so registration reaches its entitlement lookup.
+    let (hub, _root) = spawn_hub_with_root().await;
     // Offerings are the vendor's, the same for every organization.
     let offering = hub.published_offering("Station annual").await;
     let a = tenant(&hub, "Alpha Works", None, &offering).await;
@@ -397,6 +406,23 @@ async fn organization_a_never_sees_or_changes_organization_b() {
     .unwrap();
     // B has a paid, renewing order (an entitlement) renewed once.
     let b_entitlement = paid_renewed_entitlement(&hub, &b.owner, &offering).await;
+    // B registered a station on it and holds its licence.
+    let b_key = wipe_cert::SigningKey::generate().public_key_id();
+    let resp = hub
+        .post(
+            "/api/stations",
+            json!({
+                "entitlement_id": b_entitlement,
+                "instance_key_id": b_key,
+                "station_id": "bravo-bench",
+            }),
+            Some(&b.owner.cookie),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: Value = resp.json().await.unwrap();
+    let b_station = body["station"]["id"].as_str().unwrap().to_string();
+    let b_licence = body["licence"]["id"].as_str().unwrap().to_string();
     let b_before = rows_of(&hub, b.org).await;
     assert!(
         b_before.iter().any(|r| r.contains(&b_entitlement)),
@@ -427,6 +453,10 @@ async fn organization_a_never_sees_or_changes_organization_b() {
         b.session.clone(),
         "cus_bravo_secret".into(),
         b_entitlement.clone(),
+        b_station.clone(),
+        b_licence.clone(),
+        b_key.clone(),
+        "bravo-bench".into(),
     ];
 
     let mut swept = 0;
@@ -445,6 +475,10 @@ async fn organization_a_never_sees_or_changes_organization_b() {
                 b.session.clone()
             } else if path.starts_with("/api/payments/fake/entitlements/") {
                 b_entitlement.clone()
+            } else if path.starts_with("/api/stations/") {
+                b_station.clone()
+            } else if path.starts_with("/api/licences/") {
+                b_licence.clone()
             } else {
                 // Only admin routes remain with `:id`; they refuse a
                 // customer before reading it.
@@ -459,6 +493,11 @@ async fn organization_a_never_sees_or_changes_organization_b() {
                 "/api/organization" => Some(json!({"name": "Alpha Works Renamed"})),
                 "/api/organization/members/:id/role" => Some(json!({"role": "owner"})),
                 "/api/checkout" => Some(json!({ "offering_id": offering })),
+                "/api/stations" if method == "POST" => Some(json!({
+                    "entitlement_id": b_entitlement,
+                    "instance_key_id": wipe_cert::SigningKey::generate().public_key_id(),
+                    "station_id": "alpha-bench",
+                })),
                 "/api/organization/invitations" if method == "POST" => {
                     Some(json!({"email": b.member.email, "role": "member"}))
                 }
@@ -482,8 +521,11 @@ async fn organization_a_never_sees_or_changes_organization_b() {
             }
             if path.contains(":id") && class == Customer {
                 // A's owner hears "no such …"; A's member is refused first,
-                // except where every role may read (an order).
-                let want = if role == "owner" || path == "/api/orders/:id" {
+                // except where every role may read (an order, a licence).
+                let want = if role == "owner"
+                    || path == "/api/orders/:id"
+                    || path == "/api/licences/:id/download"
+                {
                     StatusCode::NOT_FOUND
                 } else {
                     StatusCode::FORBIDDEN
