@@ -1,5 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 import type { Entitlement } from "@/api/orders";
 import type { Station } from "@/api/stations";
@@ -7,6 +8,9 @@ import {
   installCommand,
   KeyIdHowTo,
   preselected,
+  RenewalAction,
+  RenewedNotice,
+  StationRow,
   seatChoices,
   stationName,
   stationState,
@@ -59,6 +63,7 @@ const station: Station = {
     status: "active",
     superseded_at: null,
   },
+  renewal_available: false,
 };
 
 /** The markup's text with tags removed. */
@@ -110,6 +115,90 @@ describe("station text", () => {
   });
 });
 
+describe("renewal", () => {
+  const renewable = { ...station, renewal_available: true };
+
+  function render(s: Station, canRenew: boolean): string {
+    return text(
+      renderToStaticMarkup(
+        createElement(
+          QueryClientProvider,
+          { client: new QueryClient() },
+          createElement(RenewalAction, { station: s, canRenew }),
+        ),
+      ),
+    );
+  }
+
+  it("states a renewal is available, with the current file's end", () => {
+    expect(stationState(renewable, new Date("2026-12-01T00:00:00Z"))).toBe(
+      "Renewal available (current licence to 2027-11-08)",
+    );
+    expect(stationState(renewable, new Date("2027-12-01T00:00:00Z"))).toBe(
+      "Renewal available (current licence expired on 2027-11-08)",
+    );
+    expect(stationState({ ...renewable, released_at: "2026-12-01T00:00:00Z" })).toBe(
+      "Released on 2026-12-01",
+    );
+  });
+
+  it("lets an owner issue the renewed licence", () => {
+    expect(render(renewable, true)).toContain("Issue renewed licence");
+  });
+
+  it("tells a member an owner can issue it", () => {
+    const t = render(renewable, false);
+    expect(t).toContain("An owner can issue the renewed licence.");
+    expect(t).not.toContain("Renewal available");
+    expect(t).not.toContain("Issue renewed licence");
+  });
+
+  function renderRow(s: Station, canRelease: boolean): string {
+    return text(
+      renderToStaticMarkup(
+        createElement(
+          QueryClientProvider,
+          { client: new QueryClient() },
+          createElement(
+            "table",
+            null,
+            createElement("tbody", null, createElement(StationRow, { station: s, canRelease })),
+          ),
+        ),
+      ),
+    );
+  }
+
+  it("offers the renewal in an owner's station row and tells a member in theirs", () => {
+    const owner = renderRow(renewable, true);
+    expect(owner).toContain("Issue renewed licence");
+    expect(owner).toContain("Release");
+    const member = renderRow(renewable, false);
+    expect(member).toContain("An owner can issue the renewed licence.");
+    expect(member).not.toContain("Issue renewed licence");
+    expect(renderRow(station, true)).not.toContain("Issue renewed licence");
+  });
+
+  it("offers nothing when no renewal is available or the station is released", () => {
+    expect(render(station, true)).toBe("");
+    expect(render({ ...renewable, released_at: "2026-12-01T00:00:00Z" }, true)).toBe("");
+  });
+
+  it("links the renewed licence and says to install it", () => {
+    const renewed = {
+      ...station.licence!,
+      id: "b2c3d4e5-0000-4000-8000-000000000002",
+      not_after: "2028-11-08T10:00:00Z",
+    };
+    const html = renderToStaticMarkup(createElement(RenewedNotice, { licence: renewed }));
+    expect(html).toContain(`href="/api/licences/${renewed.id}/download"`);
+    const t = text(html);
+    expect(t).toContain("to 2028-11-08");
+    expect(t).toContain("Download the renewed licence");
+    expect(t).toContain("until then it keeps using the old file");
+  });
+});
+
 describe("guidance every member sees", () => {
   it("shows how to read the instance key id", () => {
     const t = text(renderToStaticMarkup(createElement(KeyIdHowTo)));
@@ -122,6 +211,12 @@ describe("guidance every member sees", () => {
     const t = text(renderToStaticMarkup(createElement(SupersessionNote)));
     expect(t).toContain("keeps working until its own expiry date");
     expect(t).toContain("does not send revocation or supersession to stations");
+  });
+
+  it("says a renewed licence works only once installed, and the old file until it expires", () => {
+    const t = text(renderToStaticMarkup(createElement(SupersessionNote)));
+    expect(t).toContain("uses the renewed licence only after the renewed file is installed");
+    expect(t).toContain("The old file keeps working until its own expiry date");
   });
 
   it("shows the vendor root public key and the install command", () => {

@@ -45,6 +45,12 @@ export interface Station {
   /** Set once released: its seat is free again. */
   released_at: string | null;
   licence: Licence | null;
+  /**
+   * A renewed licence can be issued: the station is not released, its
+   * entitlement is current and its latest licence ends before the
+   * entitlement's (renewed) term end. Computed by the hub.
+   */
+  renewal_available: boolean;
 }
 
 export interface Registered {
@@ -109,7 +115,8 @@ export function isStation(v: unknown): v is Station {
     isNullableString(v.site) &&
     typeof v.registered_at === "string" &&
     isNullableString(v.released_at) &&
-    (v.licence === null || isLicence(v.licence))
+    (v.licence === null || isLicence(v.licence)) &&
+    typeof v.renewal_available === "boolean"
   );
 }
 
@@ -168,6 +175,18 @@ export async function releaseStation(id: string, fetchImpl: Fetch = fetch): Prom
     await request(fetchImpl, "POST", `/api/stations/${encodeURIComponent(id)}/release`, {}),
   );
   return (await json(res, isStationBody, "station release")).station;
+}
+
+/**
+ * `POST /api/stations/{id}/reissue` (owner, 201): the station and its renewed
+ * licence, to the entitlement's current term end. The old licence is
+ * superseded; its file still works until its own expiry.
+ */
+export async function reissueStation(id: string, fetchImpl: Fetch = fetch): Promise<Registered> {
+  const res = await ensureOk(
+    await request(fetchImpl, "POST", `/api/stations/${encodeURIComponent(id)}/reissue`, {}),
+  );
+  return json(res, isRegistered, "licence reissue");
 }
 
 /** `GET /api/licensing/root` (any role): the vendor root public key, or `null`. */

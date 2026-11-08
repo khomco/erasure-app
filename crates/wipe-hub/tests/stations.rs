@@ -1,5 +1,5 @@
-//! Stations and licences (licence-delivery story 1, CAP-1, CAP-2, CAP-5): one
-//! test per row of the story's I/O matrix, through HTTP, checking the
+//! Stations and licences (licence-delivery stories 1 and 2, CAP-1, CAP-2,
+//! CAP-3, CAP-5): one test per row of each story's I/O matrix, through HTTP, checking the
 //! response, the stored rows and the audit rows. The downloaded file is
 //! installed the way `wipestation serve --license … --vendor-root-b64 …`
 //! installs it (`load_license`, `check_installable`, `evaluate` with the
@@ -17,8 +17,9 @@ use uuid::Uuid;
 use wipe_hub::order_routes::MSG_NO_ENTITLEMENT;
 use wipe_hub::stations::{
     MSG_ALREADY_REGISTERED, MSG_ALREADY_RELEASED, MSG_BAD_INSTANCE_KEY,
-    MSG_ENTITLEMENT_NOT_CURRENT, MSG_ISSUANCE_UNAVAILABLE, MSG_NO_FREE_SEAT, MSG_NO_LICENCE,
-    MSG_NO_STATION, MSG_OWNER_ONLY_STATIONS, MSG_STATION_ID_REQUIRED,
+    MSG_ENTITLEMENT_NOT_CURRENT, MSG_ISSUANCE_UNAVAILABLE, MSG_LICENCE_UP_TO_DATE,
+    MSG_NO_FREE_SEAT, MSG_NO_LICENCE, MSG_NO_STATION, MSG_OWNER_ONLY_STATIONS,
+    MSG_STATION_ID_REQUIRED,
 };
 use wipe_license::{
     check_installable, evaluate, load_license, machine_fingerprint, AllowedMethods, Feature,
@@ -162,6 +163,51 @@ impl Fixture {
             .await
     }
 
+    async fn reissue(&self, who: &Who, station: &str) -> Response {
+        self.hub
+            .post_empty(
+                &format!("/api/stations/{station}/reissue"),
+                Some(&who.cookie),
+            )
+            .await
+    }
+
+    /// The owner pays a Fake renewal of `entitlement`: its term grows by a
+    /// year.
+    async fn renew(&self, entitlement: &str) {
+        ok_json(
+            self.hub
+                .post_empty(
+                    &format!("/api/payments/fake/entitlements/{entitlement}/renew"),
+                    Some(&self.owner.cookie),
+                )
+                .await,
+            StatusCode::OK,
+        )
+        .await;
+    }
+
+    /// Move `entitlement`'s term end out by a year in SQL, as a renewal
+    /// would (the trigger allows it while the entitlement is active).
+    async fn extend_term(&self, entitlement: &str) {
+        sqlx::query(
+            "UPDATE entitlements SET term_end = term_end + interval '1 year' \
+             WHERE id = $1::uuid",
+        )
+        .bind(entitlement)
+        .execute(&self.hub.db.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn station(&self, who: &Who, id: &str) -> Value {
+        self.stations(who)
+            .await
+            .into_iter()
+            .find(|s| s["id"] == json!(id))
+            .unwrap()
+    }
+
     async fn stations(&self, who: &Who) -> Vec<Value> {
         ok_json(
             self.hub.get("/api/stations", Some(&who.cookie)).await,
@@ -247,6 +293,7 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
             "offering_name",
             "registered_at",
             "released_at",
+            "renewal_available",
             "scope",
             "site",
             "station_id"
@@ -277,6 +324,7 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
     assert_eq!(station["label"], "Bench 1");
     assert_eq!(station["site"], Value::Null);
     assert_eq!(station["released_at"], Value::Null);
+    assert_eq!(station["renewal_available"], false);
     assert_eq!(&station["licence"], licence);
     assert_eq!(licence["station_id"], json!(station_id));
     assert_eq!(licence["status"], "active");
@@ -631,7 +679,7 @@ async fn an_entitlement_that_is_not_current_unknown_or_foreign_is_refused() {
 }
 
 #[tokio::test]
-async fn members_cannot_register_or_release() {
+async fn members_cannot_register_renew_or_release() {
     let f = fixture().await;
     let v = f.register_machine(&new_key()).await;
     let station = v["station"]["id"].as_str().unwrap();
@@ -649,7 +697,15 @@ async fn members_cannot_register_or_release() {
     let resp = f.release(&f.member, station).await;
     assert_error(resp, StatusCode::FORBIDDEN, MSG_OWNER_ONLY_STATIONS).await;
     assert_eq!(f.counts().await, before);
-    assert_eq!(f.stations(&f.member).await[0]["released_at"], Value::Null);
+    // A member sees a renewal is available but cannot issue it.
+    f.renew(&f.machine).await;
+    let before = f.counts().await;
+    let resp = f.reissue(&f.member, station).await;
+    assert_error(resp, StatusCode::FORBIDDEN, MSG_OWNER_ONLY_STATIONS).await;
+    assert_eq!(f.counts().await, before);
+    let listed = f.stations(&f.member).await;
+    assert_eq!(listed[0]["released_at"], Value::Null);
+    assert_eq!(listed[0]["renewal_available"], true);
 }
 
 #[tokio::test]
@@ -672,6 +728,16 @@ async fn a_hub_without_a_vendor_root_issues_nothing() {
         MSG_ISSUANCE_UNAVAILABLE,
     )
     .await;
+    // A reissue is refused the same way, before the station is looked up.
+    for station in [Uuid::new_v4().to_string(), "not-a-uuid".to_string()] {
+        let resp = f.reissue(&f.owner, &station).await;
+        assert_error(
+            resp,
+            StatusCode::SERVICE_UNAVAILABLE,
+            MSG_ISSUANCE_UNAVAILABLE,
+        )
+        .await;
+    }
     assert_eq!(f.counts().await, before);
     let root = ok_json(
         f.hub
@@ -961,4 +1027,347 @@ async fn the_database_refuses_illegal_station_and_licence_changes() {
             .await
             .expect_err(sql);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Renewal reissue (licence-delivery story 2)
+
+#[tokio::test]
+async fn a_renewed_station_is_reissued_a_licence_to_the_new_term_end() {
+    let f = fixture().await;
+    let key = new_key();
+    let v = f.register_machine(&key).await;
+    let station = v["station"]["id"].as_str().unwrap();
+    let old = v["licence"]["id"].as_str().unwrap().to_string();
+    let old_file = f.stored_document(&old).await;
+    let term_end = f.term_end(&f.machine).await;
+    assert_eq!(
+        f.station(&f.member, station).await["renewal_available"],
+        false
+    );
+
+    // A paid renewal moves the term a year on; every role sees the renewal.
+    f.renew(&f.machine).await;
+    let renewed_end = f.term_end(&f.machine).await;
+    assert!(renewed_end > term_end + time::Duration::days(360));
+    assert_eq!(
+        f.station(&f.member, station).await["renewal_available"],
+        true
+    );
+    // The renewal itself issued nothing.
+    assert_eq!(f.hub.count("licences").await, 1);
+
+    let seats_before = ok_json(
+        f.hub.get("/api/entitlements", Some(&f.owner.cookie)).await,
+        StatusCode::OK,
+    )
+    .await["available_seats"]
+        .clone();
+    let (stations_before, licences_before, audits_before) = f.counts().await;
+    let r = ok_json(f.reissue(&f.owner, station).await, StatusCode::CREATED).await;
+    let mut keys: Vec<&String> = r.as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["licence", "station"]);
+    let licence = &r["licence"];
+    let new = licence["id"].as_str().unwrap();
+    assert_ne!(new, old);
+    assert_eq!(licence["status"], "active");
+    assert_eq!(licence["station_id"], json!(station));
+    assert_eq!(licence["entitlement_id"], json!(f.machine));
+    assert_eq!(licence["instance_key_id"], json!(key));
+    assert_eq!(licence["superseded_at"], Value::Null);
+    let s = &r["station"];
+    assert_eq!(s["id"], json!(station));
+    assert_eq!(&s["licence"], licence);
+    assert_eq!(s["renewal_available"], false);
+    assert_eq!(s["released_at"], Value::Null);
+    assert_eq!(s["station_id"], "bench-1");
+    assert_eq!(s["label"], "Bench 1");
+
+    // Same seat, same registration: one station, one more licence, two
+    // audit rows.
+    assert_eq!(
+        f.counts().await,
+        (stations_before, licences_before + 1, audits_before + 2)
+    );
+    let seats_after = ok_json(
+        f.hub.get("/api/entitlements", Some(&f.owner.cookie)).await,
+        StatusCode::OK,
+    )
+    .await["available_seats"]
+        .clone();
+    assert_eq!(seats_after, seats_before);
+    assert_eq!(f.stations(&f.owner).await.len(), 1);
+
+    // The old licence is superseded, still downloadable byte for byte.
+    let old_status: (String, bool) = sqlx::query_as(
+        "SELECT status, superseded_at IS NOT NULL FROM licences WHERE id = $1::uuid",
+    )
+    .bind(&old)
+    .fetch_one(&f.hub.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(old_status, ("superseded".to_string(), true));
+    let resp = f.download(&f.member, &old).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.text().await.unwrap(), old_file);
+
+    // The new file installs and mirrors the entitlement, to the new term end.
+    let file = f.download(&f.member, new).await.text().await.unwrap();
+    assert_eq!(file, f.stored_document(new).await);
+    let cert = install(&file, &key, &f.root);
+    let old_cert = install(&old_file, &key, &f.root);
+    assert_eq!(cert.body.license_id, new);
+    assert_eq!(cert.body.instance_public_key_id, key);
+    let ent = &cert.body.entitlements;
+    let old_ent = &old_cert.body.entitlements;
+    assert_eq!(ent.not_after, renewed_end);
+    assert_eq!(old_ent.not_after, term_end);
+    assert_eq!(ent.not_before, cert.body.issued_at);
+    assert_eq!(ent.customer_id, old_ent.customer_id);
+    assert_eq!(ent.customer_name, old_ent.customer_name);
+    assert_eq!(ent.quota, old_ent.quota);
+    assert_eq!(ent.scope, old_ent.scope);
+    assert_eq!(
+        ent.scope,
+        Scope::Machine {
+            fingerprint: machine_fingerprint("bench-1")
+        }
+    );
+    assert_eq!(ent.features, old_ent.features);
+    assert_eq!(ent.allowed_methods, old_ent.allowed_methods);
+    assert_eq!(ent.machine_binding, None);
+
+    // Now, before its own not_after, the superseded old file still works.
+    let now = OffsetDateTime::now_utc();
+    assert!(now < term_end);
+    let status = evaluate(
+        Some(old_ent),
+        &LeaseState::new(now),
+        &machine_fingerprint("bench-1"),
+        now,
+    );
+    assert!(matches!(status, LeaseStatus::Valid { .. }), "{status:?}");
+
+    // After the old term end, before the new one: the renewed file is valid
+    // and the old one has expired.
+    let later = term_end + time::Duration::days(30);
+    assert!(later < renewed_end);
+    let fingerprint = machine_fingerprint("bench-1");
+    let status = evaluate(Some(ent), &LeaseState::new(later), &fingerprint, later);
+    assert!(matches!(status, LeaseStatus::Valid { .. }), "{status:?}");
+    let status = evaluate(Some(old_ent), &LeaseState::new(later), &fingerprint, later);
+    assert!(matches!(status, LeaseStatus::Expired { .. }), "{status:?}");
+
+    // Audit.
+    let actor = format!("user:{}", f.owner.id);
+    assert_eq!(
+        f.hub.audited("licence.superseded").await,
+        [(
+            actor.clone(),
+            format!("licence:{old}"),
+            json!({ "station_id": station, "reason": "renewed", "superseded_by": new }),
+        )]
+    );
+    let issued = f.hub.audited("licence.issued").await;
+    assert_eq!(issued.len(), 2);
+    assert_eq!(
+        issued[1],
+        (
+            actor,
+            format!("licence:{new}"),
+            json!({
+                "station_id": station,
+                "entitlement_id": f.machine,
+                "instance_key_id": key,
+                "root_key_id": f.root.public_key_id(),
+                "not_after": licence["not_after"],
+                "reissue_of": old,
+            }),
+        )
+    );
+
+    // Now up to date: a second reissue is refused and writes nothing.
+    let before = f.counts().await;
+    let resp = f.reissue(&f.owner, station).await;
+    assert_error(resp, StatusCode::CONFLICT, MSG_LICENCE_UP_TO_DATE).await;
+    assert_eq!(f.counts().await, before);
+}
+
+#[tokio::test]
+async fn a_site_station_is_reissued_for_the_same_site() {
+    let f = fixture().await;
+    let mut registered = Vec::new();
+    for (site, want) in [
+        (" Dock 4 ", "Dock 4".to_string()),
+        ("", f.org_id.to_string()),
+    ] {
+        let key = new_key();
+        let v = ok_json(
+            f.register(
+                &f.owner,
+                json!({ "entitlement_id": f.site, "instance_key_id": key, "site": site }),
+            )
+            .await,
+            StatusCode::CREATED,
+        )
+        .await;
+        registered.push((v["station"]["id"].as_str().unwrap().to_string(), key, want));
+    }
+    // A one-off entitlement never renews; force the state.
+    f.extend_term(&f.site).await;
+    let term_end = f.term_end(&f.site).await;
+    for (station, key, site_id) in registered {
+        assert_eq!(
+            f.station(&f.owner, &station).await["renewal_available"],
+            true
+        );
+        let r = ok_json(f.reissue(&f.owner, &station).await, StatusCode::CREATED).await;
+        let file = f
+            .stored_document(r["licence"]["id"].as_str().unwrap())
+            .await;
+        let cert = install(&file, &key, &f.root);
+        let ent = &cert.body.entitlements;
+        assert_eq!(ent.scope, Scope::Site { site_id });
+        assert_eq!(ent.quota, Quota::Count { erasures: 5000 });
+        assert_eq!(ent.features, [Feature::PdfCertificates]);
+        assert_eq!(ent.not_after, term_end);
+        assert_eq!(r["station"]["renewal_available"], false);
+    }
+}
+
+#[tokio::test]
+async fn a_licence_already_at_term_end_is_up_to_date() {
+    let f = fixture().await;
+    let v = f.register_machine(&new_key()).await;
+    let station = v["station"]["id"].as_str().unwrap();
+    let before = f.counts().await;
+    let resp = f.reissue(&f.owner, station).await;
+    assert_error(resp, StatusCode::CONFLICT, MSG_LICENCE_UP_TO_DATE).await;
+    assert_eq!(f.counts().await, before);
+}
+
+#[tokio::test]
+async fn a_released_station_is_not_reissued() {
+    let f = fixture().await;
+    let v = f.register_machine(&new_key()).await;
+    let station = v["station"]["id"].as_str().unwrap();
+    ok_json(f.release(&f.owner, station).await, StatusCode::OK).await;
+    f.renew(&f.machine).await;
+    assert_eq!(
+        f.station(&f.owner, station).await["renewal_available"],
+        false
+    );
+    let before = f.counts().await;
+    let resp = f.reissue(&f.owner, station).await;
+    assert_error(resp, StatusCode::CONFLICT, MSG_ALREADY_RELEASED).await;
+    assert_eq!(f.counts().await, before);
+}
+
+#[tokio::test]
+async fn a_station_whose_entitlement_is_not_current_is_not_reissued() {
+    let f = fixture().await;
+    let pool = &f.hub.db.pool;
+    let machine = f.register_machine(&new_key()).await["station"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let site = ok_json(
+        f.register(
+            &f.owner,
+            json!({ "entitlement_id": f.site, "instance_key_id": new_key() }),
+        )
+        .await,
+        StatusCode::CREATED,
+    )
+    .await["station"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Renewed, then refunded.
+    f.extend_term(&f.site).await;
+    sqlx::query(
+        "UPDATE entitlements SET status = 'refunded', refunded_at = now(), renews = false \
+         WHERE id = $1::uuid",
+    )
+    .bind(&f.site)
+    .execute(pool)
+    .await
+    .unwrap();
+    // Ended: the term moved into the past (the trigger refuses this to the
+    // hub, so it is lifted for the test).
+    sqlx::query("ALTER TABLE entitlements DISABLE TRIGGER entitlements_lifecycle")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE entitlements SET term_start = term_start - interval '2 years', \
+                term_end = term_end - interval '2 years' WHERE id = $1::uuid",
+    )
+    .bind(&f.machine)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE entitlements ENABLE TRIGGER entitlements_lifecycle")
+        .execute(pool)
+        .await
+        .unwrap();
+    let before = f.counts().await;
+    for station in [&machine, &site] {
+        assert_eq!(
+            f.station(&f.owner, station).await["renewal_available"],
+            false
+        );
+        let resp = f.reissue(&f.owner, station).await;
+        assert_error(resp, StatusCode::CONFLICT, MSG_ENTITLEMENT_NOT_CURRENT).await;
+    }
+    assert_eq!(f.counts().await, before);
+}
+
+#[tokio::test]
+async fn an_unknown_foreign_or_malformed_station_is_not_reissued() {
+    let f = fixture().await;
+    let v = f.register_machine(&new_key()).await;
+    let station = v["station"]["id"].as_str().unwrap();
+    f.renew(&f.machine).await;
+    let other = f.hub.verified_owner("Other Org").await;
+    let before = f.counts().await;
+    let resp = f.reissue(&other, station).await;
+    assert_error(resp, StatusCode::NOT_FOUND, MSG_NO_STATION).await;
+    for id in [Uuid::new_v4().to_string(), "not-a-uuid".to_string()] {
+        let resp = f.reissue(&f.owner, &id).await;
+        assert_error(resp, StatusCode::NOT_FOUND, MSG_NO_STATION).await;
+    }
+    assert_eq!(f.counts().await, before);
+    assert_eq!(
+        f.station(&f.owner, station).await["renewal_available"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn concurrent_reissues_of_one_station_issue_one_licence() {
+    let f = fixture().await;
+    let v = f.register_machine(&new_key()).await;
+    let station = v["station"]["id"].as_str().unwrap();
+    f.renew(&f.machine).await;
+    let calls = (0..8).map(|_| f.reissue(&f.owner, station)).collect();
+    let mut created = 0;
+    for resp in futures_join_all(calls).await {
+        match resp.status() {
+            StatusCode::CREATED => created += 1,
+            _ => assert_error(resp, StatusCode::CONFLICT, MSG_LICENCE_UP_TO_DATE).await,
+        }
+    }
+    assert_eq!(created, 1);
+    assert_eq!(f.hub.count("licences").await, 2);
+    let active: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM licences WHERE station_id = $1::uuid AND status = 'active'",
+    )
+    .bind(station)
+    .fetch_one(&f.hub.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(active, 1);
+    assert_eq!(f.hub.audited("licence.superseded").await.len(), 1);
 }

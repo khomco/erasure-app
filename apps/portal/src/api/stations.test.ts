@@ -10,6 +10,7 @@ import {
   licenceDownloadPath,
   registerBody,
   registerStation,
+  reissueStation,
   releaseStation,
   type Licence,
   type Station,
@@ -41,6 +42,7 @@ const station: Station = {
   registered_at: "2026-11-08T10:02:00Z",
   released_at: null,
   licence,
+  renewal_available: false,
 };
 
 interface Call {
@@ -93,6 +95,7 @@ describe("guards", () => {
       isLicence({ ...licence, status: "superseded", superseded_at: "2026-12-01T00:00:00Z" }),
     ).toBe(true);
     expect(isStation(station)).toBe(true);
+    expect(isStation({ ...station, renewal_available: true })).toBe(true);
     expect(isStation({ ...station, licence: null, scope: "site", station_id: null })).toBe(true);
     expect(isVendorRootKey({ public_key_id: KEY, public_key_b64: "abc" })).toBe(true);
   });
@@ -104,6 +107,8 @@ describe("guards", () => {
     expect(isStation({ ...station, released_at: undefined })).toBe(false);
     expect(isStation({ ...station, licence: { ...licence, id: 1 } })).toBe(false);
     expect(isStation({ ...station, label: 3 })).toBe(false);
+    expect(isStation({ ...station, renewal_available: undefined })).toBe(false);
+    expect(isStation({ ...station, renewal_available: "true" })).toBe(false);
     expect(isVendorRootKey({ public_key_id: KEY })).toBe(false);
   });
 
@@ -173,6 +178,29 @@ describe("calls", () => {
     expect(f.calls).toEqual([
       { url: `/api/stations/${station.id}/release`, method: "POST", body: {}, csrf: "csrf-1" },
     ]);
+  });
+
+  it("reissues with a POST and CSRF", async () => {
+    const renewed: Licence = {
+      ...licence,
+      id: "9a7b2c1d-0000-4000-8000-000000000002",
+      not_after: "2028-11-08T10:01:00Z",
+      issued_at: "2027-01-02T00:00:00Z",
+    };
+    const body = { station: { ...station, licence: renewed }, licence: renewed };
+    const f = respond(201, body);
+    expect(await reissueStation(station.id, f.impl)).toEqual(body);
+    expect(f.calls).toEqual([
+      { url: `/api/stations/${station.id}/reissue`, method: "POST", body: {}, csrf: "csrf-1" },
+    ]);
+  });
+
+  it("surfaces a refused reissue", async () => {
+    const message = "this station's licence already runs to the end of its entitlement's term";
+    const e = await rejection(reissueStation(station.id, respond(409, { error: message }).impl));
+    expect(e).toBeInstanceOf(HubError);
+    expect((e as HubError).status).toBe(409);
+    expect((e as HubError).message).toBe(message);
   });
 
   it("reads the vendor root, or its absence", async () => {

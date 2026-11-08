@@ -9,7 +9,9 @@ import {
   isInstanceKeyId,
   licenceDownloadPath,
   registerStation,
+  reissueStation,
   releaseStation,
+  type Licence,
   type Station,
   type VendorRootKey,
 } from "@/api/stations";
@@ -53,11 +55,20 @@ export function stationName(s: Station): string {
   return s.label ?? s.station_id ?? s.instance_key_id;
 }
 
-/** "Released on …", "Expired on …", "Licensed to …" or "No licence", as of `now`. */
+/**
+ * "Released on …", "Renewal available …", "Expired on …", "Licensed to …" or
+ * "No licence", as of `now`.
+ */
 export function stationState(s: Station, now: Date = new Date()): string {
   if (s.released_at) return `Released on ${day(s.released_at)}`;
   if (s.licence?.status === "active") {
-    return Date.parse(s.licence.not_after) <= now.getTime()
+    const expired = Date.parse(s.licence.not_after) <= now.getTime();
+    if (s.renewal_available) {
+      return `Renewal available (current licence ${expired ? "expired on" : "to"} ${day(
+        s.licence.not_after,
+      )})`;
+    }
+    return expired
       ? `Expired on ${day(s.licence.not_after)}`
       : `Licensed to ${day(s.licence.not_after)}`;
   }
@@ -74,8 +85,8 @@ export function installCommand(root: VendorRootKey | null): string {
 /**
  * `/stations`: the organization's registered stations and their licences.
  * Every member sees the list, downloads licence files and reads how to
- * install one; owners also register stations against a free seat and
- * release them.
+ * install one; owners also register stations against a free seat, issue
+ * renewed licences after an entitlement renews, and release stations.
  */
 export function StationsPage() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => fetchMe(), retry: false });
@@ -116,7 +127,7 @@ function StationsSection({ account }: { account: Account }) {
       {stations.data && <StationTable stations={stations.data} canRelease={owner} />}
       {!owner && (
         <p className="text-sm text-slate-400">
-          Only an organization owner can register or release stations.
+          Only an organization owner can register, renew or release stations.
         </p>
       )}
       <FormError error={seats.error} />
@@ -133,14 +144,67 @@ function StationsSection({ account }: { account: Account }) {
   );
 }
 
-/** What releasing a station does and does not do, stated plainly. */
+/** What releasing and renewing a station do and do not do, stated plainly. */
 export function SupersessionNote() {
   return (
-    <p className="rounded-md border border-slate-800 bg-slate-900 p-3 text-sm text-slate-300">
-      Releasing a station frees its seat and marks its licence superseded here. The licence file
-      already on that station keeps working until its own expiry date: the hub does not send
-      revocation or supersession to stations.
+    <div className="space-y-2 rounded-md border border-slate-800 bg-slate-900 p-3 text-sm text-slate-300">
+      <p>
+        Releasing a station frees its seat and marks its licence superseded here. The licence file
+        already on that station keeps working until its own expiry date: the hub does not send
+        revocation or supersession to stations.
+      </p>
+      <p>
+        When an entitlement renews, its stations show Renewal available and an owner issues each
+        one a renewed licence here. The station uses the renewed licence only after the renewed
+        file is installed on it. The old file keeps working until its own expiry date.
+      </p>
+    </div>
+  );
+}
+
+/** What a renewed licence needs next, with its download link. */
+export function RenewedNotice({ licence }: { licence: Licence }) {
+  return (
+    <p className="text-sm whitespace-normal text-emerald-400">
+      Renewed licence issued, to {day(licence.not_after)}.{" "}
+      <a href={licenceDownloadPath(licence.id)} className="text-indigo-400 hover:underline">
+        Download the renewed licence
+      </a>{" "}
+      and install it on the station: until then it keeps using the old file, which works until
+      its own expiry date.
     </p>
+  );
+}
+
+/**
+ * A station's renewal, when one is available: owners issue the renewed
+ * licence and then download it; members are told an owner can issue it.
+ */
+export function RenewalAction({ station: s, canRenew }: { station: Station; canRenew: boolean }) {
+  const queryClient = useQueryClient();
+  const reissue = useMutation({
+    mutationFn: () => reissueStation(s.id),
+    // Also after a refusal: another owner or tab may have reissued or released it.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["stations"] }),
+  });
+  if (s.released_at !== null) return null;
+  if (reissue.isSuccess) return <RenewedNotice licence={reissue.data.licence} />;
+  if (!s.renewal_available) return null;
+  if (!canRenew) {
+    return <span className="text-slate-400">An owner can issue the renewed licence.</span>;
+  }
+  return (
+    <>
+      <button
+        type="button"
+        disabled={reissue.isPending}
+        onClick={() => reissue.mutate()}
+        className="text-emerald-400 hover:underline disabled:opacity-50"
+      >
+        Issue renewed licence
+      </button>
+      <FormError error={reissue.error} />
+    </>
   );
 }
 
@@ -168,7 +232,8 @@ function StationTable({ stations, canRelease }: { stations: Station[]; canReleas
   );
 }
 
-function StationRow({ station: s, canRelease }: { station: Station; canRelease: boolean }) {
+/** One station's row: its state, download, renewal and (owners) release. */
+export function StationRow({ station: s, canRelease }: { station: Station; canRelease: boolean }) {
   const queryClient = useQueryClient();
   const release = useMutation({
     mutationFn: () => releaseStation(s.id),
@@ -193,6 +258,7 @@ function StationRow({ station: s, canRelease }: { station: Station; canRelease: 
             Download licence
           </a>
         )}
+        <RenewalAction station={s} canRenew={canRelease} />
         {canRelease && !released && (
           <button
             type="button"

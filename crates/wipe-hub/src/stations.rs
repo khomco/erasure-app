@@ -21,6 +21,18 @@
 //!   licence names `machine_fingerprint(station_id)` (the bench's
 //!   `--station-id`); a site entitlement's names the entered site, or the
 //!   organization id when none was entered.
+//! - **Renewal reissue** ([`reissue`], licence-delivery story 2, CAP-3): when
+//!   a paid renewal moves an entitlement's `term_end` past the end of a
+//!   station's active licence, the station shows `renewal_available` and an
+//!   owner asks for a renewed licence. With the station and its entitlement
+//!   locked `FOR UPDATE`, the hub supersedes the old licence (`licence.superseded
+//!   {reason: "renewed", superseded_by}`) and signs a new one for the same key,
+//!   scope, quota and features to the new `term_end` (`licence.issued` with
+//!   `reissue_of`). The station keeps its seat and registration. Nothing is
+//!   reissued by the payment path itself: a missing vendor root can never make
+//!   a renewal payment fail to apply.
+//! - Register and reissue sign through one helper (`issue_licence`), so the
+//!   two cannot drift.
 //! - **Release** ([`release`]): frees the station's seat and marks its active
 //!   licence `superseded`, auditing `station.released` and
 //!   `licence.superseded`. The released licence file keeps verifying offline
@@ -64,7 +76,9 @@ pub const MSG_ENTITLEMENT_NOT_CURRENT: &str =
 pub const MSG_ISSUANCE_UNAVAILABLE: &str =
     "licence issuance is unavailable: this hub has no vendor root configured";
 pub const MSG_OWNER_ONLY_STATIONS: &str =
-    "only an organization owner can register or release stations";
+    "only an organization owner can register, renew or release stations";
+pub const MSG_LICENCE_UP_TO_DATE: &str =
+    "this station's licence already runs to the end of its entitlement's term";
 pub const MSG_ALREADY_RELEASED: &str = "this station has already been released";
 pub const MSG_NO_STATION: &str = "no such station";
 pub const MSG_NO_LICENCE: &str = "no such licence";
@@ -90,7 +104,7 @@ pub fn licence_subject(id: Uuid) -> String {
 
 /// A licence as its organization sees it (never the file itself). Timestamps
 /// are RFC 3339 UTC.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Licence {
     /// The signed body's `license_id`.
     pub id: Uuid,
@@ -124,6 +138,11 @@ pub struct Station {
     pub released_at: Option<String>,
     /// The station's most recently issued licence.
     pub licence: Option<Licence>,
+    /// A renewed licence can be issued: the station is not released, its
+    /// entitlement is current and its latest licence is active but ends
+    /// before the entitlement's `term_end` (it was renewed). [`reissue`] is
+    /// allowed exactly when this is true.
+    pub renewal_available: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -144,6 +163,7 @@ struct StationRow {
     issued_at: Option<String>,
     licence_status: Option<String>,
     superseded_at: Option<String>,
+    renewal_available: bool,
 }
 
 impl From<StationRow> for Station {
@@ -174,9 +194,27 @@ impl From<StationRow> for Station {
             registered_at: r.registered_at,
             released_at: r.released_at,
             licence,
+            renewal_available: r.renewal_available,
         }
     }
 }
+
+/// An entitlement `e` that still grants seats: not refunded, term not ended.
+const ENTITLEMENT_CURRENT: &str = "(e.status <> 'refunded' AND e.term_end > now())";
+
+/// The station `s`'s latest licence as `l` (absent: all NULL): its active
+/// one if it has one, else the most recently issued. Active first, so a hub
+/// clock that stepped back between two issuances cannot rank a superseded
+/// licence above the one that replaced it.
+const LATEST_LICENCE: &str = "LEFT JOIN LATERAL (SELECT * FROM licences \
+                                                 WHERE station_id = s.id \
+                                                 ORDER BY (status = 'active') DESC, \
+                                                          issued_at DESC, id DESC \
+                                                 LIMIT 1) l ON true";
+
+/// The latest licence `l` is active and ends before its entitlement `e`'s
+/// term (compared as timestamps): a renewal moved the term on.
+const LICENCE_BEHIND_TERM: &str = "(l.status = 'active' AND l.not_after < e.term_end)";
 
 /// `SELECT … FROM stations s …`, every column of [`StationRow`] with the
 /// station's latest licence; callers add the `WHERE` on `s`.
@@ -190,13 +228,13 @@ fn select_stations() -> String {
                 to_char(l.not_after AT TIME ZONE 'UTC', {RFC3339_UTC}) AS not_after, \
                 to_char(l.issued_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS issued_at, \
                 l.status AS licence_status, \
-                to_char(l.superseded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS superseded_at \
+                to_char(l.superseded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS superseded_at, \
+                COALESCE(s.released_at IS NULL AND {ENTITLEMENT_CURRENT} \
+                         AND {LICENCE_BEHIND_TERM}, false) AS renewal_available \
          FROM stations s \
          JOIN entitlements e ON e.id = s.entitlement_id \
          JOIN orders o ON o.id = e.order_id \
-         LEFT JOIN LATERAL (SELECT * FROM licences \
-                            WHERE station_id = s.id \
-                            ORDER BY issued_at DESC, id DESC LIMIT 1) l ON true"
+         {LATEST_LICENCE}"
     )
 }
 
@@ -335,7 +373,8 @@ fn is_unique_violation(e: &sqlx::Error, constraint: &str) -> bool {
 // ---------------------------------------------------------------------------
 // Register
 
-/// The entitlement a registration draws from, locked `FOR UPDATE`.
+/// The entitlement a registration draws from, or a reissued station's,
+/// locked `FOR UPDATE`.
 #[derive(sqlx::FromRow)]
 struct LockedEntitlement {
     id: Uuid,
@@ -352,19 +391,31 @@ struct LockedEntitlement {
 /// Postgres unchanged.
 const RFC3339_UTC_MICROS: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'"#;
 
-/// What [`register`] stored.
+/// The [`LockedEntitlement`] columns, from `entitlements e JOIN orders o`.
+fn locked_entitlement_columns() -> String {
+    format!(
+        "e.id, o.scope, o.seats, o.quota_erasures, o.features, \
+         to_char(e.term_end AT TIME ZONE 'UTC', {RFC3339_UTC_MICROS}) AS term_end, \
+         {ENTITLEMENT_CURRENT} AS current"
+    )
+}
+
+/// What [`register`] or [`reissue`] stored.
 #[derive(Debug, Clone)]
 pub struct Registered {
     pub station: Station,
     pub licence: Licence,
 }
 
-/// The licence's entitlements for `ent`, held by organization `org`.
+/// The licence's entitlements for `ent`, held by organization `org`, for a
+/// station registered with `station_id` (the bench's `--station-id`) and
+/// `site`.
 fn licence_entitlements(
     ent: &LockedEntitlement,
     org_id: Uuid,
     org_name: &str,
-    new: &NewStation,
+    station_id: Option<&str>,
+    site: Option<&str>,
     now: OffsetDateTime,
     not_after: OffsetDateTime,
 ) -> Result<Entitlements, StationError> {
@@ -386,13 +437,12 @@ fn licence_entitlements(
     let scope = match ent.scope.as_str() {
         "machine" => Scope::Machine {
             fingerprint: machine_fingerprint(
-                new.station_id
-                    .as_deref()
+                station_id
                     .ok_or_else(|| StationError::BadRequest(MSG_STATION_ID_REQUIRED.into()))?,
             ),
         },
         "site" => Scope::Site {
-            site_id: new.site.clone().unwrap_or_else(|| org_id.to_string()),
+            site_id: site.map_or_else(|| org_id.to_string(), str::to_string),
         },
         other => {
             return Err(StationError::Issue(format!(
@@ -414,10 +464,128 @@ fn licence_entitlements(
     })
 }
 
+/// One licence to sign and store for a station row that already exists.
+struct IssueLicence<'a> {
+    ent: &'a LockedEntitlement,
+    organization_id: Uuid,
+    user_id: Uuid,
+    /// The `stations` row.
+    station: Uuid,
+    instance_key_id: &'a str,
+    /// The bench's `--station-id`, as stored.
+    station_id: Option<&'a str>,
+    /// The site, as stored.
+    site: Option<&'a str>,
+    /// The licence this one replaces, recorded in the audit detail.
+    reissue_of: Option<Uuid>,
+}
+
+/// Sign a licence mirroring `req.ent` with `root` (`not_before` = `issued_at`
+/// = now, `not_after` = the entitlement's `term_end`), store the exact file
+/// as the station's active licence and audit `licence.issued`, in the
+/// caller's transaction. The only code that signs or inserts a licence, so
+/// register and reissue cannot drift. The station must have no active
+/// licence left (`licences_active_station_idx`). A term that ended between
+/// the database's clock and ours is 409 [`MSG_ENTITLEMENT_NOT_CURRENT`]; the
+/// caller's transaction then rolls back whatever it wrote.
+async fn issue_licence(
+    conn: &mut PgConnection,
+    root: &VendorRoot,
+    req: IssueLicence<'_>,
+) -> Result<Licence, StationError> {
+    let ent = req.ent;
+    let org_name: String = sqlx::query_scalar("SELECT name FROM organizations WHERE id = $1")
+        .bind(req.organization_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    // Microsecond precision, so the stored `issued_at` equals the signed one.
+    let now = OffsetDateTime::now_utc();
+    let now = now
+        .replace_nanosecond(now.nanosecond() / 1_000 * 1_000)
+        .map_err(|e| StationError::Issue(e.to_string()))?;
+    let not_after = OffsetDateTime::parse(&ent.term_end, &Rfc3339)
+        .map_err(|e| StationError::Issue(format!("term_end {:?}: {e}", ent.term_end)))?;
+    if not_after <= now {
+        // The term ended between the database's clock and ours.
+        return Err(StationError::Conflict(MSG_ENTITLEMENT_NOT_CURRENT));
+    }
+    let entitlements = licence_entitlements(
+        ent,
+        req.organization_id,
+        &org_name,
+        req.station_id,
+        req.site,
+        now,
+        not_after,
+    )?;
+
+    let licence_id = Uuid::new_v4();
+    let certificate = root
+        .issue(
+            licence_id.to_string(),
+            req.instance_key_id.to_string(),
+            entitlements,
+            now,
+        )
+        .map_err(|e| StationError::Issue(e.to_string()))?;
+    // Exactly what `wipe_license::save_license` writes.
+    let document = serde_json::to_string_pretty(&certificate)
+        .map_err(|e| StationError::Issue(e.to_string()))?;
+    let issued_at = now
+        .format(&Rfc3339)
+        .map_err(|e| StationError::Issue(e.to_string()))?;
+    let root_key_id = certificate.body.root_key_id.clone();
+    let licence: Licence = sqlx::query_as(&format!(
+        "INSERT INTO licences (id, organization_id, station_id, entitlement_id, \
+                               instance_key_id, root_key_id, not_after, issued_at, document) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7::text::timestamptz, $8::text::timestamptz, $9) \
+         RETURNING id, station_id, entitlement_id, instance_key_id, root_key_id, \
+                   to_char(not_after AT TIME ZONE 'UTC', {RFC3339_UTC}) AS not_after, \
+                   to_char(issued_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS issued_at, \
+                   status, \
+                   to_char(superseded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS superseded_at"
+    ))
+    .bind(licence_id)
+    .bind(req.organization_id)
+    .bind(req.station)
+    .bind(ent.id)
+    .bind(req.instance_key_id)
+    .bind(&root_key_id)
+    .bind(&ent.term_end)
+    .bind(&issued_at)
+    .bind(&document)
+    .fetch_one(&mut *conn)
+    .await?;
+
+    let mut detail = json!({
+        "station_id": req.station,
+        "entitlement_id": ent.id,
+        "instance_key_id": req.instance_key_id,
+        "root_key_id": root_key_id,
+        "not_after": licence.not_after,
+    });
+    if let Some(old) = req.reissue_of {
+        detail["reissue_of"] = json!(old);
+    }
+    audit::record(
+        &mut *conn,
+        &AuditEntry {
+            actor: &actor(req.user_id),
+            action: "licence.issued",
+            subject: &licence_subject(licence_id),
+            detail,
+        },
+    )
+    .await?;
+    Ok(licence)
+}
+
 /// Register `new` for organization `organization_id` on behalf of
 /// `user_id`, signing its licence with `root`, in the caller's transaction
-/// (which the caller commits). See the module docs for the checks; any
-/// refusal returns before the first write.
+/// (which the caller commits). See the module docs for the checks. Every
+/// refusal but one returns before the first write; that one (the term ends
+/// in the instant between the database's clock and ours, found while
+/// signing) leaves its writes to roll back with the caller's transaction.
 pub async fn register(
     conn: &mut PgConnection,
     root: &VendorRoot,
@@ -426,12 +594,11 @@ pub async fn register(
     new: &NewStation,
 ) -> Result<Registered, StationError> {
     let ent: LockedEntitlement = sqlx::query_as(&format!(
-        "SELECT e.id, o.scope, o.seats, o.quota_erasures, o.features, \
-                to_char(e.term_end AT TIME ZONE 'UTC', {RFC3339_UTC_MICROS}) AS term_end, \
-                (e.status <> 'refunded' AND e.term_end > now()) AS current \
+        "SELECT {} \
          FROM entitlements e JOIN orders o ON o.id = e.order_id \
          WHERE e.organization_id = $1 AND e.id = $2 \
-         FOR UPDATE OF e"
+         FOR UPDATE OF e",
+        locked_entitlement_columns()
     ))
     .bind(organization_id)
     .bind(new.entitlement_id)
@@ -469,24 +636,6 @@ pub async fn register(
     if used >= i64::from(ent.seats) {
         return Err(StationError::Conflict(MSG_NO_FREE_SEAT));
     }
-    let org_name: String = sqlx::query_scalar("SELECT name FROM organizations WHERE id = $1")
-        .bind(organization_id)
-        .fetch_one(&mut *conn)
-        .await?;
-
-    // Microsecond precision, so the stored `issued_at` equals the signed one.
-    let now = OffsetDateTime::now_utc();
-    let now = now
-        .replace_nanosecond(now.nanosecond() / 1_000 * 1_000)
-        .map_err(|e| StationError::Issue(e.to_string()))?;
-    let not_after = OffsetDateTime::parse(&ent.term_end, &Rfc3339)
-        .map_err(|e| StationError::Issue(format!("term_end {:?}: {e}", ent.term_end)))?;
-    if not_after <= now {
-        // The term ended between the database's clock and ours.
-        return Err(StationError::Conflict(MSG_ENTITLEMENT_NOT_CURRENT));
-    }
-    let entitlements = licence_entitlements(&ent, organization_id, &org_name, new, now, not_after)?;
-
     let station_id: Uuid = sqlx::query_scalar(
         "INSERT INTO stations (organization_id, entitlement_id, instance_key_id, station_id, \
                                label, site, registered_by) \
@@ -511,44 +660,10 @@ pub async fn register(
         }
     })?;
 
-    let licence_id = Uuid::new_v4();
-    let certificate = root
-        .issue(
-            licence_id.to_string(),
-            new.instance_key_id.clone(),
-            entitlements,
-            now,
-        )
-        .map_err(|e| StationError::Issue(e.to_string()))?;
-    // Exactly what `wipe_license::save_license` writes.
-    let document = serde_json::to_string_pretty(&certificate)
-        .map_err(|e| StationError::Issue(e.to_string()))?;
-    let issued_at = now
-        .format(&Rfc3339)
-        .map_err(|e| StationError::Issue(e.to_string()))?;
-    let root_key_id = certificate.body.root_key_id.clone();
-    sqlx::query(
-        "INSERT INTO licences (id, organization_id, station_id, entitlement_id, \
-                               instance_key_id, root_key_id, not_after, issued_at, document) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7::text::timestamptz, $8::text::timestamptz, $9)",
-    )
-    .bind(licence_id)
-    .bind(organization_id)
-    .bind(station_id)
-    .bind(ent.id)
-    .bind(&new.instance_key_id)
-    .bind(&root_key_id)
-    .bind(&ent.term_end)
-    .bind(&issued_at)
-    .bind(&document)
-    .execute(&mut *conn)
-    .await?;
-
-    let who = actor(user_id);
     audit::record(
         &mut *conn,
         &AuditEntry {
-            actor: &who,
+            actor: &actor(user_id),
             action: "station.registered",
             subject: &station_subject(station_id),
             detail: json!({
@@ -561,29 +676,143 @@ pub async fn register(
         },
     )
     .await?;
+    let licence = issue_licence(
+        conn,
+        root,
+        IssueLicence {
+            ent: &ent,
+            organization_id,
+            user_id,
+            station: station_id,
+            instance_key_id: &new.instance_key_id,
+            station_id: new.station_id.as_deref(),
+            site: new.site.as_deref(),
+            reissue_of: None,
+        },
+    )
+    .await?;
     let station = get(&mut *conn, organization_id, station_id)
         .await?
         .ok_or_else(|| StationError::Issue("a registered station vanished".into()))?;
-    let licence = station
-        .licence
-        .clone()
-        .ok_or_else(|| StationError::Issue("an issued licence vanished".into()))?;
+    Ok(Registered { station, licence })
+}
+
+// ---------------------------------------------------------------------------
+// Renewal reissue
+
+/// A station to reissue, locked `FOR UPDATE` with its entitlement.
+#[derive(sqlx::FromRow)]
+struct LockedStation {
+    released: bool,
+    instance_key_id: String,
+    station_id: Option<String>,
+    site: Option<String>,
+    #[sqlx(flatten)]
+    ent: LockedEntitlement,
+}
+
+/// Issue the organization's station `id` a renewed licence on behalf of
+/// `user_id`, signing it with `root`, in the caller's transaction (which the
+/// caller commits). Refusals, in this order and before any write (but see
+/// below): 404
+/// [`MSG_NO_STATION`] for an unknown or foreign station, 409
+/// [`MSG_ALREADY_RELEASED`], 409 [`MSG_ENTITLEMENT_NOT_CURRENT`], and 409
+/// [`MSG_LICENCE_UP_TO_DATE`] unless its latest licence is active and ends
+/// before the entitlement's `term_end` (the station's `renewal_available`).
+/// Otherwise the old licence is `superseded` and a new one is signed exactly
+/// as [`register`] signs, for the stored key, station id and site, to the
+/// current `term_end`; audits `licence.issued {…, reissue_of}` and
+/// `licence.superseded {station_id, reason: "renewed", superseded_by}`.
+/// One refusal comes after the supersede: a term that ends in the instant
+/// between the database's clock and ours, found while signing, is 409
+/// [`MSG_ENTITLEMENT_NOT_CURRENT`] and leaves its writes to roll back with
+/// the caller's transaction.
+pub async fn reissue(
+    conn: &mut PgConnection,
+    root: &VendorRoot,
+    organization_id: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<Registered, StationError> {
+    // Station and entitlement are locked in one statement: register locks
+    // only the entitlement and release only the station, so no lock cycle.
+    let locked: LockedStation = sqlx::query_as(&format!(
+        "SELECT s.released_at IS NOT NULL AS released, s.instance_key_id, s.station_id, \
+                s.site, {} \
+         FROM stations s \
+         JOIN entitlements e ON e.id = s.entitlement_id \
+         JOIN orders o ON o.id = e.order_id \
+         WHERE s.organization_id = $1 AND s.id = $2 \
+         FOR UPDATE OF s, e",
+        locked_entitlement_columns()
+    ))
+    .bind(organization_id)
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or(StationError::NotFound(MSG_NO_STATION))?;
+    if locked.released {
+        return Err(StationError::Conflict(MSG_ALREADY_RELEASED));
+    }
+    if !locked.ent.current {
+        return Err(StationError::Conflict(MSG_ENTITLEMENT_NOT_CURRENT));
+    }
+    // A statement of its own, after the lock: under READ COMMITTED it sees a
+    // concurrent reissue's licence that committed while this one waited, so
+    // that reissue's loser is refused here.
+    let old: Option<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT l.id FROM stations s \
+         JOIN entitlements e ON e.id = s.entitlement_id \
+         {LATEST_LICENCE} \
+         WHERE s.id = $1 AND {LICENCE_BEHIND_TERM}"
+    ))
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(old) = old else {
+        return Err(StationError::Conflict(MSG_LICENCE_UP_TO_DATE));
+    };
+
+    // One active licence per station: supersede before inserting.
+    sqlx::query_scalar::<_, Uuid>(
+        "UPDATE licences SET status = 'superseded', superseded_at = now() \
+         WHERE id = $1 AND status = 'active' RETURNING id",
+    )
+    .bind(old)
+    .fetch_one(&mut *conn)
+    .await?;
+    let licence = issue_licence(
+        conn,
+        root,
+        IssueLicence {
+            ent: &locked.ent,
+            organization_id,
+            user_id,
+            station: id,
+            instance_key_id: &locked.instance_key_id,
+            station_id: locked.station_id.as_deref(),
+            site: locked.site.as_deref(),
+            reissue_of: Some(old),
+        },
+    )
+    .await?;
     audit::record(
         &mut *conn,
         &AuditEntry {
-            actor: &who,
-            action: "licence.issued",
-            subject: &licence_subject(licence_id),
+            actor: &actor(user_id),
+            action: "licence.superseded",
+            subject: &licence_subject(old),
             detail: json!({
-                "station_id": station_id,
-                "entitlement_id": ent.id,
-                "instance_key_id": new.instance_key_id,
-                "root_key_id": root_key_id,
-                "not_after": licence.not_after,
+                "station_id": id,
+                "reason": "renewed",
+                "superseded_by": licence.id,
             }),
         },
     )
     .await?;
+    let station = get(&mut *conn, organization_id, id)
+        .await?
+        .ok_or_else(|| StationError::Issue("a reissued station vanished".into()))?;
     Ok(Registered { station, licence })
 }
 

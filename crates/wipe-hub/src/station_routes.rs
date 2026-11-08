@@ -1,8 +1,9 @@
-//! Station and licence routes (licence-delivery story 1, CAP-1, CAP-2,
-//! CAP-5):
+//! Station and licence routes (licence-delivery stories 1 and 2, CAP-1, CAP-2,
+//! CAP-3, CAP-5):
 //!
 //! - `GET /api/stations` — any role: `{stations}`, the organization's
-//!   stations (released ones last) with each one's latest licence.
+//!   stations (released ones last) with each one's latest licence and
+//!   `renewal_available`.
 //! - `POST /api/stations {entitlement_id, instance_key_id, station_id?,
 //!   label?, site?}` — an owner registers a station: 201 `{station,
 //!   licence}`. 503 [`MSG_ISSUANCE_UNAVAILABLE`] when the hub has no vendor
@@ -11,6 +12,12 @@
 //!   free and its licence superseded; 409
 //!   [`stations::MSG_ALREADY_RELEASED`] the
 //!   second time.
+//! - `POST /api/stations/:id/reissue` — an owner issues a station whose
+//!   `renewal_available` is true a renewed licence to its entitlement's
+//!   current `term_end`: 201 `{station, licence}`, the old licence superseded
+//!   (its file still verifies offline until its own `not_after`). 503
+//!   [`MSG_ISSUANCE_UNAVAILABLE`] when the hub has no vendor root; the other
+//!   refusals are [`stations::reissue`]'s.
 //! - `GET /api/licences/:id/download` — any role: the stored licence file,
 //!   byte for byte, as `application/json` with `Content-Disposition:
 //!   attachment`; audited.
@@ -42,6 +49,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/stations", get(list).post(register))
         .route("/api/stations/:id/release", post(release))
+        .route("/api/stations/:id/reissue", post(reissue))
         .route("/api/licences/:id/download", get(download))
         .route("/api/licensing/root", get(root))
 }
@@ -124,6 +132,40 @@ async fn release(
     let station = stations::release(&mut tx, user.organization_id, user.user_id, id).await?;
     tx.commit().await?;
     Ok(Json(json!({ "station": station })))
+}
+
+async fn reissue(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    require_owner(&user)?;
+    let Some(vendor) = state.config.vendor_root.as_ref() else {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            MSG_ISSUANCE_UNAVAILABLE,
+        ));
+    };
+    let id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::new(StatusCode::NOT_FOUND, MSG_NO_STATION))?;
+    let mut tx = state.pool.begin().await?;
+    let reissued = stations::reissue(
+        &mut tx,
+        &vendor.root,
+        user.organization_id,
+        user.user_id,
+        id,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "station": reissued.station,
+            "licence": reissued.licence,
+        })),
+    )
+        .into_response())
 }
 
 async fn download(

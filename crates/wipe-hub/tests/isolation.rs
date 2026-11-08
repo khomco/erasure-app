@@ -147,6 +147,7 @@ const ROUTES: &[(&str, &str, Class)] = &[
     ("GET", "/api/stations", Customer),
     ("POST", "/api/stations", Customer),
     ("POST", "/api/stations/:id/release", Customer),
+    ("POST", "/api/stations/:id/reissue", Customer),
     ("GET", "/api/licences/:id/download", Customer),
     ("GET", "/api/licensing/root", Customer),
     ("GET", "/api/admin/organizations", Admin),
