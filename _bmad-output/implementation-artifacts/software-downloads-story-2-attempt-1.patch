@@ -1,0 +1,2986 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index dbc5fff..91472bf 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -22,7 +22,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
+ 
+ ## Running and verifying
+ 
+-- `cargo test --workspace` — 665 tests, ~30s. Needs `docker compose up -d` first (root
++- `cargo test --workspace` — 686 tests, ~30s. Needs `docker compose up -d` first (root
+   `compose.yaml`: Postgres on `127.0.0.1:55432`, Mailpit SMTP `:1025`, UI/API `:8025`):
+   `wipe-hub`'s compose-backed tests fail, never skip, when they are down.
+ - Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and
+diff --git a/CONTEXT.md b/CONTEXT.md
+index 84c136f..c05d0eb 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -706,7 +706,8 @@ folder or in `.scratch/DECISIONS.md`.
+ | Renewal reissue — no migration. Every station in `GET /api/stations` carries `renewal_available`, computed in SQL and never stored: not released, entitlement current (not refunded, `term_end > now()`), and its latest licence `active` with `not_after < term_end` (a paid renewal moved the term on). `POST /api/stations/{id}/reissue` (owner, else 403 `only an organization owner can register, renew or release stations`; 503 `licence issuance is unavailable: …` with no vendor root, before the id is read; a non-UUID, unknown or another organization's id 404 `no such station`) locks the station and its entitlement `FOR UPDATE` in one statement scoped to the session's organization, then refuses, in order and writing nothing, a released station (409 `this station has already been released`), an entitlement not current (409 `this entitlement has ended or was refunded, …`) and a licence that already runs to `term_end` (409 `this station's licence already runs to the end of its entitlement's term`, read in a statement after the lock so a concurrent reissue that committed meanwhile is seen: eight parallel reissues give one 201). Otherwise it marks the old licence `superseded` and signs a new one through the same helper `register` uses (`stations::issue_licence`, since story 3 a wrapper over `stations::sign_and_store`: the `Entitlements` build, `VendorRoot::issue`, the `to_string_pretty` file, microsecond `now`, the insert and the `licence.issued` audit row): same instance key, scope (`machine_fingerprint` of the stored `--station-id`, or the stored site or organization id), quota and features, `not_after` = the current `term_end`; answers 201 `{station, licence}`. The station keeps its seat and registration. Audited (actor `user:<id>`) as `licence.issued` with story 1's detail plus `reissue_of`, and `licence.superseded {station_id, reason: "renewed", superseded_by}`. The payment path never signs: a renewal only moves `term_end`, so a missing or broken vendor root can never stop a renewal payment applying. Portal `/stations`: the state reads "Renewal available (current licence to …)"; owners get "Issue renewed licence", then a link to download the renewed file; members read "Renewal available: an owner can issue it."; the note says the station uses the renewed licence only once it is installed and the old file keeps working until its own expiry. Tests: `tests/stations.rs` (every I/O row through HTTP: a Fake renewal flips `renewal_available`; the reissued file installs and `evaluate`s `Valid` 30 days after the old term end while the old file is `Expired`; site scope keeps the entered site or the organization id; the old file stays downloadable byte for byte; eight concurrent reissues give one 201 and one active licence), the route in `tests/isolation.rs` | licence-delivery story 2 (CAP-3) / ADR-0005, ADR-0007 §5, §6 | ✅ partial | The station keeps using the old file until someone installs the renewed one by hand (no push or online fetch, D6/ADR candidate 0008); an owner reissues each station separately, and nothing notifies anyone that a renewal is waiting: until an owner opens `/stations` and reissues, each bench keeps its old file and marks certificates `evaluation` after the old `not_after`, although the customer has paid; the old licence is superseded at the hub only, and its file stays valid offline until its own `not_after`; since story 4 reissue also issues a licence carrying a changed lapse policy (row below); the portal was checked by typecheck, unit tests and a production build, not in a real browser |
+ | Vendor-admin licence issue, inspection and revocation — migration `0015_licence_admin`: `licences` gain `source` `station`\|`vendor` (station: `station_id` and `entitlement_id` set, no `issue_reason`; vendor: both null and a non-blank `issue_reason` ≤ 500 chars), `status` adds `revoked` with `revoked_at` and `revocation_reason` (non-blank, ≤ 500) set exactly when revoked, `superseded_at` kept when a superseded licence is revoked; `licences_lifecycle()` is replaced so signed content, `source` and `issue_reason` never change and the only steps are active→superseded, active→revoked, superseded→revoked (revoked is terminal). `stations.rs` stays the only writer: `register`, `reissue` and the new `vendor_issue` all sign and store through `sign_and_store`. Routes (vendor admins only, `VendorAdmin` first: no session 401, anyone else 403 `only vendor admins can use the admin area`; a non-UUID, unknown or vendor organization 404 `no such organization`, a non-UUID or unknown licence 404 `no such licence`, none audited): `POST /api/admin/organizations/{id}/licences {instance_key_id, scope, station_id?, site?, quota_erasures (null = unlimited, else 1–10⁹), features, days (1–1095), reason (non-blank, ≤ 500, no control characters)}` (unknown fields refused; 503 without a vendor root; 201 `{licence}`) signs for the organization's id and current name, `not_before` = `issued_at` = now, `not_after` = now + `days`, `allowed_methods: All`, no machine binding, machine scope `machine_fingerprint(station_id)` (required), site scope the entered site or the organization id; no station, entitlement or seat is touched; audited `licence.issued {organization_id, instance_key_id, root_key_id, not_after, source: "vendor", scope, quota_erasures, features, reason}`. `GET /api/admin/organizations/{id}/licences` → `{licences}` (station and vendor, newest first; `admin.organization_licences_viewed {licence_ids}`). `GET /api/admin/licences/{id}` → `{licence, body, verification}`: the record (organization, `source`, station `{id, station_id, label}` or null, status, `issue_reason`, `revocation_reason`), the stored file's `LicenseBody`, and `{status: verified\|failed\|no_root, root_key_id, detail}` against the hub's root only (`admin.licence_viewed`). `POST /api/admin/licences/inspect {document}` (≤ 64 KiB; anything else 400 `this is not a licence file: …`, unaudited) → `{body, verification, licence}` with the hub's record of that `license_id` or null (`admin.licence_file_inspected {license_id, canonical_sha256_hex, verified, known}`, subject `inspect:licence-file`; `license_id` only when it is a UUID, else null, and the hash computed by the hub over the pasted body, not the one the file claims). `GET /api/admin/licences/{id}/download` → the stored bytes with the customer download's headers, revoked or not (`licence.downloaded {organization_id, by: "vendor"}`). `POST /api/admin/licences/{id}/revoke {reason}` locks the licence's station `FOR UPDATE` before the licence row (the order reissue and release use) and marks an active or superseded licence revoked (200 `{licence}`; 409 `this licence is already revoked`; audited `licence.revoked {organization_id, station_id, previous_status, reason}`). Customer side: `Licence` gains `revoked_at` (never the reason); a station whose latest licence is revoked reads "Revoked on <date>" on `/stations` with no download link and `renewal_available: false`; reissue is 409 `this licence was revoked by the vendor; contact support` (checked after the station lock, so a revocation racing a reissue gives 200 + 409 or 201 + 200, never a 500), the customer download of a revoked licence is the same 409, the station keeps its seat until an owner releases it, which still works; the customer download serves station licences only (a vendor-issued one is 404 there). Portal: the admin organization page lists its licences and has an issue form stating it uses no seat or entitlement; `/admin/licences/$id` shows the record, the decoded file, its verification, a download, and a revoke form behind a reason and a confirming press, with a note that revocation is recorded in the hub only and the file keeps verifying offline until its expiry; `/admin/licences/inspect` (linked from `/admin`) decodes a pasted file. Tests: `tests/licence_admin.rs` (every I/O row through HTTP, incl. installing a vendor-issued file to `Valid` on `bench-1`, a tampered paste, a hub without a root, four rounds of revoke racing reissue plus a revoke held behind the station lock while the licence is superseded, the customer-side effects), the routes in `tests/isolation.rs`, 0015's refusals in `tests/migrations.rs` | licence-delivery story 3 (CAP-4) / ADR-0005, ADR-0007 §5, §6, ROADMAP A1.2, A1.3, A-R1, A-R7 | ✅ partial | Revocation is recorded in the hub only: no revocation list, push or online check (A2.3, ADR candidates 0008/0010), so a revoked file keeps verifying offline and a station keeps using it until its `not_after`; a vendor-issued licence is not listed on the customer's Stations page (it belongs to no station), so the vendor admin downloads it and sends it; revoking a station's licence does not stop its owner releasing the station and registering the same key again on a free seat, which signs a new licence (the vendor's lever on seats is refunding or cancelling the entitlement, and the admin licence page says so); the root is still file-held (A1.5); a pasted file is verified against this hub's root only; the portal pages were checked by typecheck, unit tests and a production build, not in a real browser |
+ | Customer lapse policy in issued licences — migration `0016_lapse_policy`: `organizations.lapse_policy` `evaluation`\|`stop` (default `evaluation`, CHECKed). `wipe_license::LapsePolicy` (`snake_case`, `Default` = `Evaluation`) is a field of the signed `LicenseBody`, `#[serde(default, skip_serializing_if = "LapsePolicy::is_evaluation")]`: an `evaluation` licence serializes exactly as before the field existed, so every earlier file keeps its canonical bytes, hash and signature (a committed pre-change fixture, `crates/wipe-license/tests/fixtures/licence-before-lapse-policy.json`, verifies and re-serializes byte for byte), and removing `stop` from a signed body is `Tampered`; `license_format_version` stays 1. `VendorRoot::issue` keeps its signature and delegates to the new `issue_with_lapse_policy`. The hub signs only through `stations::sign_and_store`, which reads the organization's policy `FOR SHARE` in the issuing transaction and signs it into every licence it issues (register, reissue and vendor issue alike: a vendor trial follows the customer's choice), adding `lapse_policy` to the `licence.issued` detail. A licence's policy is never stored beside it: it is read from the stored document in SQL (`COALESCE((document::jsonb)->'body'->>'lapse_policy', 'evaluation')`), and `Licence`, `AdminLicence` and `AdminOrganizationDetail` carry `lapse_policy`. Routes: `GET /api/organization/lapse-policy` (any role, `{lapse_policy}`) and `POST /api/organization/lapse-policy {lapse_policy}` (owner, else 403 `only an organization owner can change what stations do when a licence lapses`, before the body; `deny_unknown_fields`, a bad value, missing field or non-JSON is 400): under the organization row lock (`team::lock_organization`) the owner is re-checked, and a change audits `org.lapse_policy_changed {old, new}` (actor `user:<id>`, subject `organization:<id>`); posting the current value is 200 with no write and no audit row. Stations gain `lapse_policy_update_available` (computed in SQL: not released, entitlement current, latest licence active and signed with another policy than the organization's). `POST /api/stations/{id}/reissue` now also issues such a station a licence with the current policy (same key, scope, quota, features, to `term_end`), superseding the old one with reason `"lapse policy changed"` (`"renewed"` when the licence was also behind the term); otherwise 409 `this station's licence already runs to the end of its entitlement's term and carries your organization's lapse policy`. Portal `/stations`: a "When a licence lapses" section for every member (the current setting, what each policy does and never does, that a change applies only to files issued afterwards, and a removable sentence that station enforcement arrives in a later station release); owners switch it, confirming before `stop`, members read "Only an organization owner can change this."; a station row reads "Updated licence available: lapse policy changed (…)" with "Issue updated licence". The admin organization and licence pages show the policy read-only. Tests: `crates/wipe-license/tests/lapse_policy.rs` (old fixture, omitted default, stop round trip, tamper), `tests/stations.rs` (every I/O row through HTTP, including a stop file installed with `check_installable` and `evaluate` to `Valid` and eight concurrent reissues after a change giving one 201), `tests/licence_admin.rs` (vendor issue under stop, admin views), the routes in `tests/isolation.rs`, the CHECK in `tests/migrations.rs` | licence-delivery story 4 (CAP-6) / ADR-0012, ADR-0005 | ✅ partial | The hub only writes the policy into licences: no station enforces it, warns about it or refuses a job yet (`licence-visibility` story 5), and nothing in the hub can stop a station erasing (ROADMAP §0.2); a change reissues nothing by itself, so each station keeps its old policy until an owner issues and someone installs its updated file; a `stop` licence fails verification on a station or verifier built before this change (it carries a field those builds re-serialize away), and no such build is deployed; a superseded file, such as the earlier `evaluation` one, stays valid offline until its own `not_after` (supersession is not distributed, ADR candidates 0008/0010), so someone at the bench can reinstall it and the `stop` choice holds only while the newest file stays installed; a vendor-issued licence is never flagged or reissued after a policy change (the vendor admin issues a new one); the vendor has no route to change a customer's policy; the portal was checked by typecheck, unit tests and a production build, not in a real browser |
+-| Releases, the artifact store and `wipe-hub release publish` — migration `0017_releases`: `releases` (`version` SemVer 2.0.0 without build metadata (`+…` is refused: SemVer ignores it when ranking, so `1.0.0` and `1.0.0+build.5` could not both be the latest) checked by the hub with the `semver` crate, ≤ 64 chars, unique across every release including withdrawn ones (`releases_version_key`); `notes` trimmed, non-blank, ≤ 10 000 chars, no control characters but newline and tab; `channel` `stable`\|`preview`; `status` `draft`\|`published`\|`withdrawn`; `created_by` (null for the CLI), `created_at`, `published_at`, `withdrawn_at`) and `release_artifacts` (`id` = the store key, `platform` `^[a-z0-9][a-z0-9._-]{0,63}$` unique per release, `filename` `^[A-Za-z0-9_+-][A-Za-z0-9._+-]{0,127}$`, `size_bytes` > 0, `sha256` lowercase hex). Triggers: a release is inserted only as a draft, never deleted, its version, channel, notes and creation fields never change, the only status steps are draft → published (needs an artifact), draft → withdrawn and published → withdrawn, each stamping its time exactly once; artifacts are never updated and are inserted or deleted only while their release is a draft. `wipe_hub::artifacts`: the async `ArtifactStore` trait (`put`, `open`, `delete`; `Arc<dyn ArtifactStore>` in `AppState`), `LocalDirStore` (keys must be canonical UUIDs; writes a dot-file in the same directory, fsyncs, renames; deleting a missing key is fine) and `store_artifact`, which computes size and SHA-256 while the bytes stream into any store and keeps nothing for an empty file or one over `ARTIFACT_MAX_BYTES` (1 GiB, `Config::artifact_max_bytes`, not a flag). `serve` and the CLI take `--artifact-dir` / `WIPE_HUB_ARTIFACT_DIR` (default `.wipe-hub/artifacts` under the working directory, git-ignored), created at start-up; a path that is a file or cannot be created refuses to start. Routes (vendor admins only, `VendorAdmin` first: 401/403 before anything is read): `GET\|POST /api/admin/releases`, `GET /api/admin/releases/:id`, `POST …/:id/artifacts?platform=&filename=` (the raw `application/octet-stream` body, else 415; streamed to the store before any transaction, then one transaction locks the release `FOR UPDATE`, re-checks draft and platform, inserts and audits; any refusal deletes the stored file; 413 over the limit, 400 empty, 409 platform taken or not a draft, 503 on a storage failure with the cause logged), `POST …/:id/artifacts/:artifact_id/remove`, `POST …/:id/publish` (409 without an artifact), `POST …/:id/withdraw`. Audit (subject `release:<id>`): `release.created {version, channel}`, `release.artifact_added`/`release.artifact_removed {artifact_id, platform, filename, size_bytes, sha256}`, `release.published {artifact_ids}`, `release.withdrawn {previous_status}`, and reads `admin.releases_listed {release_ids}` / `admin.release_viewed {}`. `wipe-hub release publish --version --notes [--channel] --file <platform>=<path>…` validates every flag and file first, applies migrations, stores each file, then creates, adds and publishes in one transaction as `cli:release-publish` (`os_user` in each detail), printing the release id and each artifact's size and SHA-256; any failure exits non-zero naming the problem, commits nothing and deletes what it stored. Portal: `/admin/releases` (every release with status, channel and file count; a create form that opens the new draft) and `/admin/releases/$id` (notes, files with the full SHA-256, upload (platform, file and an editable file name prefilled from it, the file sent raw) and remove while draft, with remove, publish and withdraw each behind a confirming press). Tests: `tests/releases.rs` (every I/O row through HTTP and the built binary, including stored bytes hashing to the recorded checksum and no leftover temp files), store unit tests in `src/artifacts.rs`, the routes in `tests/isolation.rs`, the triggers in `tests/migrations.rs`, the artifact directory in `tests/cli.rs` | software-downloads story 1 (CAP-1, CAP-4, CAP-5) / ADR-0007 §5 | ✅ partial | Customers cannot list or download releases yet, and no download is audited (story 2); admins cannot download a file through the hub; no code signing, auto-update or CDN; only the local-directory store exists; a file stored by an upload whose transaction then fails is deleted best-effort (a failed delete is logged and leaves an orphan file); withdrawal takes no reason; the portal was checked by typecheck, unit tests and a production build, not in a real browser |
++| Releases, the artifact store and `wipe-hub release publish` — migration `0017_releases`: `releases` (`version` SemVer 2.0.0 without build metadata (`+…` is refused: SemVer ignores it when ranking, so `1.0.0` and `1.0.0+build.5` could not both be the latest) checked by the hub with the `semver` crate, ≤ 64 chars, unique across every release including withdrawn ones (`releases_version_key`); `notes` trimmed, non-blank, ≤ 10 000 chars, no control characters but newline and tab; `channel` `stable`\|`preview`; `status` `draft`\|`published`\|`withdrawn`; `created_by` (null for the CLI), `created_at`, `published_at`, `withdrawn_at`) and `release_artifacts` (`id` = the store key, `platform` `^[a-z0-9][a-z0-9._-]{0,63}$` unique per release, `filename` `^[A-Za-z0-9_+-][A-Za-z0-9._+-]{0,127}$`, `size_bytes` > 0, `sha256` lowercase hex). Triggers: a release is inserted only as a draft, never deleted, its version, channel, notes and creation fields never change, the only status steps are draft → published (needs an artifact), draft → withdrawn and published → withdrawn, each stamping its time exactly once; artifacts are never updated and are inserted or deleted only while their release is a draft. `wipe_hub::artifacts`: the async `ArtifactStore` trait (`put`, `open`, `delete`; `Arc<dyn ArtifactStore>` in `AppState`), `LocalDirStore` (keys must be canonical UUIDs; writes a dot-file in the same directory, fsyncs, renames; deleting a missing key is fine) and `store_artifact`, which computes size and SHA-256 while the bytes stream into any store and keeps nothing for an empty file or one over `ARTIFACT_MAX_BYTES` (1 GiB, `Config::artifact_max_bytes`, not a flag). `serve` and the CLI take `--artifact-dir` / `WIPE_HUB_ARTIFACT_DIR` (default `.wipe-hub/artifacts` under the working directory, git-ignored), created at start-up; a path that is a file or cannot be created refuses to start. Routes (vendor admins only, `VendorAdmin` first: 401/403 before anything is read): `GET\|POST /api/admin/releases`, `GET /api/admin/releases/:id`, `POST …/:id/artifacts?platform=&filename=` (the raw `application/octet-stream` body, else 415; streamed to the store before any transaction, then one transaction locks the release `FOR UPDATE`, re-checks draft and platform, inserts and audits; any refusal deletes the stored file; 413 over the limit, 400 empty, 409 platform taken or not a draft, 503 on a storage failure with the cause logged), `POST …/:id/artifacts/:artifact_id/remove`, `POST …/:id/publish` (409 without an artifact), `POST …/:id/withdraw`. Audit (subject `release:<id>`): `release.created {version, channel}`, `release.artifact_added`/`release.artifact_removed {artifact_id, platform, filename, size_bytes, sha256}`, `release.published {artifact_ids}`, `release.withdrawn {previous_status}`, and reads `admin.releases_listed {release_ids}` / `admin.release_viewed {}`. `wipe-hub release publish --version --notes [--channel] --file <platform>=<path>…` validates every flag and file first, applies migrations, stores each file, then creates, adds and publishes in one transaction as `cli:release-publish` (`os_user` in each detail), printing the release id and each artifact's size and SHA-256; any failure exits non-zero naming the problem, commits nothing and deletes what it stored. Portal: `/admin/releases` (every release with status, channel and file count; a create form that opens the new draft) and `/admin/releases/$id` (notes, files with the full SHA-256, upload (platform, file and an editable file name prefilled from it, the file sent raw) and remove while draft, with remove, publish and withdraw each behind a confirming press). Tests: `tests/releases.rs` (every I/O row through HTTP and the built binary, including stored bytes hashing to the recorded checksum and no leftover temp files), store unit tests in `src/artifacts.rs`, the routes in `tests/isolation.rs`, the triggers in `tests/migrations.rs`, the artifact directory in `tests/cli.rs` | software-downloads story 1 (CAP-1, CAP-4, CAP-5) / ADR-0007 §5 | ✅ partial | Customer downloads shipped in story 2 (next row); admins cannot download a file through the hub; no code signing, auto-update or CDN; only the local-directory store exists; a file stored by an upload whose transaction then fails is deleted best-effort (a failed delete is logged and leaves an orphan file); withdrawal takes no reason; the portal was checked by typecheck, unit tests and a production build, not in a real browser |
++| Entitled downloads with audit — migration `0018_release_downloads`: `release_downloads` (`release_id` → releases, `artifact_id` → release_artifacts, `organization_id` → organizations, `user_id` with no foreign key (removing a team member deletes the user, and the download stays recorded), `user_email` snapshot, `downloaded_at`; index `(release_id, downloaded_at DESC)`); triggers refuse UPDATE, DELETE and TRUNCATE, and an INSERT whose artifact is not in its release or whose release is not `published`. `wipe_hub::downloads`: an organization is **entitled** when it has a current entitlement (not refunded, `term_end > now()`, the `current` rule of `GET /api/entitlements`; the vendor organization never is). `GET /api/downloads` (session, any role, entitled, else 403 `your organization has no current entitlement, so it cannot download releases`): `{releases}`, published only, both channels, newest `published_at` first, each with `id, version, notes, channel, published_at, artifacts: [{id, platform, filename, size_bytes, sha256}]`. `POST /api/downloads/:artifact_id/link` (session, any role, entitled, checked before the id): `{url, expires_at}`, a **download link** good for `Config::download_link_ttl` (300 s, not a flag); a draft, withdrawn, unknown or non-UUID artifact is 404 `no such download`. `GET /api/downloads/:artifact_id/file?user=&expires=&sig=` needs no session (the isolation sweep classifies it `Anonymous`): the signature is HMAC-SHA256 over `wipe-hub/download/v1\n<artifact>\n<user>\n<expires>`, base64url without padding, keyed by 32 OS-RNG bytes drawn when the hub starts (`AppState::download_signer`) and compared with `Mac::verify_slice`; a missing, malformed, tampered or expired link, or one whose user no longer exists, is 403 `this download link is invalid or has expired`, an organization no longer entitled 403, a release no longer published 404, and a stored file the store cannot open 503 `file storage is unavailable; try again later` (cause logged), none writing anything. On success it opens the stored file, then one transaction (the release row share-locked) inserts the `release_downloads` row and the audit row `release.downloaded` (actor `user:<id>`, subject `release:<id>`, detail `{artifact_id, platform, filename, sha256, organization_id}`) and commits, then streams the bytes as `application/octet-stream` with `Content-Disposition: attachment`, `Content-Length`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`. Listing and link issuing are not audited. Admin: `GET /api/admin/releases/:id/downloads` (`VendorAdmin` first): `{downloads: [{id, artifact_id, platform, filename, user_id, user_email, organization_id, organization_name, downloaded_at}]}`, newest first, any release status, audited as `admin.release_downloads_viewed {}`; unknown or non-UUID id 404 `no such release` with no audit row. Portal: `/downloads` (home-page link) lists each release with channel, publication date and notes, and each file with platform, human size and full SHA-256 and a Download button that requests a link and navigates to it; an unentitled organization sees that it has no current entitlement and a link to `/buy`. `/admin/releases/$id` gains a Downloads section (when, user email, organization, platform), loaded on a press because the read is audited. Tests: `tests/downloads.rs` (every I/O row through HTTP, including the fetched body's SHA-256 against the listed checksum and the CLI-published file, header values, exact row and audit counts), sign/verify unit tests in `src/downloads.rs`, the routes in `tests/isolation.rs`, the triggers in `tests/migrations.rs` | software-downloads story 2 (CAP-2, CAP-3) / ADR-0007 §5, §6 | ✅ partial | A link is a bearer credential for five minutes: anyone holding it can fetch the file as its user (re-checked against that user and their organization's entitlement, and recorded as them); the signing key is per hub process, so a restart voids outstanding links and two hub instances would refuse each other's links (§11 v0.3 #14); no `Range`/resume, so an interrupted download starts again and records another row; an interrupted transfer still counts as a download; vendor admins cannot download release files through the hub; no code signing, auto-update or CDN; the portal was checked by typecheck, unit tests and a production build, not in a real browser |
+ 
+ ## 11. Deferred — known and committed
+ 
+@@ -820,6 +821,12 @@ keep resolving.
+     handoff records, supervisor sign-off.
+ 13. **Failure routing** — drives that fail repeatedly automatically
+     routed to Destroy with linked cert history.
++14. **More than one hub instance** — the hub keeps one process-local
++    secret: the key that signs **download links** is drawn at start-up
++    (software-downloads story 2), so links issued by one instance fail on
++    another and a restart voids outstanding links (each lives five
++    minutes). Running hubs behind a load balancer needs a shared key
++    (a configured secret or one stored in Postgres) first.
+ 
+ ## 12. Open questions for grilling
+ 
+@@ -1125,7 +1132,7 @@ and resolve. None of these have a decided answer.
+   and users and view one organization (read-only), and list, view, work
+   (status, notes), export and erase **sales leads**, create, edit,
+   publish and retire **offerings**, and create, publish and withdraw
+-  **releases**. The only cross-organization reads in
++  **releases** and see who downloaded each. The only cross-organization reads in
+   the hub; every search, view, export and change is audited, with ids only
+   for anything holding personal data (offering rows, which hold none, may
+   carry offering values).
+@@ -1189,6 +1196,15 @@ and resolve. None of these have a decided answer.
+   in the hub's `ArtifactStore` (a local directory, `--artifact-dir`, for
+   now) under the artifact's id. Not an evidence artifact on a station
+   certificate.
++- **Download link** — a short-lived signed URL to one **Artifact** of a
++  published **Release** (`/api/downloads/<artifact>/file?user=…&expires=…&sig=…`),
++  issued by the hub to a signed-in user of an entitled organization (one
++  with a current **Entitlement**) and good for five minutes. It is the
++  credential on its own (no session needed, so it works from `curl` on a
++  bench machine); fetching it re-checks the user and their organization's
++  entitlement and records a release download, as that user, in an
++  append-only table and the audit log. Not a **Licence** download and not
++  the emailed single-use links of sign-in.
+ - **Payment provider** — the hub's seam to a payment service
+   (`payments::PaymentProvider`, ADR-0007 §4): starts a hosted checkout,
+   opens the billing page (cards and payment history) and verifies signed events.
+diff --git a/README.md b/README.md
+index 20abb2c..78b1b4f 100644
+--- a/README.md
++++ b/README.md
+@@ -45,9 +45,9 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
+ | `wipe-fleet` | mDNS service advertise / browse + deterministic lead election |
+ | `wipe-server` | Axum REST API + WebSocket event stream; auto-signs certs when a Job reaches `Erased` or `PendingCoSign`; destruction-manifest assembly and co-sign |
+ | `wipe-cli` | `wipestation serve / inspect / verify-cert` binary |
+-| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, profile and password change, organization rename and team management (owners invite by emailed single-use link, change roles between `owner` and `member`, and remove members; an organization always keeps an owner), a per-address and per-IP limit on every email it sends (5 per address, 20 per IP per hour; invitations also 20 per organization per hour), every auth event audited, and `wipe-hub admin create --email <address>`, which creates a vendor admin in the one vendor organization and emails them a set-password link (never a password on the command line), for an admin area under `/api/admin/*` (search customer organizations and users, view one organization, and list, view, set the status of, annotate, export as CSV and erase sales leads, and create, edit, publish and retire offerings (price in integer minor units, one-off or annual, and grants: licence scope, seats, erasure quota, `wipe_license::Feature` entitlements, term), whose price and grants freeze once published; vendor admins with a verified email only, and every search, view, export and change audited, with ids only and never a sales lead's personal data), and sales leads from the marketing site's forms (`POST /api/leads` behind credentialed CORS for the one `--site-origin` and the usual CSRF token, with a per-IP limit of 10 an hour, a honeypot, one lead per address, the exact consent text stored with every submission, a confirmation email whose link unsubscribes via the portal's `/unsubscribe` page, and lead audit rows that hold no personal data). `tests/isolation.rs` checks that one organization's owner and member never see or change another organization's records through any customer route, and fails when a new `/api` route is left unclassified. Customers buy through a `PaymentProvider` seam (`--payment-provider fake|stripe`): a public catalog of published offerings (`GET /api/offerings`, no session; the marketing site's pricing page reads it at build time), checkout by an organization owner with a verified email (`POST /api/checkout`, creating a `pending` order that snapshots the offering's terms), orders for every role (`GET /api/orders[/{id}]`) and billing for owners (`POST /api/billing/portal`); an order becomes `paid` or `expired` only by applying a provider event whose signature the provider verified, and every order state change is audited. The `fake` provider (the default) works only on a local `--public-base-url` and drives the portal's test checkout page; `stripe` (which needs `WIPE_HUB_STRIPE_SECRET_KEY` and `WIPE_HUB_STRIPE_WEBHOOK_SECRET`) creates Stripe Checkout Sessions (a single payment for a one-off offering, a yearly subscription for an annual one; no email or other personal data sent) and opens the Stripe billing portal once the organization's first payment has told the hub its billing customer (its Stripe customer; 409 before that). Provider events arrive at `POST /api/payments/webhook` (no CSRF token: the `Stripe-Signature`, or Fake's signature on a local hub, is the credential); each is stored once by provider and event id in an append-only `payment_events` table (metadata and the payload's SHA-256 only, never the payload) and applied in the same transaction, so a replayed event changes nothing, and a paid event that disagrees with its order's price, currency or order id leaves the order pending. Fulfilment: the paid transition creates the order's one **entitlement** in the same transaction (its seats, scope, quota and features read from the order's snapshot, a term from the payment for the offering's term), listed with the organization's available licence seats at `GET /api/entitlements` (any role; seats of entitlements not refunded and whose term has not ended). An annual offering is a subscription: each paid renewal invoice (`invoice.paid`, `subscription_cycle`) extends the term by 12 months, once per invoice; an owner cancelling at period end in the billing portal stops renewal (`customer.subscription.updated`), Stripe ending the subscription marks the entitlement `cancelled` with its term running to its end (`customer.subscription.deleted`), and a full refund (`charge.refunded`) marks the entitlement and its order `refunded`, which withdraws its seats; none of these touches an issued licence. The owner-approved auto-renewal notice is built by the hub and shown on `/buy`, the test checkout and Stripe's checkout page. The Fake provider adds owner-only test actions, `POST /api/payments/fake/entitlements/{id}/renew` and `/cancel`. See [Stripe test mode](#stripe-test-mode). Licence delivery: with a vendor root (`--vendor-root-seed` / `WIPE_HUB_VENDOR_ROOT_SEED`, a 32-byte seed file; without one registration is 503 and the hub warns at start), an owner registers a station (`POST /api/stations`: its instance key id, the entitlement whose seat it takes, the station's `--station-id` for a machine-scoped entitlement, an optional label and site) and the hub signs its licence with `wipe_license::VendorRoot::issue` (customer = the organization, quota, features and `not_after` = the entitlement's term end, machine scope bound to `machine_fingerprint(station_id)`, site scope to the entered site or the organization id), refusing it when no seat is free (the entitlement row is locked `FOR UPDATE`, so concurrent registrations cannot exceed the seats); every role lists stations (`GET /api/stations`), downloads the stored licence file byte for byte (`GET /api/licences/{id}/download`, audited) and reads the vendor root public key (`GET /api/licensing/root`); an owner releases a station (`POST /api/stations/{id}/release`), freeing its seat and marking its licence superseded, though the file on the station keeps working until it expires. After a paid renewal moves an entitlement's term end past a station's licence, the station lists `renewal_available: true` and an owner issues it a renewed licence (`POST /api/stations/{id}/reissue`, which also issues an updated licence after a lapse policy change): the same key, scope, quota and features to the new term end, the old licence superseded (its file still valid offline until its own expiry) and the seat kept; nothing is reissued by the payment itself. Vendor admins also issue a licence to any customer organization outside entitlements and seats, for a trial, evaluation or goodwill grant, with a mandatory reason and at most 1095 days (`POST /api/admin/organizations/{id}/licences`), list an organization's licences (`GET /api/admin/organizations/{id}/licences`), view one with its decoded file and whether it verifies against the hub's root (`GET /api/admin/licences/{id}`), download it (`GET /api/admin/licences/{id}/download`), decode and verify a pasted file (`POST /api/admin/licences/inspect`), and revoke one (`POST /api/admin/licences/{id}/revoke {reason}`), all audited. Revocation is recorded in the hub only: stations are not told and the file keeps verifying offline until its own expiry; the customer sees the station as revoked (no reason), cannot download or renew that licence, and can still release the station. Lapse policy (ADR-0012): every role reads the organization's policy (`GET /api/organization/lapse-policy`, `evaluation` or `stop`) and an owner changes it (`POST /api/organization/lapse-policy {lapse_policy}`, audited); every licence the hub signs (register, reissue, vendor issue) carries the policy in its signed body (omitted when `evaluation`, so earlier files are unchanged), and a station holding a licence with another policy lists `lapse_policy_update_available: true` until an owner reissues it. The hub only writes the policy; it enforces nothing. Releases (ADR-0007 §5): vendor admins create draft releases (`POST /api/admin/releases {version, notes, channel}`: a SemVer version without build metadata, never reused, even after withdrawal; `stable` or `preview`), upload one file per platform as the raw request body (`POST /api/admin/releases/{id}/artifacts?platform=&filename=`, `application/octet-stream`, at most 1 GiB; the hub computes its SHA-256 and size while streaming it into an `ArtifactStore`, a local directory set by `--artifact-dir` / `WIPE_HUB_ARTIFACT_DIR`, default `.wipe-hub/artifacts` under the working directory and created at start-up), remove a draft's files, publish (`…/publish`, needs a file; files freeze) and withdraw (`…/withdraw`, for good; files kept), list and view releases (`GET /api/admin/releases[/{id}]`), all audited; `wipe-hub release publish --version 0.2.0 --notes "…" [--channel preview] --file linux-x86_64=<path> …` does create, upload and publish in one step against the hub's database and artifact directory, printing each file's SHA-256. Customers cannot download releases yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
++| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), emailed single-use magic (sign-in) and password reset links, profile and password change, organization rename and team management (owners invite by emailed single-use link, change roles between `owner` and `member`, and remove members; an organization always keeps an owner), a per-address and per-IP limit on every email it sends (5 per address, 20 per IP per hour; invitations also 20 per organization per hour), every auth event audited, and `wipe-hub admin create --email <address>`, which creates a vendor admin in the one vendor organization and emails them a set-password link (never a password on the command line), for an admin area under `/api/admin/*` (search customer organizations and users, view one organization, and list, view, set the status of, annotate, export as CSV and erase sales leads, and create, edit, publish and retire offerings (price in integer minor units, one-off or annual, and grants: licence scope, seats, erasure quota, `wipe_license::Feature` entitlements, term), whose price and grants freeze once published; vendor admins with a verified email only, and every search, view, export and change audited, with ids only and never a sales lead's personal data), and sales leads from the marketing site's forms (`POST /api/leads` behind credentialed CORS for the one `--site-origin` and the usual CSRF token, with a per-IP limit of 10 an hour, a honeypot, one lead per address, the exact consent text stored with every submission, a confirmation email whose link unsubscribes via the portal's `/unsubscribe` page, and lead audit rows that hold no personal data). `tests/isolation.rs` checks that one organization's owner and member never see or change another organization's records through any customer route, and fails when a new `/api` route is left unclassified. Customers buy through a `PaymentProvider` seam (`--payment-provider fake|stripe`): a public catalog of published offerings (`GET /api/offerings`, no session; the marketing site's pricing page reads it at build time), checkout by an organization owner with a verified email (`POST /api/checkout`, creating a `pending` order that snapshots the offering's terms), orders for every role (`GET /api/orders[/{id}]`) and billing for owners (`POST /api/billing/portal`); an order becomes `paid` or `expired` only by applying a provider event whose signature the provider verified, and every order state change is audited. The `fake` provider (the default) works only on a local `--public-base-url` and drives the portal's test checkout page; `stripe` (which needs `WIPE_HUB_STRIPE_SECRET_KEY` and `WIPE_HUB_STRIPE_WEBHOOK_SECRET`) creates Stripe Checkout Sessions (a single payment for a one-off offering, a yearly subscription for an annual one; no email or other personal data sent) and opens the Stripe billing portal once the organization's first payment has told the hub its billing customer (its Stripe customer; 409 before that). Provider events arrive at `POST /api/payments/webhook` (no CSRF token: the `Stripe-Signature`, or Fake's signature on a local hub, is the credential); each is stored once by provider and event id in an append-only `payment_events` table (metadata and the payload's SHA-256 only, never the payload) and applied in the same transaction, so a replayed event changes nothing, and a paid event that disagrees with its order's price, currency or order id leaves the order pending. Fulfilment: the paid transition creates the order's one **entitlement** in the same transaction (its seats, scope, quota and features read from the order's snapshot, a term from the payment for the offering's term), listed with the organization's available licence seats at `GET /api/entitlements` (any role; seats of entitlements not refunded and whose term has not ended). An annual offering is a subscription: each paid renewal invoice (`invoice.paid`, `subscription_cycle`) extends the term by 12 months, once per invoice; an owner cancelling at period end in the billing portal stops renewal (`customer.subscription.updated`), Stripe ending the subscription marks the entitlement `cancelled` with its term running to its end (`customer.subscription.deleted`), and a full refund (`charge.refunded`) marks the entitlement and its order `refunded`, which withdraws its seats; none of these touches an issued licence. The owner-approved auto-renewal notice is built by the hub and shown on `/buy`, the test checkout and Stripe's checkout page. The Fake provider adds owner-only test actions, `POST /api/payments/fake/entitlements/{id}/renew` and `/cancel`. See [Stripe test mode](#stripe-test-mode). Licence delivery: with a vendor root (`--vendor-root-seed` / `WIPE_HUB_VENDOR_ROOT_SEED`, a 32-byte seed file; without one registration is 503 and the hub warns at start), an owner registers a station (`POST /api/stations`: its instance key id, the entitlement whose seat it takes, the station's `--station-id` for a machine-scoped entitlement, an optional label and site) and the hub signs its licence with `wipe_license::VendorRoot::issue` (customer = the organization, quota, features and `not_after` = the entitlement's term end, machine scope bound to `machine_fingerprint(station_id)`, site scope to the entered site or the organization id), refusing it when no seat is free (the entitlement row is locked `FOR UPDATE`, so concurrent registrations cannot exceed the seats); every role lists stations (`GET /api/stations`), downloads the stored licence file byte for byte (`GET /api/licences/{id}/download`, audited) and reads the vendor root public key (`GET /api/licensing/root`); an owner releases a station (`POST /api/stations/{id}/release`), freeing its seat and marking its licence superseded, though the file on the station keeps working until it expires. After a paid renewal moves an entitlement's term end past a station's licence, the station lists `renewal_available: true` and an owner issues it a renewed licence (`POST /api/stations/{id}/reissue`, which also issues an updated licence after a lapse policy change): the same key, scope, quota and features to the new term end, the old licence superseded (its file still valid offline until its own expiry) and the seat kept; nothing is reissued by the payment itself. Vendor admins also issue a licence to any customer organization outside entitlements and seats, for a trial, evaluation or goodwill grant, with a mandatory reason and at most 1095 days (`POST /api/admin/organizations/{id}/licences`), list an organization's licences (`GET /api/admin/organizations/{id}/licences`), view one with its decoded file and whether it verifies against the hub's root (`GET /api/admin/licences/{id}`), download it (`GET /api/admin/licences/{id}/download`), decode and verify a pasted file (`POST /api/admin/licences/inspect`), and revoke one (`POST /api/admin/licences/{id}/revoke {reason}`), all audited. Revocation is recorded in the hub only: stations are not told and the file keeps verifying offline until its own expiry; the customer sees the station as revoked (no reason), cannot download or renew that licence, and can still release the station. Lapse policy (ADR-0012): every role reads the organization's policy (`GET /api/organization/lapse-policy`, `evaluation` or `stop`) and an owner changes it (`POST /api/organization/lapse-policy {lapse_policy}`, audited); every licence the hub signs (register, reissue, vendor issue) carries the policy in its signed body (omitted when `evaluation`, so earlier files are unchanged), and a station holding a licence with another policy lists `lapse_policy_update_available: true` until an owner reissues it. The hub only writes the policy; it enforces nothing. Releases (ADR-0007 §5): vendor admins create draft releases (`POST /api/admin/releases {version, notes, channel}`: a SemVer version without build metadata, never reused, even after withdrawal; `stable` or `preview`), upload one file per platform as the raw request body (`POST /api/admin/releases/{id}/artifacts?platform=&filename=`, `application/octet-stream`, at most 1 GiB; the hub computes its SHA-256 and size while streaming it into an `ArtifactStore`, a local directory set by `--artifact-dir` / `WIPE_HUB_ARTIFACT_DIR`, default `.wipe-hub/artifacts` under the working directory and created at start-up), remove a draft's files, publish (`…/publish`, needs a file; files freeze) and withdraw (`…/withdraw`, for good; files kept), list and view releases (`GET /api/admin/releases[/{id}]`), all audited; `wipe-hub release publish --version 0.2.0 --notes "…" [--channel preview] --file linux-x86_64=<path> …` does create, upload and publish in one step against the hub's database and artifact directory, printing each file's SHA-256. Downloads (ADR-0007 §5, §6): any user of an organization with a current entitlement (not refunded, term not ended; never the vendor organization) lists the published releases of both channels with each file's size and SHA-256 (`GET /api/downloads`; 403 otherwise) and asks for a signed link to one file (`POST /api/downloads/{artifact_id}/link`: `{url, expires_at}`, good for five minutes, HMAC-signed with a key the hub draws at start, so a restart voids outstanding links); fetching the link needs no session (`GET /api/downloads/{artifact_id}/file?user=…&expires=…&sig=…`), re-checks the user and their organization's entitlement, records the download (user, organization, file, time) in an append-only `release_downloads` table and the audit log (`release.downloaded`), then streams the stored file as an attachment; vendor admins list each release's downloads (`GET /api/admin/releases/{id}/downloads`, audited). Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
+ | `apps/desktop` | Vite + React + TanStack Router + Tailwind frontend, plus Tauri 2 shell |
+-| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in, email-verification, sign-in-link (magic link), password-reset, accept-invitation and sales-lead unsubscribe (`/unsubscribe`, acting only on a button press) pages, an account page (name, password change), an organization page (rename, members, invitations, roles and removal for owners), an admin area for vendor admins (`/admin`: organization and user search, run only on submit since each is audited; `/admin/organizations/$id`: one organization and its users; `/admin/leads`: sales leads filtered by segment, status and submission date, with CSV export; `/admin/leads/$id`: one sales lead's submissions and consent text, status, notes and erasure; `/admin/offerings`: every offering and a new-draft form; `/admin/offerings/$id`: edit, publish and retire one offering; an organization's licences and an issue form on its page; `/admin/licences/$id`: one licence's decoded file, verification, download and revocation; `/admin/licences/inspect`: decode and verify a pasted licence file; `/admin/releases`: every release and a new-draft form; `/admin/releases/$id`: notes, files with their full SHA-256, upload and remove while draft, publish and withdraw), buying (`/buy`, the offerings for sale with a Buy button for verified owners and an annual offering's auto-renewal notice; `/orders` with Billing for owners; `/orders/$id`, re-read every 3 s while pending; `/seats`, "Licence seats": the organization's available seats and entitlements; `/stations`: registered stations with licence download and, for owners, a register form, Release and, once an entitlement renews, "Issue renewed licence" (members see that an owner can issue it), and "Revoked on <date>" with no download for a licence the vendor revoked, plus how to read a station's instance key id and the vendor root public key; the test provider's `/checkout/fake`, labelled "Test payment: no money moves", and `/billing/fake`, which lists renewing subscriptions with "Renew now (test)" and "Cancel (test)"), and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere, and a link to the admin area for vendor admins); its API client sends the hub's CSRF token on every POST |
++| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in, email-verification, sign-in-link (magic link), password-reset, accept-invitation and sales-lead unsubscribe (`/unsubscribe`, acting only on a button press) pages, an account page (name, password change), an organization page (rename, members, invitations, roles and removal for owners), an admin area for vendor admins (`/admin`: organization and user search, run only on submit since each is audited; `/admin/organizations/$id`: one organization and its users; `/admin/leads`: sales leads filtered by segment, status and submission date, with CSV export; `/admin/leads/$id`: one sales lead's submissions and consent text, status, notes and erasure; `/admin/offerings`: every offering and a new-draft form; `/admin/offerings/$id`: edit, publish and retire one offering; an organization's licences and an issue form on its page; `/admin/licences/$id`: one licence's decoded file, verification, download and revocation; `/admin/licences/inspect`: decode and verify a pasted licence file; `/admin/releases`: every release and a new-draft form; `/admin/releases/$id`: notes, files with their full SHA-256, upload and remove while draft, publish and withdraw, and who downloaded it, on a press), buying (`/buy`, the offerings for sale with a Buy button for verified owners and an annual offering's auto-renewal notice; `/orders` with Billing for owners; `/orders/$id`, re-read every 3 s while pending; `/seats`, "Licence seats": the organization's available seats and entitlements; `/stations`: registered stations with licence download and, for owners, a register form, Release and, once an entitlement renews, "Issue renewed licence" (members see that an owner can issue it), and "Revoked on <date>" with no download for a licence the vendor revoked, plus how to read a station's instance key id and the vendor root public key; `/downloads`: the published releases with each file's platform, size and full SHA-256 and a Download button for organizations with a current entitlement, else a link to buy; the test provider's `/checkout/fake`, labelled "Test payment: no money moves", and `/billing/fake`, which lists renewing subscriptions with "Renew now (test)" and "Cancel (test)"), and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere, and a link to the admin area for vendor admins); its API client sends the hub's CSRF token on every POST |
+ | `sites/www` | Static Astro + Tailwind marketing site (pre-launch): landing, product, standards, segment (ITAD, enterprise IT, government), pricing, contact, privacy and terms pages, `/capabilities`, and early-access/contact forms that stay closed (no script, disabled button) unless the build is given `PUBLIC_HUB_ORIGIN`, when a small script posts them to the hub's `POST /api/leads` (`astro build` refuses that while the privacy notice is a placeholder); a build-time check fails `astro build` on any capability overclaim, missing meta/OG tag, missing sitemap, or resource loaded from another origin (ADR-0006 §2). See [`sites/www/README.md`](sites/www/README.md) |
+ 
+ ## Quick start
+diff --git a/apps/portal/src/api/adminReleases.test.ts b/apps/portal/src/api/adminReleases.test.ts
+index 5f2fbc4..1c8cac1 100644
+--- a/apps/portal/src/api/adminReleases.test.ts
++++ b/apps/portal/src/api/adminReleases.test.ts
+@@ -9,6 +9,7 @@ import {
+   formatSize,
+   isFileName,
+   isPlatformLabel,
++  listReleaseDownloads,
+   listReleases,
+   publishRelease,
+   removeArtifact,
+@@ -17,6 +18,7 @@ import {
+   withdrawRelease,
+   type Release,
+   type ReleaseArtifact,
++  type ReleaseDownload,
+ } from "./adminReleases";
+ 
+ const SHA = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+@@ -236,4 +238,35 @@ describe("release calls", () => {
+       csrf: "csrf-1",
+     });
+   });
++
++  it("lists a release's downloads with a GET and checks the answer", async () => {
++    const download: ReleaseDownload = {
++      id: "9b2e7c1a-3d4f-4a5b-8c6d-7e8f9a0b1c2d",
++      artifact_id: artifact.id,
++      platform: "linux-x86_64",
++      filename: "wipestation",
++      user_id: "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
++      user_email: "ada@example.com",
++      organization_id: "2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f6a",
++      organization_name: "Acme Recyclers",
++      downloaded_at: "2026-11-08T12:00:00Z",
++    };
++    const f = respond(200, { downloads: [download] });
++    expect(await listReleaseDownloads(release.id, f.impl)).toEqual([download]);
++    expect(f.calls).toEqual([
++      {
++        url: `/api/admin/releases/${release.id}/downloads`,
++        method: "GET",
++        body: undefined,
++        contentType: null,
++        csrf: null,
++      },
++    ]);
++    const bad = respond(200, { downloads: [{ ...download, user_email: null }] });
++    expect(await rejection(listReleaseDownloads(release.id, bad.impl))).toBeInstanceOf(Error);
++    const missing = respond(404, { error: "no such release" });
++    const err = await rejection(listReleaseDownloads("x/y", missing.impl));
++    expect((err as HubError).status).toBe(404);
++    expect(missing.calls[0].url).toBe("/api/admin/releases/x%2Fy/downloads");
++  });
+ });
+diff --git a/apps/portal/src/api/adminReleases.ts b/apps/portal/src/api/adminReleases.ts
+index 88bb2ac..3d7ccc2 100644
+--- a/apps/portal/src/api/adminReleases.ts
++++ b/apps/portal/src/api/adminReleases.ts
+@@ -222,3 +222,48 @@ export async function withdrawRelease(id: string, fetchImpl: Fetch = fetch): Pro
+   const res = await ensureOk(await request(fetchImpl, "POST", releasePath(id, "withdraw"), {}));
+   return (await json(res, isReleaseBody, "release withdraw")).release;
+ }
++
++/**
++ * One recorded download of a release's file
++ * (`wipe_hub::release_admin::ReleaseDownload`). `user_email` is the address at
++ * the time; the user may since have left the organization.
++ */
++export interface ReleaseDownload {
++  id: string;
++  artifact_id: string;
++  platform: string;
++  filename: string;
++  user_id: string;
++  user_email: string;
++  organization_id: string;
++  organization_name: string;
++  /** RFC 3339 UTC. */
++  downloaded_at: string;
++}
++
++export function isReleaseDownload(v: unknown): v is ReleaseDownload {
++  return (
++    isObject(v) &&
++    typeof v.id === "string" &&
++    typeof v.artifact_id === "string" &&
++    typeof v.platform === "string" &&
++    typeof v.filename === "string" &&
++    typeof v.user_id === "string" &&
++    typeof v.user_email === "string" &&
++    typeof v.organization_id === "string" &&
++    typeof v.organization_name === "string" &&
++    typeof v.downloaded_at === "string"
++  );
++}
++
++const isDownloadsBody = (v: unknown): v is { downloads: ReleaseDownload[] } =>
++  isObject(v) && Array.isArray(v.downloads) && v.downloads.every(isReleaseDownload);
++
++/** `GET /api/admin/releases/{id}/downloads`: who downloaded its files, newest first. Audited. */
++export async function listReleaseDownloads(
++  id: string,
++  fetchImpl: Fetch = fetch,
++): Promise<ReleaseDownload[]> {
++  const res = await ensureOk(await request(fetchImpl, "GET", releasePath(id, "downloads")));
++  return (await json(res, isDownloadsBody, "release downloads")).downloads;
++}
+diff --git a/apps/portal/src/api/downloads.test.ts b/apps/portal/src/api/downloads.test.ts
+new file mode 100644
+index 0000000..ed48c70
+--- /dev/null
++++ b/apps/portal/src/api/downloads.test.ts
+@@ -0,0 +1,119 @@
++import { beforeEach, describe, expect, it } from "vitest";
++import { HubError, resetCsrfCache } from "./auth";
++import {
++  isDownloadLink,
++  isDownloadRelease,
++  isNotEntitled,
++  listDownloads,
++  requestDownloadLink,
++  type DownloadRelease,
++} from "./downloads";
++
++const SHA = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
++const ARTIFACT = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
++
++const release: DownloadRelease = {
++  id: "0f8fad5b-d9cb-469f-a165-70867728950e",
++  version: "0.2.0",
++  notes: "First build.",
++  channel: "stable",
++  published_at: "2026-11-08T10:00:00Z",
++  artifacts: [
++    { id: ARTIFACT, platform: "linux-x86_64", filename: "wipestation", size_bytes: 3, sha256: SHA },
++  ],
++};
++
++const link = {
++  url: `/api/downloads/${ARTIFACT}/file?user=u&expires=1&sig=s`,
++  expires_at: "2026-11-08T10:05:00Z",
++};
++
++interface Call {
++  url: string;
++  method: string;
++  csrf: string | null;
++}
++
++/** A fake hub, as in `stations.test.ts`. */
++function respond(status: number, body?: unknown) {
++  const calls: Call[] = [];
++  const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
++    const url = String(input);
++    const method = init?.method ?? "GET";
++    if (url === "/api/auth/csrf" && method === "GET") {
++      return new Response(JSON.stringify({ csrf_token: "csrf-1" }), {
++        status: 200,
++        headers: { "Content-Type": "application/json" },
++      });
++    }
++    const sent = (init?.headers ?? {}) as Record<string, string>;
++    calls.push({ url, method, csrf: sent["X-CSRF-Token"] ?? null });
++    return new Response(body === undefined ? null : JSON.stringify(body), {
++      status,
++      headers: { "Content-Type": "application/json" },
++    });
++  }) as typeof fetch;
++  return { impl, calls };
++}
++
++beforeEach(() => resetCsrfCache());
++
++async function rejection(p: Promise<unknown>): Promise<unknown> {
++  return p.then(
++    () => undefined,
++    (e: unknown) => e,
++  );
++}
++
++describe("guards", () => {
++  it("accepts the hub's shapes and refuses others", () => {
++    expect(isDownloadRelease(release)).toBe(true);
++    expect(isDownloadRelease({ ...release, channel: "beta" })).toBe(false);
++    expect(
++      isDownloadRelease({ ...release, artifacts: [{ ...release.artifacts[0], sha256: SHA.toUpperCase() }] }),
++    ).toBe(false);
++    expect(isDownloadRelease({ ...release, published_at: null })).toBe(false);
++  });
++
++  it("accepts only links to the hub's own download path", () => {
++    expect(isDownloadLink(link)).toBe(true);
++    expect(isDownloadLink({ ...link, url: "https://evil.example/api/downloads/x" })).toBe(false);
++    expect(isDownloadLink({ ...link, url: "//evil.example/x" })).toBe(false);
++    expect(isDownloadLink({ url: link.url })).toBe(false);
++  });
++
++  it("recognises the not-entitled refusal", () => {
++    expect(isNotEntitled(new HubError(403, "no current entitlement"))).toBe(true);
++    expect(isNotEntitled(new HubError(401, "not signed in"))).toBe(false);
++    expect(isNotEntitled(new Error("x"))).toBe(false);
++  });
++});
++
++describe("calls", () => {
++  it("lists with a GET without CSRF", async () => {
++    const f = respond(200, { releases: [release] });
++    expect(await listDownloads(f.impl)).toEqual({ releases: [release] });
++    expect(f.calls).toEqual([{ url: "/api/downloads", method: "GET", csrf: null }]);
++  });
++
++  it("surfaces a 403 as a not-entitled HubError", async () => {
++    const f = respond(403, { error: "your organization has no current entitlement" });
++    const err = await rejection(listDownloads(f.impl));
++    expect(isNotEntitled(err)).toBe(true);
++    expect((err as HubError).message).toBe("your organization has no current entitlement");
++  });
++
++  it("requests a link with CSRF, by encoded id", async () => {
++    const f = respond(200, link);
++    expect(await requestDownloadLink(ARTIFACT, f.impl)).toEqual(link);
++    expect(f.calls).toEqual([
++      { url: `/api/downloads/${ARTIFACT}/link`, method: "POST", csrf: "csrf-1" },
++    ]);
++    const missing = respond(404, { error: "no such download" });
++    const err = await rejection(requestDownloadLink("x/y", missing.impl));
++    expect((err as HubError).status).toBe(404);
++    expect(missing.calls[0].url).toBe("/api/downloads/x%2Fy/link");
++    const elsewhere = respond(200, { ...link, url: "https://evil.example/" });
++    expect(await rejection(requestDownloadLink(ARTIFACT, elsewhere.impl))).toBeInstanceOf(Error);
++  });
++});
+diff --git a/apps/portal/src/api/downloads.ts b/apps/portal/src/api/downloads.ts
+new file mode 100644
+index 0000000..35d51a5
+--- /dev/null
++++ b/apps/portal/src/api/downloads.ts
+@@ -0,0 +1,108 @@
++// Mirrors the customer download routes in crates/wipe-hub/src/download_routes.rs
++// and the serde shapes `wipe_hub::downloads::{DownloadList, DownloadRelease,
++// DownloadArtifact, DownloadLink}` (crates/wipe-hub/src/downloads.rs). Change
++// both together.
++//
++// Any role of an organization with a current entitlement; everyone else gets a
++// 403 `HubError` (`isNotEntitled`). Neither call is audited; fetching the file
++// through the signed link is, on the hub.
++
++import { HubError, ensureOk, isObject, json, request, type Fetch } from "./auth";
++import { CHANNELS, type Channel } from "./adminReleases";
++
++/** One file of a published release. `sha256` is lowercase hex, computed by the hub. */
++export interface DownloadArtifact {
++  id: string;
++  platform: string;
++  filename: string;
++  size_bytes: number;
++  sha256: string;
++}
++
++/** A published release. `published_at` is RFC 3339 UTC. */
++export interface DownloadRelease {
++  id: string;
++  version: string;
++  notes: string;
++  channel: Channel;
++  published_at: string;
++  /** By platform. */
++  artifacts: DownloadArtifact[];
++}
++
++export interface DownloadList {
++  /** Published only, newest publication first. */
++  releases: DownloadRelease[];
++}
++
++/** A short-lived signed link: `url` is path-relative, `expires_at` RFC 3339 UTC. */
++export interface DownloadLink {
++  url: string;
++  expires_at: string;
++}
++
++const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
++
++export function isDownloadArtifact(v: unknown): v is DownloadArtifact {
++  return (
++    isObject(v) &&
++    typeof v.id === "string" &&
++    typeof v.platform === "string" &&
++    typeof v.filename === "string" &&
++    isInt(v.size_bytes) &&
++    typeof v.sha256 === "string" &&
++    /^[0-9a-f]{64}$/.test(v.sha256)
++  );
++}
++
++export function isDownloadRelease(v: unknown): v is DownloadRelease {
++  return (
++    isObject(v) &&
++    typeof v.id === "string" &&
++    typeof v.version === "string" &&
++    typeof v.notes === "string" &&
++    typeof v.channel === "string" &&
++    (CHANNELS as readonly string[]).includes(v.channel) &&
++    typeof v.published_at === "string" &&
++    Array.isArray(v.artifacts) &&
++    v.artifacts.every(isDownloadArtifact)
++  );
++}
++
++const isDownloadList = (v: unknown): v is DownloadList =>
++  isObject(v) && Array.isArray(v.releases) && v.releases.every(isDownloadRelease);
++
++/** A link the hub signed: a path under `/api/downloads/`, never another origin. */
++export function isDownloadLink(v: unknown): v is DownloadLink {
++  return (
++    isObject(v) &&
++    typeof v.url === "string" &&
++    v.url.startsWith("/api/downloads/") &&
++    typeof v.expires_at === "string"
++  );
++}
++
++/** The hub refused because the organization has no current entitlement. */
++export function isNotEntitled(error: unknown): boolean {
++  return error instanceof HubError && error.status === 403;
++}
++
++/** `GET /api/downloads`: the published releases, newest first. */
++export async function listDownloads(fetchImpl: Fetch = fetch): Promise<DownloadList> {
++  const res = await ensureOk(await request(fetchImpl, "GET", "/api/downloads"));
++  return json(res, isDownloadList, "download list");
++}
++
++/**
++ * `POST /api/downloads/{artifact}/link`: a signed link to one file, good for
++ * five minutes. Navigating to it downloads the file; the hub records it then.
++ */
++export async function requestDownloadLink(
++  artifactId: string,
++  fetchImpl: Fetch = fetch,
++): Promise<DownloadLink> {
++  const res = await ensureOk(
++    await request(fetchImpl, "POST", `/api/downloads/${encodeURIComponent(artifactId)}/link`, {}),
++  );
++  return json(res, isDownloadLink, "download link");
++}
+diff --git a/apps/portal/src/main.tsx b/apps/portal/src/main.tsx
+index 599b209..3a3f3bb 100644
+--- a/apps/portal/src/main.tsx
++++ b/apps/portal/src/main.tsx
+@@ -24,6 +24,7 @@ import { AdminPage } from "./pages/AdminPage";
+ import { AdminReleasePage } from "./pages/AdminReleasePage";
+ import { AdminReleasesPage } from "./pages/AdminReleasesPage";
+ import { BuyPage } from "./pages/BuyPage";
++import { DownloadsPage } from "./pages/DownloadsPage";
+ import { FakeBillingPage } from "./pages/FakeBillingPage";
+ import { FakeCheckoutPage } from "./pages/FakeCheckoutPage";
+ import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
+@@ -213,6 +214,12 @@ const stationsRoute = createRoute({
+   component: StationsPage,
+ });
+ 
++const downloadsRoute = createRoute({
++  getParentRoute: () => rootRoute,
++  path: "/downloads",
++  component: DownloadsPage,
++});
++
+ // The Fake payment provider's checkout URL: `{public_base_url}/checkout/fake?session=…`.
+ const fakeCheckoutRoute = createRoute({
+   getParentRoute: () => rootRoute,
+@@ -326,6 +333,7 @@ const routeTree = rootRoute.addChildren([
+   orderRoute,
+   seatsRoute,
+   stationsRoute,
++  downloadsRoute,
+   fakeCheckoutRoute,
+   fakeBillingRoute,
+   adminRoute,
+diff --git a/apps/portal/src/pages/AdminReleasePage.tsx b/apps/portal/src/pages/AdminReleasePage.tsx
+index 5870102..2b9529a 100644
+--- a/apps/portal/src/pages/AdminReleasePage.tsx
++++ b/apps/portal/src/pages/AdminReleasePage.tsx
+@@ -8,6 +8,7 @@ import {
+   fileProblem,
+   formatSize,
+   isPlatformLabel,
++  listReleaseDownloads,
+   publishRelease,
+   removeArtifact,
+   uploadArtifact,
+@@ -15,6 +16,7 @@ import {
+   withdrawRelease,
+   type Release,
+   type ReleaseArtifact,
++  type ReleaseDownload,
+ } from "@/api/adminReleases";
+ import { SignInPrompt } from "./AccountPage";
+ import { FormError, SubmitButton } from "./AuthForm";
+@@ -170,10 +172,12 @@ function ReleaseView({ release: r, show }: { release: Release; show: (r: Release
+ 
+       {can.editFiles && <UploadForm release={r} show={show} />}
+ 
++      {r.status !== "draft" && <DownloadsSection releaseId={r.id} />}
++
+       {can.publish && (
+         <ConfirmedAction
+           title="Publish"
+-          explain="Freezes this release's files: none can be added or removed afterwards. Customers cannot download releases yet."
++          explain="Freezes this release's files: none can be added or removed afterwards, and customers with a current entitlement can download them from the portal."
+           start="Publish release"
+           confirm="Publish now"
+           run={() => publishRelease(r.id)}
+@@ -183,7 +187,7 @@ function ReleaseView({ release: r, show }: { release: Release; show: (r: Release
+       {can.withdraw && (
+         <ConfirmedAction
+           title="Withdraw"
+-          explain="Takes this release out of use, for good. It can never be published again and its version cannot be reused; its files are kept and it stays listed here."
++          explain="Takes this release out of use, for good: customers no longer see it or can download its files. It can never be published again and its version cannot be reused; its files are kept and it stays listed here."
+           start="Withdraw release"
+           confirm="Withdraw permanently"
+           run={() => withdrawRelease(r.id)}
+@@ -323,6 +327,70 @@ function UploadForm({ release: r, show }: { release: Release; show: (r: Release)
+   );
+ }
+ 
++/** "2026-11-08 12:00 UTC" from an RFC 3339 UTC timestamp. */
++export function downloadedWhen(timestamp: string): string {
++  return `${timestamp.slice(0, 10)} ${timestamp.slice(11, 16)} UTC`;
++}
++
++/**
++ * Who downloaded this release's files, newest first. Reading it is audited
++ * on the hub, so it loads on a press, not with the page.
++ */
++function DownloadsSection({ releaseId }: { releaseId: string }) {
++  const load = useMutation({ mutationFn: () => listReleaseDownloads(releaseId) });
++  return (
++    <div className="space-y-2 border-t border-slate-800 pt-4">
++      <h2 className="text-sm font-medium text-slate-400">Downloads</h2>
++      <button
++        type="button"
++        disabled={load.isPending}
++        onClick={() => load.mutate()}
++        className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50"
++      >
++        {load.isPending ? "Loading…" : load.data ? "Refresh downloads" : "Show downloads"}
++      </button>
++      <FormError error={load.error} />
++      {load.data && <DownloadsTable downloads={load.data} />}
++    </div>
++  );
++}
++
++export function DownloadsTable({ downloads }: { downloads: ReleaseDownload[] }) {
++  if (downloads.length === 0) {
++    return <p className="text-sm text-slate-400">No one has downloaded this release yet.</p>;
++  }
++  return (
++    <table className="w-full text-left text-sm">
++      <thead className="text-slate-400">
++        <tr>
++          <th className="py-1 pr-3 font-medium">When</th>
++          <th className="py-1 pr-3 font-medium">User</th>
++          <th className="py-1 pr-3 font-medium">Organization</th>
++          <th className="py-1 pr-3 font-medium">Platform</th>
++        </tr>
++      </thead>
++      <tbody className="divide-y divide-slate-800">
++        {downloads.map((d) => (
++          <tr key={d.id} className="align-top">
++            <td className="py-1 pr-3 whitespace-nowrap">{downloadedWhen(d.downloaded_at)}</td>
++            <td className="py-1 pr-3">{d.user_email}</td>
++            <td className="py-1 pr-3">
++              <Link
++                to="/admin/organizations/$id"
++                params={{ id: d.organization_id }}
++                className="text-indigo-400 hover:underline"
++              >
++                {d.organization_name}
++              </Link>
++            </td>
++            <td className="py-1 pr-3">{d.platform}</td>
++          </tr>
++        ))}
++      </tbody>
++    </table>
++  );
++}
++
+ /** A lifecycle step behind a second, confirming press. */
+ function ConfirmedAction({
+   title,
+diff --git a/apps/portal/src/pages/AdminReleasesPage.tsx b/apps/portal/src/pages/AdminReleasesPage.tsx
+index 6f8435f..dfd8a48 100644
+--- a/apps/portal/src/pages/AdminReleasesPage.tsx
++++ b/apps/portal/src/pages/AdminReleasesPage.tsx
+@@ -50,7 +50,8 @@ export function AdminReleasesPage() {
+         <>
+           <p className="text-sm text-slate-400">
+             Station software, one file per platform. Listing releases, opening one and every
+-            change are recorded in the audit log. Customers cannot download releases yet.
++            change are recorded in the audit log. Customers with a current entitlement download
++            published releases from their Downloads page; each release page lists who did.
+           </p>
+           <Releases />
+         </>
+diff --git a/apps/portal/src/pages/DownloadsPage.test.ts b/apps/portal/src/pages/DownloadsPage.test.ts
+new file mode 100644
+index 0000000..8a5e482
+--- /dev/null
++++ b/apps/portal/src/pages/DownloadsPage.test.ts
+@@ -0,0 +1,70 @@
++import { createElement } from "react";
++import { renderToStaticMarkup } from "react-dom/server";
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++import { describe, expect, it } from "vitest";
++import type { DownloadRelease } from "@/api/downloads";
++import { ChecksumNote, ReleaseCard, releaseHeading } from "./DownloadsPage";
++import { downloadedWhen, DownloadsTable } from "./AdminReleasePage";
++
++const SHA = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
++
++const release: DownloadRelease = {
++  id: "0f8fad5b-d9cb-469f-a165-70867728950e",
++  version: "0.2.0-rc.1",
++  notes: "First build.",
++  channel: "preview",
++  published_at: "2026-11-08T10:00:00Z",
++  artifacts: [
++    {
++      id: "7c9e6679-7425-40de-944b-e07fc1f90ae7",
++      platform: "linux-x86_64",
++      filename: "wipestation",
++      size_bytes: 1536,
++      sha256: SHA,
++    },
++  ],
++};
++
++/** `ReleaseCard` inside a query client, as the page renders it. */
++function renderCard(r: DownloadRelease): string {
++  return renderToStaticMarkup(
++    createElement(
++      QueryClientProvider,
++      { client: new QueryClient() },
++      createElement(ReleaseCard, { release: r }),
++    ),
++  );
++}
++
++describe("downloads page", () => {
++  it("heads each release with its version, channel and publication date", () => {
++    expect(releaseHeading(release)).toBe("0.2.0-rc.1 · Preview · published 2026-11-08");
++    expect(releaseHeading({ ...release, channel: "stable" })).toMatch(/· Stable ·/);
++  });
++
++  it("shows each file's platform, size and full checksum with a Download button", () => {
++    const html = renderCard(release);
++    expect(html).toContain("linux-x86_64");
++    expect(html).toContain("wipestation");
++    expect(html).toContain("1.5 KiB (1,536 bytes)");
++    expect(html).toContain(SHA);
++    expect(html).toContain(">Download</button>");
++    expect(html).toContain("First build.");
++  });
++
++  it("explains how to check a checksum", () => {
++    expect(renderToStaticMarkup(createElement(ChecksumNote))).toContain("sha256sum");
++  });
++});
++
++describe("admin release downloads", () => {
++  it("formats when a download happened", () => {
++    expect(downloadedWhen("2026-11-08T12:34:56Z")).toBe("2026-11-08 12:34 UTC");
++  });
++
++  it("says when no one has downloaded a release", () => {
++    expect(renderToStaticMarkup(createElement(DownloadsTable, { downloads: [] }))).toContain(
++      "No one has downloaded this release yet.",
++    );
++  });
++});
+diff --git a/apps/portal/src/pages/DownloadsPage.tsx b/apps/portal/src/pages/DownloadsPage.tsx
+new file mode 100644
+index 0000000..5304152
+--- /dev/null
++++ b/apps/portal/src/pages/DownloadsPage.tsx
+@@ -0,0 +1,152 @@
++import { useState } from "react";
++import { useMutation, useQuery } from "@tanstack/react-query";
++import { Link } from "@tanstack/react-router";
++import { fetchMe } from "@/api/auth";
++import { formatSize } from "@/api/adminReleases";
++import {
++  isNotEntitled,
++  listDownloads,
++  requestDownloadLink,
++  type DownloadArtifact,
++  type DownloadRelease,
++} from "@/api/downloads";
++import { SignInPrompt } from "./AccountPage";
++import { FormError } from "./AuthForm";
++import { CHANNEL_LABELS } from "./AdminReleasesPage";
++
++/** "0.2.0 · Stable · published 2026-11-08". */
++export function releaseHeading(r: DownloadRelease): string {
++  return `${r.version} · ${CHANNEL_LABELS[r.channel]} · published ${r.published_at.slice(0, 10)}`;
++}
++
++/**
++ * `/downloads`: the station software releases the organization can download,
++ * for any role of an organization with a current entitlement. Each file shows
++ * its platform, size and full SHA-256; Download asks the hub for a short-lived
++ * signed link and opens it, and the hub records the download.
++ */
++export function DownloadsPage() {
++  const me = useQuery({ queryKey: ["me"], queryFn: () => fetchMe(), retry: false });
++  return (
++    <section className="space-y-6">
++      <p className="text-sm">
++        <Link to="/" className="text-indigo-400 hover:underline">
++          Back to the portal
++        </Link>
++      </p>
++      <h1 className="text-xl font-semibold">Downloads</h1>
++      {me.isPending && <p className="text-sm text-slate-400">Loading…</p>}
++      <FormError error={me.error} />
++      {me.data === null && <SignInPrompt />}
++      {me.data && <Releases />}
++    </section>
++  );
++}
++
++function Releases() {
++  const list = useQuery({
++    queryKey: ["downloads"],
++    queryFn: () => listDownloads(),
++    retry: (count, error) => !isNotEntitled(error) && count < 2,
++  });
++  if (list.isPending) return <p className="text-sm text-slate-400">Loading…</p>;
++  if (isNotEntitled(list.error)) return <NotEntitled />;
++  if (list.error) return <FormError error={list.error} />;
++  const releases = list.data?.releases ?? [];
++  return (
++    <>
++      <ChecksumNote />
++      {releases.length === 0 ? (
++        <p className="text-sm text-slate-400">No releases have been published yet.</p>
++      ) : (
++        releases.map((r) => <ReleaseCard key={r.id} release={r} />)
++      )}
++    </>
++  );
++}
++
++/** What an organization without a current entitlement sees instead of the list. */
++export function NotEntitled() {
++  return (
++    <p role="alert" className="text-sm text-slate-300">
++      Your organization has no current entitlement, so it cannot download releases.{" "}
++      <Link to="/buy" className="text-indigo-400 hover:underline">
++        Buy a licence
++      </Link>{" "}
++      to get access.
++    </p>
++  );
++}
++
++/** How to check a downloaded file against the checksum shown. */
++export function ChecksumNote() {
++  return (
++    <p className="text-sm text-slate-400">
++      Compare each downloaded file&apos;s SHA-256 with the one shown here, for example with{" "}
++      <code className="font-mono text-slate-300">sha256sum &lt;file&gt;</code>. Download links
++      last five minutes, and each download is recorded with your account.
++    </p>
++  );
++}
++
++export function ReleaseCard({ release: r }: { release: DownloadRelease }) {
++  return (
++    <div className="space-y-3 border-t border-slate-800 pt-4">
++      <h2 className="text-lg font-medium">{releaseHeading(r)}</h2>
++      <p className="whitespace-pre-wrap text-sm text-slate-300">{r.notes}</p>
++      <table className="w-full text-left text-sm">
++        <thead className="text-slate-400">
++          <tr>
++            <th className="py-1 pr-3 font-medium">Platform</th>
++            <th className="py-1 pr-3 font-medium">File</th>
++            <th className="py-1 pr-3 font-medium">Size</th>
++            <th className="py-1 pr-3 font-medium">SHA-256</th>
++            <th className="py-1 font-medium" />
++          </tr>
++        </thead>
++        <tbody className="divide-y divide-slate-800">
++          {r.artifacts.map((a) => (
++            <ArtifactRow key={a.id} artifact={a} />
++          ))}
++        </tbody>
++      </table>
++    </div>
++  );
++}
++
++function ArtifactRow({ artifact: a }: { artifact: DownloadArtifact }) {
++  const [opened, setOpened] = useState(false);
++  const download = useMutation({
++    mutationFn: () => requestDownloadLink(a.id),
++    onSuccess: (link) => {
++      setOpened(true);
++      window.location.assign(link.url);
++    },
++  });
++  return (
++    <tr className="align-top">
++      <td className="py-1 pr-3">{a.platform}</td>
++      <td className="py-1 pr-3">{a.filename}</td>
++      <td className="py-1 pr-3 whitespace-nowrap">{formatSize(a.size_bytes)}</td>
++      <td className="py-1 pr-3 break-all font-mono text-xs">{a.sha256}</td>
++      <td className="py-1 space-y-1">
++        <button
++          type="button"
++          disabled={download.isPending}
++          onClick={() => download.mutate()}
++          className="rounded-md bg-indigo-600 px-3 py-1 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
++        >
++          {download.isPending ? "Preparing…" : "Download"}
++        </button>
++        {opened && !download.isPending && (
++          <p className="text-xs text-slate-400">Download started.</p>
++        )}
++        {isNotEntitled(download.error) ? (
++          <NotEntitled />
++        ) : (
++          <FormError error={download.error} />
++        )}
++      </td>
++    </tr>
++  );
++}
+diff --git a/apps/portal/src/pages/HomePage.tsx b/apps/portal/src/pages/HomePage.tsx
+index 1ae7019..e6cbc08 100644
+--- a/apps/portal/src/pages/HomePage.tsx
++++ b/apps/portal/src/pages/HomePage.tsx
+@@ -131,6 +131,9 @@ function SignedIn({ account }: { account: Account }) {
+         <Link to="/stations" className="text-indigo-400 hover:underline">
+           Stations
+         </Link>
++        <Link to="/downloads" className="text-indigo-400 hover:underline">
++          Downloads
++        </Link>
+         {/* A convenience only: the hub refuses the admin area to everyone else. */}
+         {user.role === "vendor_admin" && (
+           <Link to="/admin" className="text-indigo-400 hover:underline">
+diff --git a/crates/wipe-hub/migrations/0018_release_downloads.sql b/crates/wipe-hub/migrations/0018_release_downloads.sql
+new file mode 100644
+index 0000000..f7098c5
+--- /dev/null
++++ b/crates/wipe-hub/migrations/0018_release_downloads.sql
+@@ -0,0 +1,66 @@
++-- Release downloads (software-downloads story 2, CAP-3, ADR-0007 §5, §6):
++-- one row per file a customer fetched through a signed download link,
++-- written in the same transaction as its `release.downloaded` audit row,
++-- after the stored file opened and before its bytes stream.
++--
++-- `user_id` has no foreign key on purpose: removing a team member deletes
++-- the user row, and their downloads must stay recorded. `user_email` is the
++-- address at the time of the download, for the same reason.
++--
++-- Append-only: triggers refuse UPDATE, DELETE and TRUNCATE for every role,
++-- including the table owner (who, like a superuser, can still disable or drop
++-- them; see 0002). An INSERT is refused unless the artifact belongs to
++-- `release_id` and that release is published. `wipe_hub::downloads` checks
++-- both first; these triggers are the schema-level backstop.
++--
++-- Never edit an applied migration; add a new NNNN_name.sql.
++
++CREATE TABLE release_downloads (
++    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
++    release_id      uuid NOT NULL REFERENCES releases (id),
++    artifact_id     uuid NOT NULL REFERENCES release_artifacts (id),
++    organization_id uuid NOT NULL REFERENCES organizations (id),
++    user_id         uuid NOT NULL,
++    user_email      text NOT NULL CHECK (user_email ~ '\S'),
++    downloaded_at   timestamptz NOT NULL DEFAULT now()
++);
++
++CREATE INDEX release_downloads_release_idx
++    ON release_downloads (release_id, downloaded_at DESC);
++
++CREATE FUNCTION release_downloads_append_only() RETURNS trigger
++LANGUAGE plpgsql AS $$
++BEGIN
++    RAISE EXCEPTION 'release_downloads is append-only (% rejected)', TG_OP;
++END;
++$$;
++
++CREATE TRIGGER release_downloads_no_update_or_delete
++    BEFORE UPDATE OR DELETE ON release_downloads
++    FOR EACH ROW EXECUTE FUNCTION release_downloads_append_only();
++
++CREATE TRIGGER release_downloads_no_truncate
++    BEFORE TRUNCATE ON release_downloads
++    FOR EACH STATEMENT EXECUTE FUNCTION release_downloads_append_only();
++
++CREATE FUNCTION release_downloads_insert_check() RETURNS trigger
++LANGUAGE plpgsql AS $$
++DECLARE
++    release_status text;
++BEGIN
++    IF NOT EXISTS (SELECT 1 FROM release_artifacts
++                    WHERE id = NEW.artifact_id AND release_id = NEW.release_id) THEN
++        RAISE EXCEPTION 'a download''s artifact must belong to its release';
++    END IF;
++    SELECT status INTO release_status FROM releases WHERE id = NEW.release_id;
++    IF release_status IS DISTINCT FROM 'published' THEN
++        RAISE EXCEPTION 'only a published release can be downloaded (it is %)',
++            coalesce(release_status, 'missing');
++    END IF;
++    RETURN NEW;
++END;
++$$;
++
++CREATE TRIGGER release_downloads_insert_check
++    BEFORE INSERT ON release_downloads
++    FOR EACH ROW EXECUTE FUNCTION release_downloads_insert_check();
+diff --git a/crates/wipe-hub/src/admin_routes.rs b/crates/wipe-hub/src/admin_routes.rs
+index 334067d..bed904f 100644
+--- a/crates/wipe-hub/src/admin_routes.rs
++++ b/crates/wipe-hub/src/admin_routes.rs
+@@ -44,6 +44,9 @@
+ //! - `POST /api/admin/releases {version, notes, channel}` — create a draft
+ //!   release (201 `{release}`); 409 [`release_admin::MSG_VERSION_TAKEN`].
+ //! - `GET /api/admin/releases/:id` — `{release}`.
++//! - `GET /api/admin/releases/:id/downloads` — `{downloads}`: every recorded
++//!   download of the release's files (user email, organization, file),
++//!   newest first, whatever the release's status.
+ //! - `POST /api/admin/releases/:id/artifacts?platform=&filename=` — the raw
+ //!   request body (`application/octet-stream`, else 415) is one file, stored
+ //!   and hashed by the hub (201 `{artifact}`); over the limit 413
+@@ -107,7 +110,7 @@ use crate::auth::{session_token, ApiError, JsonBody, MSG_NOT_SIGNED_IN};
+ use crate::lead_admin::{self, FilterParams, LeadDetail, LeadFilter, LeadList};
+ use crate::licence_admin::{self, InspectRequest, IssueRequest, RevokeRequest, MSG_NOT_A_LICENCE};
+ use crate::offering_admin::{self, NewOffering, OfferingError, OfferingList, OfferingRequest};
+-use crate::release_admin::{self, ReleaseError, ReleaseList, ReleaseRequest};
++use crate::release_admin::{self, ReleaseDownloads, ReleaseError, ReleaseList, ReleaseRequest};
+ use crate::station_routes::licence_file_response;
+ use crate::stations::{self, MSG_ISSUANCE_UNAVAILABLE, MSG_NO_LICENCE};
+ use crate::AppState;
+@@ -154,6 +157,7 @@ pub fn routes() -> Router<AppState> {
+             get(list_releases).post(create_release),
+         )
+         .route("/api/admin/releases/:id", get(release_detail))
++        .route("/api/admin/releases/:id/downloads", get(release_downloads))
+         .route("/api/admin/releases/:id/artifacts", post(upload_artifact))
+         .route(
+             "/api/admin/releases/:id/artifacts/:artifact_id/remove",
+@@ -687,6 +691,18 @@ async fn release_detail(
+     Ok(Json(json!({ "release": release })))
+ }
+ 
++async fn release_downloads(
++    State(state): State<AppState>,
++    admin: VendorAdmin,
++    Path(id): Path<String>,
++) -> Result<Json<ReleaseDownloads>, ApiError> {
++    let id = release_id(&id)?;
++    let mut tx = state.pool.begin().await?;
++    let found = release_admin::downloads(&mut tx, &admin, id).await?;
++    tx.commit().await?;
++    Ok(Json(found))
++}
++
+ /// The upload's query string. Unknown keys are refused.
+ #[derive(Debug, Deserialize)]
+ #[serde(deny_unknown_fields)]
+diff --git a/crates/wipe-hub/src/config.rs b/crates/wipe-hub/src/config.rs
+index 972af64..0089b41 100644
+--- a/crates/wipe-hub/src/config.rs
++++ b/crates/wipe-hub/src/config.rs
+@@ -221,6 +221,10 @@ pub struct Config {
+     /// The largest artifact accepted: [`ARTIFACT_MAX_BYTES`]. Not a flag;
+     /// tests lower it.
+     pub artifact_max_bytes: u64,
++    /// How long a download link is good for:
++    /// [`crate::downloads::DOWNLOAD_LINK_TTL`]. Not a flag; tests set zero
++    /// to get an already-expired link.
++    pub download_link_ttl: std::time::Duration,
+ }
+ 
+ #[derive(Debug, Error)]
+@@ -314,6 +318,7 @@ impl Config {
+             site_origin,
+             artifact_dir,
+             artifact_max_bytes: ARTIFACT_MAX_BYTES,
++            download_link_ttl: crate::downloads::DOWNLOAD_LINK_TTL,
+         })
+     }
+ }
+@@ -402,6 +407,7 @@ impl fmt::Debug for Config {
+             .field("site_origin", &self.site_origin)
+             .field("artifact_dir", &self.artifact_dir.display().to_string())
+             .field("artifact_max_bytes", &self.artifact_max_bytes)
++            .field("download_link_ttl", &self.download_link_ttl)
+             .finish()
+     }
+ }
+@@ -1104,6 +1110,7 @@ mod tests {
+     fn the_artifact_limit_is_a_gibibyte_and_in_debug() {
+         let c = Config::from_args(args()).unwrap();
+         assert_eq!(c.artifact_max_bytes, 1 << 30);
++        assert_eq!(c.download_link_ttl, std::time::Duration::from_secs(300));
+         let debug = format!("{c:?}");
+         assert!(
+             debug.contains(&c.artifact_dir.display().to_string()),
+diff --git a/crates/wipe-hub/src/download_routes.rs b/crates/wipe-hub/src/download_routes.rs
+new file mode 100644
+index 0000000..42c657a
+--- /dev/null
++++ b/crates/wipe-hub/src/download_routes.rs
+@@ -0,0 +1,197 @@
++//! Customer download routes (software-downloads story 2, CAP-2, CAP-3); the
++//! rules are [`crate::downloads`]'s:
++//!
++//! - `GET /api/downloads` — any role of an entitled organization:
++//!   `{releases}`, published only, newest publication first, each with its
++//!   files (`id, platform, filename, size_bytes, sha256`).
++//! - `POST /api/downloads/:artifact_id/link` — any role of an entitled
++//!   organization: `{url, expires_at}`, a signed link to that file good for
++//!   five minutes. 404 [`MSG_NO_DOWNLOAD`] for a draft, withdrawn, unknown
++//!   or non-UUID artifact.
++//! - `GET /api/downloads/:artifact_id/file?user=&expires=&sig=` — no
++//!   session: the link is the credential. The stored file, streamed as
++//!   `application/octet-stream` with `Content-Disposition: attachment`,
++//!   `Content-Length`, `Cache-Control: no-store`, `X-Content-Type-Options:
++//!   nosniff` and `Referrer-Policy: no-referrer`, after recording the
++//!   download. A missing, malformed, tampered or expired link, or one whose
++//!   user is gone, is 403 [`MSG_LINK_INVALID`]; an organization no longer
++//!   entitled 403 [`MSG_NOT_ENTITLED`]; a release no longer published 404
++//!   [`MSG_NO_DOWNLOAD`]; a stored file the store cannot open 503
++//!   [`MSG_STORAGE_UNAVAILABLE`]. None of these writes anything.
++//!
++//! The first two need a session (401 without one) and refuse an unentitled
++//! organization, the vendor's included, with 403 [`MSG_NOT_ENTITLED`] before
++//! the artifact id is looked at. Neither is audited; the fetch is.
++
++use axum::body::Body;
++use axum::extract::{Path, RawQuery, State};
++use axum::http::{header, HeaderValue, StatusCode};
++use axum::response::{IntoResponse, Response};
++use axum::routing::{get, post};
++use axum::{Json, Router};
++use tokio_util::io::ReaderStream;
++
++use crate::artifacts::StoreError;
++use crate::auth::{ApiError, CurrentUser};
++use crate::downloads::{
++    self, DownloadError, DownloadLink, DownloadList, MSG_LINK_INVALID, MSG_NOT_ENTITLED,
++    MSG_NO_DOWNLOAD,
++};
++use crate::release_admin::MSG_STORAGE_UNAVAILABLE;
++use crate::AppState;
++
++pub fn routes() -> Router<AppState> {
++    Router::new()
++        .route("/api/downloads", get(list))
++        .route("/api/downloads/:artifact_id/link", post(link))
++        .route("/api/downloads/:artifact_id/file", get(file))
++}
++
++impl From<DownloadError> for ApiError {
++    fn from(e: DownloadError) -> Self {
++        match e {
++            DownloadError::NotEntitled => ApiError::new(StatusCode::FORBIDDEN, MSG_NOT_ENTITLED),
++            DownloadError::NoDownload => ApiError::new(StatusCode::NOT_FOUND, MSG_NO_DOWNLOAD),
++            DownloadError::LinkInvalid => ApiError::new(StatusCode::FORBIDDEN, MSG_LINK_INVALID),
++            DownloadError::Db(e) => e.into(),
++            DownloadError::Audit(e) => e.into(),
++        }
++    }
++}
++
++async fn list(
++    State(state): State<AppState>,
++    user: CurrentUser,
++) -> Result<Json<DownloadList>, ApiError> {
++    let mut conn = state.pool.acquire().await?;
++    Ok(Json(
++        downloads::list_for(&mut conn, user.organization_id).await?,
++    ))
++}
++
++async fn link(
++    State(state): State<AppState>,
++    user: CurrentUser,
++    Path(artifact): Path<String>,
++) -> Result<Json<DownloadLink>, ApiError> {
++    let mut conn = state.pool.acquire().await?;
++    let link = downloads::issue_link(
++        &mut conn,
++        &state.download_signer,
++        state.config.download_link_ttl,
++        user.organization_id,
++        user.user_id,
++        &artifact,
++    )
++    .await?;
++    Ok(Json(link))
++}
++
++/// The link's `user`, `expires` and `sig`; `None` for a field that is
++/// missing or given more than once.
++fn link_fields(query: Option<&str>) -> [Option<String>; 3] {
++    let mut out: [Option<String>; 3] = Default::default();
++    let mut seen = [0u8; 3];
++    for (k, v) in url::form_urlencoded::parse(query.unwrap_or("").as_bytes()) {
++        let i = match k.as_ref() {
++            "user" => 0,
++            "expires" => 1,
++            "sig" => 2,
++            _ => continue,
++        };
++        seen[i] = seen[i].saturating_add(1);
++        out[i] = Some(v.into_owned());
++    }
++    for i in 0..3 {
++        if seen[i] != 1 {
++            out[i] = None;
++        }
++    }
++    out
++}
++
++async fn file(
++    State(state): State<AppState>,
++    Path(artifact): Path<String>,
++    RawQuery(query): RawQuery,
++) -> Result<Response, ApiError> {
++    let [user, expires, sig] = link_fields(query.as_deref());
++    let (artifact_id, user_id) = state.download_signer.verify(
++        &artifact,
++        user.as_deref(),
++        expires.as_deref(),
++        sig.as_deref(),
++        downloads::unix_now(),
++    )?;
++
++    // Open first: a store failure must record nothing.
++    let reader = match state.artifacts.open(&artifact_id.to_string()).await {
++        Ok(r) => r,
++        Err(cause) => {
++            let missing = matches!(cause, StoreError::NotFound);
++            tracing::error!(
++                %artifact_id,
++                error = %cause,
++                missing,
++                "a release file could not be opened for download"
++            );
++            return Err(ApiError::new(
++                StatusCode::SERVICE_UNAVAILABLE,
++                MSG_STORAGE_UNAVAILABLE,
++            ));
++        }
++    };
++
++    let mut tx = state.pool.begin().await?;
++    let fetch = downloads::resolve_fetch(&mut tx, artifact_id, user_id).await?;
++    downloads::record(&mut tx, &fetch).await?;
++    tx.commit().await?;
++
++    let disposition = HeaderValue::from_str(&format!(
++        "attachment; filename=\"{}\"",
++        fetch.artifact.filename
++    ))
++    .map_err(ApiError::internal)?;
++    Ok((
++        [
++            (
++                header::CONTENT_TYPE,
++                HeaderValue::from_static("application/octet-stream"),
++            ),
++            (header::CONTENT_DISPOSITION, disposition),
++            (
++                header::CONTENT_LENGTH,
++                HeaderValue::from(fetch.artifact.size_bytes),
++            ),
++            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
++            (
++                header::X_CONTENT_TYPE_OPTIONS,
++                HeaderValue::from_static("nosniff"),
++            ),
++            (
++                header::REFERRER_POLICY,
++                HeaderValue::from_static("no-referrer"),
++            ),
++        ],
++        Body::from_stream(ReaderStream::new(reader)),
++    )
++        .into_response())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn link_fields_need_each_exactly_once() {
++        assert_eq!(
++            link_fields(Some("user=u&expires=1&sig=s&other=x")),
++            [Some("u".into()), Some("1".into()), Some("s".into())]
++        );
++        assert_eq!(link_fields(None), [None, None, None]);
++        assert_eq!(
++            link_fields(Some("user=u&user=v&expires=1&sig=s")),
++            [None, Some("1".into()), Some("s".into())]
++        );
++    }
++}
+diff --git a/crates/wipe-hub/src/downloads.rs b/crates/wipe-hub/src/downloads.rs
+new file mode 100644
+index 0000000..835409f
+--- /dev/null
++++ b/crates/wipe-hub/src/downloads.rs
+@@ -0,0 +1,561 @@
++//! Entitled downloads (software-downloads story 2, CAP-2 and CAP-3, ADR-0007
++//! §5, §6): customers of an organization with a current entitlement list the
++//! published releases and fetch their files through short-lived signed
++//! links; every fetch is recorded. The routes are in
++//! [`crate::download_routes`].
++//!
++//! - **Entitled** means the organization has at least one current
++//!   entitlement: not refunded and `term_end > now()`, the rule
++//!   [`crate::entitlements::list`] reports as `current` (a cancelled one stays
++//!   current until its term ends). The vendor organization is never
++//!   entitled. The check runs when a link is issued and again when it is
++//!   fetched.
++//! - **Customers see published releases only**, both channels. A draft or
++//!   withdrawn release's files can be neither linked nor fetched
++//!   ([`MSG_NO_DOWNLOAD`], the same as an unknown id).
++//! - **A download link** is a bearer credential: `/api/downloads/<artifact
++//!   id>/file?user=<user id>&expires=<unix seconds>&sig=<signature>`, where
++//!   the signature is HMAC-SHA256 over [`signed_string`] with a key the hub
++//!   draws at start ([`DownloadSigner`]), base64url without padding. It is
++//!   good for [`crate::config::Config::download_link_ttl`] (300 s), needs no
++//!   session, and is re-checked against its user and their organization's
++//!   entitlement when fetched. A restart voids every outstanding link.
++//! - **A fetch is recorded once the file is open and before it streams**:
++//!   one transaction inserts a `release_downloads` row (migration 0018) and
++//!   a `release.downloaded` audit row (actor `user:<id>`, subject
++//!   `release:<id>`, detail `{artifact_id, platform, filename, sha256,
++//!   organization_id}`). A refused fetch, or one whose file the store cannot
++//!   open, writes nothing; an interrupted transfer still counts.
++//! - Listing and issuing links are not audited; only the fetch is.
++
++use std::time::Duration;
++
++use base64::engine::general_purpose::URL_SAFE_NO_PAD;
++use base64::Engine;
++use hmac::Mac;
++use rand::rngs::OsRng;
++use rand::RngCore;
++use serde::{Deserialize, Serialize};
++use serde_json::json;
++use sqlx::postgres::PgConnection;
++use time::format_description::well_known::Rfc3339;
++use time::OffsetDateTime;
++use uuid::Uuid;
++
++use crate::admin::RFC3339_UTC;
++use crate::audit::{self, AuditEntry, AuditError};
++use crate::auth::actor;
++use crate::payments::HmacSha256;
++use crate::release_admin;
++
++/// How long a download link is good for, unless a test changes
++/// [`crate::config::Config::download_link_ttl`].
++pub const DOWNLOAD_LINK_TTL: Duration = Duration::from_secs(300);
++
++pub const MSG_NOT_ENTITLED: &str =
++    "your organization has no current entitlement, so it cannot download releases";
++pub const MSG_NO_DOWNLOAD: &str = "no such download";
++pub const MSG_LINK_INVALID: &str = "this download link is invalid or has expired";
++
++/// The download routes' common prefix (a link is `{DOWNLOADS}/<id>/file?…`).
++const DOWNLOADS: &str = "/api/downloads";
++
++/// Domain separation for the link signature.
++const SIGNED_PREFIX: &str = "wipe-hub/download/v1";
++
++/// What a link signature covers.
++pub fn signed_string(artifact_id: Uuid, user_id: Uuid, expires: i64) -> String {
++    format!("{SIGNED_PREFIX}\n{artifact_id}\n{user_id}\n{expires}")
++}
++
++/// A refusal, a storage failure, or a database failure (500).
++#[derive(Debug, thiserror::Error)]
++pub enum DownloadError {
++    /// 403 [`MSG_NOT_ENTITLED`].
++    #[error("{MSG_NOT_ENTITLED}")]
++    NotEntitled,
++    /// 404 [`MSG_NO_DOWNLOAD`].
++    #[error("{MSG_NO_DOWNLOAD}")]
++    NoDownload,
++    /// 403 [`MSG_LINK_INVALID`].
++    #[error("{MSG_LINK_INVALID}")]
++    LinkInvalid,
++    #[error(transparent)]
++    Db(#[from] sqlx::Error),
++    #[error(transparent)]
++    Audit(#[from] AuditError),
++}
++
++// ---------------------------------------------------------------------------
++// Signing
++
++/// Signs and verifies download links with 32 random bytes drawn from the OS
++/// when the hub starts. The key never leaves the process and is never
++/// logged.
++#[derive(Clone)]
++pub struct DownloadSigner {
++    key: [u8; 32],
++}
++
++impl std::fmt::Debug for DownloadSigner {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("DownloadSigner { key: <redacted> }")
++    }
++}
++
++impl DownloadSigner {
++    /// A signer with a fresh random key.
++    pub fn random() -> Self {
++        let mut key = [0u8; 32];
++        OsRng.fill_bytes(&mut key);
++        Self { key }
++    }
++
++    fn mac(&self, artifact_id: Uuid, user_id: Uuid, expires: i64) -> HmacSha256 {
++        let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC takes any key length");
++        mac.update(signed_string(artifact_id, user_id, expires).as_bytes());
++        mac
++    }
++
++    /// The link signature, base64url without padding.
++    pub fn sign(&self, artifact_id: Uuid, user_id: Uuid, expires: i64) -> String {
++        URL_SAFE_NO_PAD.encode(
++            self.mac(artifact_id, user_id, expires)
++                .finalize()
++                .into_bytes(),
++        )
++    }
++
++    /// The artifact and user a link names, if its fields parse, its
++    /// signature matches (compared in constant time) and it expires after
++    /// `now` (unix seconds); otherwise [`DownloadError::LinkInvalid`].
++    pub fn verify(
++        &self,
++        artifact: &str,
++        user: Option<&str>,
++        expires: Option<&str>,
++        sig: Option<&str>,
++        now: i64,
++    ) -> Result<(Uuid, Uuid), DownloadError> {
++        let invalid = || DownloadError::LinkInvalid;
++        let artifact_id = Uuid::parse_str(artifact).map_err(|_| invalid())?;
++        let user_id = Uuid::parse_str(user.ok_or_else(invalid)?).map_err(|_| invalid())?;
++        let expires: i64 = expires
++            .ok_or_else(invalid)?
++            .parse()
++            .map_err(|_| invalid())?;
++        let sig = URL_SAFE_NO_PAD
++            .decode(sig.ok_or_else(invalid)?)
++            .map_err(|_| invalid())?;
++        self.mac(artifact_id, user_id, expires)
++            .verify_slice(&sig)
++            .map_err(|_| invalid())?;
++        if expires <= now {
++            return Err(invalid());
++        }
++        Ok((artifact_id, user_id))
++    }
++}
++
++/// Now, in unix seconds.
++pub fn unix_now() -> i64 {
++    OffsetDateTime::now_utc().unix_timestamp()
++}
++
++/// A signed link, as the link route answers it.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct DownloadLink {
++    /// Path-relative: `/api/downloads/<id>/file?user=…&expires=…&sig=…`.
++    pub url: String,
++    /// RFC 3339, UTC.
++    pub expires_at: String,
++}
++
++/// Sign a link to `artifact_id` for `user_id`, good for `ttl` from `now`.
++pub fn link_for(
++    signer: &DownloadSigner,
++    ttl: Duration,
++    artifact_id: Uuid,
++    user_id: Uuid,
++    now: i64,
++) -> DownloadLink {
++    let expires = now.saturating_add(i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX));
++    let sig = signer.sign(artifact_id, user_id, expires);
++    let expires_at = OffsetDateTime::from_unix_timestamp(expires)
++        .ok()
++        .and_then(|t| t.format(&Rfc3339).ok())
++        .unwrap_or_default();
++    DownloadLink {
++        url: format!("{DOWNLOADS}/{artifact_id}/file?user={user_id}&expires={expires}&sig={sig}"),
++        expires_at,
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Shapes
++
++/// One file of a published release, as a customer sees it.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
++pub struct DownloadArtifact {
++    pub id: Uuid,
++    pub platform: String,
++    pub filename: String,
++    pub size_bytes: i64,
++    /// Lowercase hex SHA-256, computed by the hub when it stored the file.
++    pub sha256: String,
++}
++
++/// A published release, as a customer sees it.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct DownloadRelease {
++    pub id: Uuid,
++    pub version: String,
++    pub notes: String,
++    /// `stable` or `preview`.
++    pub channel: String,
++    /// RFC 3339, UTC.
++    pub published_at: String,
++    /// By platform.
++    pub artifacts: Vec<DownloadArtifact>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct DownloadList {
++    /// Published only, newest publication first.
++    pub releases: Vec<DownloadRelease>,
++}
++
++#[derive(sqlx::FromRow)]
++struct ReleaseRow {
++    id: Uuid,
++    version: String,
++    notes: String,
++    channel: String,
++    published_at: String,
++}
++
++#[derive(sqlx::FromRow)]
++struct ArtifactRow {
++    release_id: Uuid,
++    #[sqlx(flatten)]
++    artifact: DownloadArtifact,
++}
++
++// ---------------------------------------------------------------------------
++// Queries
++
++/// Whether `organization_id` has a current entitlement (and is not the
++/// vendor organization).
++pub async fn is_entitled(
++    conn: &mut PgConnection,
++    organization_id: Uuid,
++) -> Result<bool, sqlx::Error> {
++    sqlx::query_scalar(
++        "SELECT EXISTS ( \
++             SELECT 1 FROM entitlements e JOIN organizations o ON o.id = e.organization_id \
++             WHERE e.organization_id = $1 AND NOT o.is_vendor \
++               AND e.status <> 'refunded' AND e.term_end > now())",
++    )
++    .bind(organization_id)
++    .fetch_one(&mut *conn)
++    .await
++}
++
++/// [`DownloadError::NotEntitled`] unless [`is_entitled`].
++pub async fn require_entitled(
++    conn: &mut PgConnection,
++    organization_id: Uuid,
++) -> Result<(), DownloadError> {
++    if is_entitled(conn, organization_id).await? {
++        Ok(())
++    } else {
++        Err(DownloadError::NotEntitled)
++    }
++}
++
++/// Every published release with its files, newest publication first, for
++/// an entitled organization ([`DownloadError::NotEntitled`] otherwise).
++pub async fn list_for(
++    conn: &mut PgConnection,
++    organization_id: Uuid,
++) -> Result<DownloadList, DownloadError> {
++    require_entitled(conn, organization_id).await?;
++    let rows: Vec<ReleaseRow> = sqlx::query_as(&format!(
++        "SELECT id, version, notes, channel, \
++                to_char(published_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS published_at \
++         FROM releases WHERE status = 'published' \
++         ORDER BY releases.published_at DESC, releases.id DESC"
++    ))
++    .fetch_all(&mut *conn)
++    .await?;
++    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
++    let artifacts: Vec<ArtifactRow> = sqlx::query_as(
++        "SELECT release_id, id, platform, filename, size_bytes, sha256 \
++         FROM release_artifacts WHERE release_id = ANY($1) ORDER BY platform, id",
++    )
++    .bind(&ids)
++    .fetch_all(&mut *conn)
++    .await?;
++    let releases = rows
++        .into_iter()
++        .map(|r| DownloadRelease {
++            artifacts: artifacts
++                .iter()
++                .filter(|a| a.release_id == r.id)
++                .map(|a| a.artifact.clone())
++                .collect(),
++            id: r.id,
++            version: r.version,
++            notes: r.notes,
++            channel: r.channel,
++            published_at: r.published_at,
++        })
++        .collect();
++    Ok(DownloadList { releases })
++}
++
++/// A published release's file, with its release, or `None`. `lock` takes a
++/// share lock on the release row, so it cannot be withdrawn until the
++/// caller's transaction ends.
++async fn published_artifact(
++    conn: &mut PgConnection,
++    artifact_id: Uuid,
++    lock: bool,
++) -> Result<Option<(Uuid, DownloadArtifact)>, sqlx::Error> {
++    let row: Option<ArtifactRow> = sqlx::query_as(&format!(
++        "SELECT a.release_id, a.id, a.platform, a.filename, a.size_bytes, a.sha256 \
++         FROM release_artifacts a JOIN releases r ON r.id = a.release_id \
++         WHERE a.id = $1 AND r.status = 'published'{}",
++        if lock { " FOR SHARE OF r" } else { "" }
++    ))
++    .bind(artifact_id)
++    .fetch_optional(&mut *conn)
++    .await?;
++    Ok(row.map(|r| (r.release_id, r.artifact)))
++}
++
++/// A link to `artifact` (the path segment, any string) for a signed-in
++/// user of `organization_id`: entitlement first ([`DownloadError::NotEntitled`]),
++/// then a published release's file ([`DownloadError::NoDownload`] for a
++/// draft, withdrawn, unknown or non-UUID id). Not audited.
++pub async fn issue_link(
++    conn: &mut PgConnection,
++    signer: &DownloadSigner,
++    ttl: Duration,
++    organization_id: Uuid,
++    user_id: Uuid,
++    artifact: &str,
++) -> Result<DownloadLink, DownloadError> {
++    require_entitled(conn, organization_id).await?;
++    let artifact_id = Uuid::parse_str(artifact).map_err(|_| DownloadError::NoDownload)?;
++    if published_artifact(conn, artifact_id, false)
++        .await?
++        .is_none()
++    {
++        return Err(DownloadError::NoDownload);
++    }
++    Ok(link_for(signer, ttl, artifact_id, user_id, unix_now()))
++}
++
++/// What a verified link resolves to, ready to record and stream.
++#[derive(Debug, Clone)]
++pub struct Fetch {
++    pub release_id: Uuid,
++    pub artifact: DownloadArtifact,
++    pub user_id: Uuid,
++    pub user_email: String,
++    pub organization_id: Uuid,
++}
++
++/// Resolve a verified link inside the caller's transaction: its user
++/// (gone: [`DownloadError::LinkInvalid`]), their organization's entitlement
++/// ([`DownloadError::NotEntitled`]), then the file of a published release,
++/// share-locked ([`DownloadError::NoDownload`]).
++pub async fn resolve_fetch(
++    conn: &mut PgConnection,
++    artifact_id: Uuid,
++    user_id: Uuid,
++) -> Result<Fetch, DownloadError> {
++    let user: Option<(Uuid, String)> =
++        sqlx::query_as("SELECT organization_id, email FROM users WHERE id = $1")
++            .bind(user_id)
++            .fetch_optional(&mut *conn)
++            .await?;
++    let Some((organization_id, user_email)) = user else {
++        return Err(DownloadError::LinkInvalid);
++    };
++    require_entitled(conn, organization_id).await?;
++    let Some((release_id, artifact)) = published_artifact(conn, artifact_id, true).await? else {
++        return Err(DownloadError::NoDownload);
++    };
++    Ok(Fetch {
++        release_id,
++        artifact,
++        user_id,
++        user_email,
++        organization_id,
++    })
++}
++
++/// Record `fetch`: a `release_downloads` row and its `release.downloaded`
++/// audit row, in the caller's transaction.
++pub async fn record(conn: &mut PgConnection, fetch: &Fetch) -> Result<(), DownloadError> {
++    sqlx::query(
++        "INSERT INTO release_downloads \
++             (release_id, artifact_id, organization_id, user_id, user_email) \
++         VALUES ($1, $2, $3, $4, $5)",
++    )
++    .bind(fetch.release_id)
++    .bind(fetch.artifact.id)
++    .bind(fetch.organization_id)
++    .bind(fetch.user_id)
++    .bind(&fetch.user_email)
++    .execute(&mut *conn)
++    .await?;
++    audit::record(
++        &mut *conn,
++        &AuditEntry {
++            actor: &actor(fetch.user_id),
++            action: "release.downloaded",
++            subject: &release_admin::subject(fetch.release_id),
++            detail: json!({
++                "artifact_id": fetch.artifact.id,
++                "platform": fetch.artifact.platform,
++                "filename": fetch.artifact.filename,
++                "sha256": fetch.artifact.sha256,
++                "organization_id": fetch.organization_id,
++            }),
++        },
++    )
++    .await?;
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const NOW: i64 = 1_800_000_000;
++
++    fn ids() -> (Uuid, Uuid) {
++        (Uuid::new_v4(), Uuid::new_v4())
++    }
++
++    /// The query fields of `url` as `(path artifact, user, expires, sig)`.
++    fn parts(url: &str) -> (String, String, String, String) {
++        let (path, query) = url.split_once('?').unwrap();
++        let artifact = path
++            .strip_prefix(DOWNLOADS)
++            .and_then(|p| p.strip_prefix('/'))
++            .and_then(|p| p.strip_suffix("/file"))
++            .unwrap()
++            .to_string();
++        let get = |k: &str| {
++            query
++                .split('&')
++                .find_map(|kv| kv.strip_prefix(&format!("{k}=")))
++                .unwrap()
++                .to_string()
++        };
++        (artifact, get("user"), get("expires"), get("sig"))
++    }
++
++    #[test]
++    fn a_signed_link_verifies_until_it_expires() {
++        let s = DownloadSigner::random();
++        let (artifact, user) = ids();
++        let link = link_for(&s, Duration::from_secs(300), artifact, user, NOW);
++        let (a, u, e, sig) = parts(&link.url);
++        assert_eq!(e, (NOW + 300).to_string());
++        assert_eq!(link.expires_at, "2027-01-15T08:05:00Z");
++        assert_eq!(
++            s.verify(&a, Some(&u), Some(&e), Some(&sig), NOW).unwrap(),
++            (artifact, user)
++        );
++        assert_eq!(
++            s.verify(&a, Some(&u), Some(&e), Some(&sig), NOW + 299)
++                .unwrap(),
++            (artifact, user)
++        );
++        for now in [NOW + 300, NOW + 301] {
++            assert!(matches!(
++                s.verify(&a, Some(&u), Some(&e), Some(&sig), now),
++                Err(DownloadError::LinkInvalid)
++            ));
++        }
++        // A zero lifetime is already expired.
++        let zero = link_for(&s, Duration::ZERO, artifact, user, NOW);
++        let (a, u, e, sig) = parts(&zero.url);
++        assert!(s.verify(&a, Some(&u), Some(&e), Some(&sig), NOW).is_err());
++        // Base64url without padding: safe in a query string as is.
++        assert!(sig
++            .bytes()
++            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
++    }
++
++    /// `verify`'s arguments: artifact, user, expires, sig.
++    type Case<'a> = (&'a str, Option<&'a str>, Option<&'a str>, Option<&'a str>);
++
++    #[test]
++    fn any_tampered_field_or_another_key_is_refused() {
++        let s = DownloadSigner::random();
++        let (artifact, user) = ids();
++        let link = link_for(&s, Duration::from_secs(300), artifact, user, NOW);
++        let (a, u, e, sig) = parts(&link.url);
++        let other = Uuid::new_v4().to_string();
++        let mut flipped = sig.clone().into_bytes();
++        flipped[0] = if flipped[0] == b'A' { b'B' } else { b'A' };
++        let flipped = String::from_utf8(flipped).unwrap();
++        let later = (NOW + 3600).to_string();
++        let cases: Vec<Case> = vec![
++            (&other, Some(&u), Some(&e), Some(&sig)),
++            (&a, Some(&other), Some(&e), Some(&sig)),
++            (&a, Some(&u), Some(&later), Some(&sig)),
++            (&a, Some(&u), Some(&e), Some(&flipped)),
++            // Missing fields.
++            (&a, None, Some(&e), Some(&sig)),
++            (&a, Some(&u), None, Some(&sig)),
++            (&a, Some(&u), Some(&e), None),
++            // Malformed fields.
++            ("not-a-uuid", Some(&u), Some(&e), Some(&sig)),
++            (&a, Some("x"), Some(&e), Some(&sig)),
++            (&a, Some(&u), Some("soon"), Some(&sig)),
++            (&a, Some(&u), Some(&e), Some("!!!not base64!!!")),
++            (&a, Some(&u), Some(&e), Some("")),
++            (&a, Some(&u), Some(&e), Some(&sig[..10])),
++        ];
++        for (a, u, e, sig) in cases {
++            assert!(
++                matches!(s.verify(a, u, e, sig, NOW), Err(DownloadError::LinkInvalid)),
++                "{a} {u:?} {e:?} {sig:?}"
++            );
++        }
++        // Padded base64 is not the encoding links use.
++        let padded = format!("{sig}=");
++        assert!(s
++            .verify(&a, Some(&u), Some(&e), Some(&padded), NOW)
++            .is_err());
++        // Another hub process (another key) refuses the link.
++        let restarted = DownloadSigner::random();
++        assert!(restarted
++            .verify(&a, Some(&u), Some(&e), Some(&sig), NOW)
++            .is_err());
++    }
++
++    #[test]
++    fn the_signed_string_is_domain_separated() {
++        let (a, u) = ids();
++        assert_eq!(
++            signed_string(a, u, 7),
++            format!("wipe-hub/download/v1\n{a}\n{u}\n7")
++        );
++    }
++
++    #[test]
++    fn the_key_is_never_printed() {
++        assert_eq!(
++            format!("{:?}", DownloadSigner::random()),
++            "DownloadSigner { key: <redacted> }"
++        );
++    }
++}
+diff --git a/crates/wipe-hub/src/lib.rs b/crates/wipe-hub/src/lib.rs
+index 2e161e4..e8a7556 100644
+--- a/crates/wipe-hub/src/lib.rs
++++ b/crates/wipe-hub/src/lib.rs
+@@ -19,6 +19,8 @@ pub mod config;
+ pub mod cors;
+ pub mod csrf;
+ pub mod db;
++pub mod download_routes;
++pub mod downloads;
+ pub mod entitlements;
+ pub mod health;
+ pub mod lapse_policy;
+@@ -64,6 +66,9 @@ pub struct AppState {
+     pub payments: Arc<dyn payments::PaymentProvider>,
+     /// Where release files are kept (ADR-0007 §5): `--artifact-dir`.
+     pub artifacts: Arc<dyn artifacts::ArtifactStore>,
++    /// Signs and verifies download links with a key drawn at start, so a
++    /// restart voids outstanding links ([`downloads::DownloadSigner`]).
++    pub download_signer: Arc<downloads::DownloadSigner>,
+ }
+ 
+ impl AppState {
+@@ -88,6 +93,7 @@ impl AppState {
+             mailer,
+             payments,
+             artifacts,
++            download_signer: Arc::new(downloads::DownloadSigner::random()),
+         })
+     }
+ }
+@@ -101,6 +107,7 @@ pub fn router(state: AppState) -> Router {
+         .merge(lead_routes::routes())
+         .merge(order_routes::routes())
+         .merge(station_routes::routes())
++        .merge(download_routes::routes())
+         // Unknown API paths are JSON 404s, portal or not: a typo in a client
+         // must never get `index.html` back with a 200.
+         .route("/api", any(api_not_found))
+diff --git a/crates/wipe-hub/src/release_admin.rs b/crates/wipe-hub/src/release_admin.rs
+index 8c2c77a..8b255c1 100644
+--- a/crates/wipe-hub/src/release_admin.rs
++++ b/crates/wipe-hub/src/release_admin.rs
+@@ -3,7 +3,8 @@
+ //! Vendor admins manage them through the routes in [`crate::admin_routes`];
+ //! `wipe-hub release publish` ([`publish_from_cli`]) does create, upload and
+ //! publish in one step from the command line. Customers' listing and
+-//! downloads are story 2.
++//! downloads are [`crate::downloads`] (story 2); [`downloads`] here is the
++//! admin view of who downloaded a release's files.
+ //!
+ //! - **Lifecycle** `draft → published → withdrawn`, plus `draft →
+ //!   withdrawn`; `withdrawn` is terminal and nothing is ever deleted. A
+@@ -24,10 +25,10 @@
+ //!   `release.artifact_added` / `release.artifact_removed {artifact_id,
+ //!   platform, filename, size_bytes, sha256}`, `release.published
+ //!   {artifact_ids}`, `release.withdrawn {previous_status}`. Admin reads are
+-//!   audited through [`audit_read`] as `admin.releases_listed {release_ids}`
+-//!   and `admin.release_viewed {}`. The actor is `user:<admin id>`, or
+-//!   [`CLI_ACTOR`] with `{os_user}` added to the detail. A refused request,
+-//!   or an unknown id, writes nothing.
++//!   audited through [`audit_read`] as `admin.releases_listed {release_ids}`,
++//!   `admin.release_viewed {}` and `admin.release_downloads_viewed {}`. The
++//!   actor is `user:<admin id>`, or [`CLI_ACTOR`] with `{os_user}` added to
++//!   the detail. A refused request, or an unknown id, writes nothing.
+ //!
+ //! Migration 0017 repeats every lifecycle rule as a CHECK or trigger.
+ //! Timestamps are RFC 3339 UTC strings formatted in SQL.
+@@ -457,6 +458,70 @@ pub async fn detail(
+     Ok(release)
+ }
+ 
++/// One recorded download of a release's file (migration 0018), as the
++/// admin area shows it.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
++pub struct ReleaseDownload {
++    pub id: Uuid,
++    pub artifact_id: Uuid,
++    pub platform: String,
++    pub filename: String,
++    /// The downloading user; they may since have left the organization.
++    pub user_id: Uuid,
++    /// Their email when they downloaded.
++    pub user_email: String,
++    pub organization_id: Uuid,
++    /// The organization's current name.
++    pub organization_name: String,
++    /// RFC 3339, UTC.
++    pub downloaded_at: String,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ReleaseDownloads {
++    /// Newest first.
++    pub downloads: Vec<ReleaseDownload>,
++}
++
++/// Every recorded download of release `id`'s files, newest first, whatever
++/// the release's status; [`MSG_NO_RELEASE`] (no audit row) when there is
++/// none. Audited as `admin.release_downloads_viewed {}`.
++pub async fn downloads(
++    conn: &mut PgConnection,
++    admin: &VendorAdmin,
++    id: Uuid,
++) -> Result<ReleaseDownloads, ReleaseError> {
++    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM releases WHERE id = $1)")
++        .bind(id)
++        .fetch_one(&mut *conn)
++        .await?;
++    if !exists {
++        return Err(ReleaseError::NotFound(MSG_NO_RELEASE));
++    }
++    let downloads: Vec<ReleaseDownload> = sqlx::query_as(&format!(
++        "SELECT d.id, d.artifact_id, a.platform, a.filename, d.user_id, d.user_email, \
++                d.organization_id, o.name AS organization_name, \
++                to_char(d.downloaded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS downloaded_at \
++         FROM release_downloads d \
++         JOIN release_artifacts a ON a.id = d.artifact_id \
++         JOIN organizations o ON o.id = d.organization_id \
++         WHERE d.release_id = $1 \
++         ORDER BY d.downloaded_at DESC, d.id DESC"
++    ))
++    .bind(id)
++    .fetch_all(&mut *conn)
++    .await?;
++    audit_read(
++        conn,
++        admin,
++        "admin.release_downloads_viewed",
++        &subject(id),
++        json!({}),
++    )
++    .await?;
++    Ok(ReleaseDownloads { downloads })
++}
++
+ // ---------------------------------------------------------------------------
+ // Changes
+ 
+diff --git a/crates/wipe-hub/tests/downloads.rs b/crates/wipe-hub/tests/downloads.rs
+new file mode 100644
+index 0000000..7b58d1e
+--- /dev/null
++++ b/crates/wipe-hub/tests/downloads.rs
+@@ -0,0 +1,915 @@
++//! Entitled downloads with audit (software-downloads story 2, CAP-2, CAP-3):
++//! one test per row of the story's I/O matrix, through HTTP, checking the
++//! response, the bytes and headers of a fetched file, the
++//! `release_downloads` rows and the audit rows. Needs `docker compose up
++//! -d`; fails, never skips, when it is down.
++
++mod support;
++
++use std::path::Path;
++use std::process::{Command, Output};
++use std::time::Duration;
++
++use reqwest::header::{
++    CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, REFERRER_POLICY,
++    X_CONTENT_TYPE_OPTIONS,
++};
++use reqwest::{Response, StatusCode};
++use serde_json::{json, Value};
++use sha2::{Digest, Sha256};
++use support::hub::{
++    assert_error, assert_ok, bootstrap_admin, spawn_hub, spawn_hub_config, Hub, Who,
++};
++use time::OffsetDateTime;
++use uuid::Uuid;
++use wipe_hub::downloads::{MSG_LINK_INVALID, MSG_NOT_ENTITLED, MSG_NO_DOWNLOAD};
++use wipe_hub::release_admin::{MSG_NO_RELEASE, MSG_STORAGE_UNAVAILABLE};
++
++const ADMIN_ONLY: &str = "only vendor admins can use the admin area";
++const NOT_SIGNED_IN: &str = "not signed in";
++const OCTET: &str = "application/octet-stream";
++const LINUX: &str = "linux-x86_64";
++
++fn sha256_hex(bytes: &[u8]) -> String {
++    hex::encode(Sha256::digest(bytes))
++}
++
++/// A station "build": distinct bytes per `seed`.
++fn build(seed: u8, len: usize) -> Vec<u8> {
++    (0..len)
++        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
++        .collect()
++}
++
++async fn ok_json(resp: Response, want: StatusCode) -> Value {
++    let code = resp.status();
++    let body: Value = resp.json().await.unwrap();
++    assert_eq!(code, want, "{body}");
++    body
++}
++
++fn id_of(v: &Value) -> String {
++    v["id"].as_str().unwrap().to_string()
++}
++
++async fn org_of(hub: &Hub, who: &Who) -> Uuid {
++    sqlx::query_scalar("SELECT organization_id FROM users WHERE id = $1::uuid")
++        .bind(&who.id)
++        .fetch_one(&hub.db.pool)
++        .await
++        .unwrap()
++}
++
++/// `who` buys `offering` and pays on the Fake checkout page: the new
++/// entitlement's id (as in `tests/stations.rs`).
++async fn buy(hub: &Hub, who: &Who, offering: &str) -> String {
++    let v = ok_json(
++        hub.post(
++            "/api/checkout",
++            json!({ "offering_id": offering }),
++            Some(&who.cookie),
++        )
++        .await,
++        StatusCode::CREATED,
++    )
++    .await;
++    let order = v["order"]["id"].as_str().unwrap().to_string();
++    let url = url::Url::parse(v["checkout_url"].as_str().unwrap()).unwrap();
++    let session = url
++        .query_pairs()
++        .find(|(k, _)| k == "session")
++        .unwrap()
++        .1
++        .into_owned();
++    ok_json(
++        hub.post_empty(
++            &format!("/api/payments/fake/sessions/{session}/pay"),
++            Some(&who.cookie),
++        )
++        .await,
++        StatusCode::OK,
++    )
++    .await;
++    let id: Uuid = sqlx::query_scalar("SELECT id FROM entitlements WHERE order_id = $1::uuid")
++        .bind(&order)
++        .fetch_one(&hub.db.pool)
++        .await
++        .unwrap();
++    id.to_string()
++}
++
++struct Fixture {
++    hub: Hub,
++    admin: Who,
++    owner: Who,
++    member: Who,
++    org_id: Uuid,
++    /// The organization's one entitlement (annual, current).
++    entitlement: String,
++}
++
++async fn fixture_on(hub: Hub) -> Fixture {
++    let admin = bootstrap_admin(&hub).await;
++    let owner = hub.verified_owner("Acme Recyclers").await;
++    let member = hub.add(&owner, "member").await;
++    let org_id = org_of(&hub, &owner).await;
++    let offering = hub.published_offering("Station — annual, 1 seat").await;
++    let entitlement = buy(&hub, &owner, &offering).await;
++    Fixture {
++        hub,
++        admin,
++        owner,
++        member,
++        org_id,
++        entitlement,
++    }
++}
++
++async fn fixture() -> Fixture {
++    fixture_on(spawn_hub().await).await
++}
++
++impl Fixture {
++    async fn admin_post(&self, path: &str, body: Value) -> Value {
++        let resp = self.hub.post(path, body, Some(&self.admin.cookie)).await;
++        let code = resp.status();
++        let v: Value = resp.json().await.unwrap();
++        assert!(code.is_success(), "{path}: {code} {v}");
++        v
++    }
++
++    /// A release with one file per `(platform, bytes)`, in draft: the release.
++    async fn draft(&self, version: &str, channel: &str, files: &[(&str, &[u8])]) -> Value {
++        let r = self
++            .admin_post(
++                "/api/admin/releases",
++                json!({"version": version, "notes": format!("Notes for {version}."), "channel": channel}),
++            )
++            .await["release"]
++            .clone();
++        let id = id_of(&r);
++        for (platform, bytes) in files {
++            let resp = self
++                .hub
++                .post_req(
++                    &format!(
++                        "/api/admin/releases/{id}/artifacts?platform={platform}&filename=wipestation-{version}"
++                    ),
++                    Some(&self.admin.cookie),
++                )
++                .header(CONTENT_TYPE, OCTET)
++                .body(bytes.to_vec())
++                .send()
++                .await
++                .unwrap();
++            assert_eq!(resp.status(), StatusCode::CREATED);
++        }
++        self.release(&id).await
++    }
++
++    async fn release(&self, id: &str) -> Value {
++        ok_json(
++            self.hub
++                .get(
++                    &format!("/api/admin/releases/{id}"),
++                    Some(&self.admin.cookie),
++                )
++                .await,
++            StatusCode::OK,
++        )
++        .await["release"]
++            .clone()
++    }
++
++    async fn publish(&self, id: &str) -> Value {
++        self.admin_post(&format!("/api/admin/releases/{id}/publish"), json!({}))
++            .await["release"]
++            .clone()
++    }
++
++    async fn withdraw(&self, id: &str) -> Value {
++        self.admin_post(&format!("/api/admin/releases/{id}/withdraw"), json!({}))
++            .await["release"]
++            .clone()
++    }
++
++    /// A published release with one Linux file of `bytes`: (release, artifact).
++    async fn published(&self, version: &str, bytes: &[u8]) -> (Value, Value) {
++        let r = self.draft(version, "stable", &[(LINUX, bytes)]).await;
++        let r = self.publish(&id_of(&r)).await;
++        let a = r["artifacts"][0].clone();
++        (r, a)
++    }
++
++    async fn list(&self, who: Option<&Who>) -> Response {
++        self.hub
++            .get("/api/downloads", who.map(|w| w.cookie.as_str()))
++            .await
++    }
++
++    async fn link_resp(&self, who: Option<&Who>, artifact: &str) -> Response {
++        self.hub
++            .post_empty(
++                &format!("/api/downloads/{artifact}/link"),
++                who.map(|w| w.cookie.as_str()),
++            )
++            .await
++    }
++
++    /// A link for `who` to `artifact`, expecting 200: the body.
++    async fn link(&self, who: &Who, artifact: &str) -> Value {
++        ok_json(self.link_resp(Some(who), artifact).await, StatusCode::OK).await
++    }
++
++    /// GET a link with no cookie.
++    async fn fetch(&self, url: &str) -> Response {
++        self.hub.get(url, None).await
++    }
++
++    async fn downloads_rows(&self) -> i64 {
++        self.hub.count("release_downloads").await
++    }
++
++    /// (release_downloads rows, audit rows): what a refused request leaves alone.
++    async fn written(&self) -> (i64, i64) {
++        (
++            self.downloads_rows().await,
++            self.hub.count("audit_log").await,
++        )
++    }
++
++    async fn refund(&self) {
++        sqlx::query(
++            "UPDATE entitlements SET status = 'refunded', refunded_at = now(), renews = false \
++             WHERE id = $1::uuid",
++        )
++        .bind(&self.entitlement)
++        .execute(&self.hub.db.pool)
++        .await
++        .unwrap();
++    }
++
++    async fn admin_downloads(&self, release: &str, who: Option<&Who>) -> Response {
++        self.hub
++            .get(
++                &format!("/api/admin/releases/{release}/downloads"),
++                who.map(|w| w.cookie.as_str()),
++            )
++            .await
++    }
++}
++
++/// The query field `key` of a path-relative URL.
++fn query_field(url: &str, key: &str) -> String {
++    let u = url::Url::parse(&format!("http://x{url}")).unwrap();
++    u.query_pairs()
++        .find(|(k, _)| k == key)
++        .unwrap_or_else(|| panic!("{key} in {url}"))
++        .1
++        .into_owned()
++}
++
++/// `url` with query field `key` set to `value`.
++fn with_field(url: &str, key: &str, value: &str) -> String {
++    let mut u = url::Url::parse(&format!("http://x{url}")).unwrap();
++    let pairs: Vec<(String, String)> = u
++        .query_pairs()
++        .map(|(k, v)| {
++            let v = if k == key {
++                value.to_string()
++            } else {
++                v.into_owned()
++            };
++            (k.into_owned(), v)
++        })
++        .collect();
++    u.query_pairs_mut().clear().extend_pairs(pairs);
++    format!("{}?{}", u.path(), u.query().unwrap())
++}
++
++// ---------------------------------------------------------------------------
++// List
++
++#[tokio::test]
++async fn entitled_owner_and_member_list_published_releases_only_newest_first() {
++    let f = fixture().await;
++    let older = build(1, 100);
++    let (first, _) = f.published("0.1.0", &older).await;
++    let win = build(2, 50);
++    let linux = build(3, 70);
++    let second = f
++        .draft(
++            "0.2.0-rc.1",
++            "preview",
++            &[("windows-x86_64", &win), (LINUX, &linux)],
++        )
++        .await;
++    let second = f.publish(&id_of(&second)).await;
++    let draft = f.draft("0.3.0", "stable", &[(LINUX, &build(4, 10))]).await;
++    let (gone, _) = f.published("0.0.9", &build(5, 10)).await;
++    f.withdraw(&id_of(&gone)).await;
++    let before = f.written().await;
++
++    for who in [&f.owner, &f.member] {
++        let body = ok_json(f.list(Some(who)).await, StatusCode::OK).await;
++        let releases = body["releases"].as_array().unwrap();
++        let ids: Vec<String> = releases.iter().map(id_of).collect();
++        // Newest publication first; no draft, no withdrawn release.
++        assert_eq!(ids, [id_of(&second), id_of(&first)]);
++        assert!(!body.to_string().contains(&id_of(&draft)));
++        assert!(!body.to_string().contains(&id_of(&gone)));
++        let r = &releases[0];
++        assert_eq!(r["version"], "0.2.0-rc.1");
++        assert_eq!(r["channel"], "preview");
++        assert_eq!(r["notes"], "Notes for 0.2.0-rc.1.");
++        assert_eq!(r["published_at"], second["published_at"]);
++        let keys: Vec<&String> = r.as_object().unwrap().keys().collect();
++        assert_eq!(
++            keys,
++            [
++                "artifacts",
++                "channel",
++                "id",
++                "notes",
++                "published_at",
++                "version"
++            ]
++        );
++        // Files by platform, each with exactly these fields.
++        let files = r["artifacts"].as_array().unwrap();
++        assert_eq!(files.len(), 2);
++        assert_eq!(
++            files[0],
++            json!({
++                "id": second["artifacts"][0]["id"],
++                "platform": LINUX,
++                "filename": "wipestation-0.2.0-rc.1",
++                "size_bytes": 70,
++                "sha256": sha256_hex(&linux),
++            })
++        );
++        assert_eq!(files[1]["platform"], "windows-x86_64");
++        assert_eq!(files[1]["sha256"], sha256_hex(&win));
++        assert_eq!(releases[1]["channel"], "stable");
++        assert_eq!(releases[1]["artifacts"][0]["sha256"], sha256_hex(&older));
++    }
++    // Listing is not audited.
++    assert_eq!(f.written().await, before);
++}
++
++#[tokio::test]
++async fn an_organization_without_a_current_entitlement_cannot_list() {
++    let f = fixture().await;
++    f.published("1.0.0", &build(1, 10)).await;
++
++    // No entitlement at all: a pending order only.
++    let other = f.hub.verified_owner("Pending Org").await;
++    let offering = f.hub.published_offering("Other annual").await;
++    ok_json(
++        f.hub
++            .post(
++                "/api/checkout",
++                json!({ "offering_id": offering }),
++                Some(&other.cookie),
++            )
++            .await,
++        StatusCode::CREATED,
++    )
++    .await;
++    // Term ended: a second organization whose entitlement moved into the
++    // past (the trigger refuses this to the hub, so it is lifted here).
++    let ended = f.hub.verified_owner("Ended Org").await;
++    let ended_ent = buy(&f.hub, &ended, &offering).await;
++    let pool = &f.hub.db.pool;
++    sqlx::query("ALTER TABLE entitlements DISABLE TRIGGER entitlements_lifecycle")
++        .execute(pool)
++        .await
++        .unwrap();
++    sqlx::query(
++        "UPDATE entitlements SET term_start = term_start - interval '2 years', \
++                term_end = term_end - interval '2 years' WHERE id = $1::uuid",
++    )
++    .bind(&ended_ent)
++    .execute(pool)
++    .await
++    .unwrap();
++    sqlx::query("ALTER TABLE entitlements ENABLE TRIGGER entitlements_lifecycle")
++        .execute(pool)
++        .await
++        .unwrap();
++
++    let before = f.written().await;
++    for who in [&other, &ended, &f.admin] {
++        assert_error(
++            f.list(Some(who)).await,
++            StatusCode::FORBIDDEN,
++            MSG_NOT_ENTITLED,
++        )
++        .await;
++    }
++    // Only refunded: the fixture organization's one entitlement.
++    f.refund().await;
++    for who in [&f.owner, &f.member] {
++        assert_error(
++            f.list(Some(who)).await,
++            StatusCode::FORBIDDEN,
++            MSG_NOT_ENTITLED,
++        )
++        .await;
++    }
++    assert_eq!(f.written().await, before);
++}
++
++#[tokio::test]
++async fn a_cancelled_entitlement_stays_entitled_until_its_term_ends() {
++    let f = fixture().await;
++    f.published("1.0.0", &build(1, 10)).await;
++    sqlx::query("UPDATE entitlements SET status = 'cancelled', cancelled_at = now(), renews = false WHERE id = $1::uuid")
++        .bind(&f.entitlement)
++        .execute(&f.hub.db.pool)
++        .await
++        .unwrap();
++    let body = ok_json(f.list(Some(&f.member)).await, StatusCode::OK).await;
++    assert_eq!(body["releases"].as_array().unwrap().len(), 1);
++}
++
++// ---------------------------------------------------------------------------
++// Links
++
++#[tokio::test]
++async fn an_entitled_user_gets_a_five_minute_link() {
++    let f = fixture().await;
++    let (_, a) = f.published("1.0.0", &build(1, 10)).await;
++    let before = f.written().await;
++    let start = OffsetDateTime::now_utc().unix_timestamp();
++    let body = f.link(&f.member, &id_of(&a)).await;
++    let end = OffsetDateTime::now_utc().unix_timestamp();
++    let keys: Vec<&String> = body.as_object().unwrap().keys().collect();
++    assert_eq!(keys, ["expires_at", "url"]);
++    let url = body["url"].as_str().unwrap();
++    assert!(
++        url.starts_with(&format!("/api/downloads/{}/file?", id_of(&a))),
++        "{url}"
++    );
++    assert_eq!(query_field(url, "user"), f.member.id);
++    let expires: i64 = query_field(url, "expires").parse().unwrap();
++    assert!(
++        (start + 300..=end + 300).contains(&expires),
++        "{expires} {start}"
++    );
++    let at = OffsetDateTime::parse(
++        body["expires_at"].as_str().unwrap(),
++        &time::format_description::well_known::Rfc3339,
++    )
++    .unwrap();
++    assert_eq!(at.unix_timestamp(), expires);
++    assert!(body["expires_at"].as_str().unwrap().ends_with('Z'));
++    // Issuing a link is not audited and records no download.
++    assert_eq!(f.written().await, before);
++}
++
++#[tokio::test]
++async fn links_to_draft_withdrawn_unknown_or_malformed_artifacts_are_404() {
++    let f = fixture().await;
++    let draft = f.draft("1.0.0", "stable", &[(LINUX, &build(1, 10))]).await;
++    let (gone, gone_a) = f.published("1.1.0", &build(2, 10)).await;
++    f.withdraw(&id_of(&gone)).await;
++    let before = f.written().await;
++    for artifact in [
++        id_of(&draft["artifacts"][0]),
++        id_of(&gone_a),
++        Uuid::new_v4().to_string(),
++        "not-a-uuid".to_string(),
++    ] {
++        assert_error(
++            f.link_resp(Some(&f.owner), &artifact).await,
++            StatusCode::NOT_FOUND,
++            MSG_NO_DOWNLOAD,
++        )
++        .await;
++    }
++    // Entitlement is checked before the artifact id is looked at.
++    f.refund().await;
++    for artifact in ["not-a-uuid".to_string(), id_of(&gone_a)] {
++        assert_error(
++            f.link_resp(Some(&f.owner), &artifact).await,
++            StatusCode::FORBIDDEN,
++            MSG_NOT_ENTITLED,
++        )
++        .await;
++    }
++    assert_eq!(f.written().await, before);
++}
++
++#[tokio::test]
++async fn signed_out_list_and_link_are_401() {
++    let f = fixture().await;
++    let (_, a) = f.published("1.0.0", &build(1, 10)).await;
++    assert_error(f.list(None).await, StatusCode::UNAUTHORIZED, NOT_SIGNED_IN).await;
++    assert_error(
++        f.link_resp(None, &id_of(&a)).await,
++        StatusCode::UNAUTHORIZED,
++        NOT_SIGNED_IN,
++    )
++    .await;
++}
++
++// ---------------------------------------------------------------------------
++// Fetch
++
++#[tokio::test]
++async fn a_link_fetches_the_exact_file_and_records_the_download() {
++    let f = fixture().await;
++    let bytes = build(7, 300_000);
++    let (r, a) = f.published("1.0.0", &bytes).await;
++    let url = f.link(&f.member, &id_of(&a)).await["url"]
++        .as_str()
++        .unwrap()
++        .to_string();
++    let audit_before = f.hub.count("audit_log").await;
++
++    let resp = f.fetch(&url).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let h = resp.headers().clone();
++    assert_eq!(h[CONTENT_TYPE], OCTET);
++    assert_eq!(
++        h[CONTENT_DISPOSITION],
++        "attachment; filename=\"wipestation-1.0.0\""
++    );
++    assert_eq!(h[CONTENT_LENGTH], bytes.len().to_string().as_str());
++    assert_eq!(h[CACHE_CONTROL], "no-store");
++    assert_eq!(h[X_CONTENT_TYPE_OPTIONS], "nosniff");
++    assert_eq!(h[REFERRER_POLICY], "no-referrer");
++    let body = resp.bytes().await.unwrap();
++    assert_eq!(body.as_ref(), bytes.as_slice());
++    assert_eq!(sha256_hex(&body), a["sha256"].as_str().unwrap());
++
++    // One download row and one audit row.
++    let rows: Vec<(Uuid, Uuid, Uuid, Uuid, String)> = sqlx::query_as(
++        "SELECT release_id, artifact_id, organization_id, user_id, user_email \
++         FROM release_downloads",
++    )
++    .fetch_all(&f.hub.db.pool)
++    .await
++    .unwrap();
++    assert_eq!(
++        rows,
++        [(
++            Uuid::parse_str(&id_of(&r)).unwrap(),
++            Uuid::parse_str(&id_of(&a)).unwrap(),
++            f.org_id,
++            Uuid::parse_str(&f.member.id).unwrap(),
++            f.member.email.clone(),
++        )]
++    );
++    assert_eq!(f.hub.count("audit_log").await, audit_before + 1);
++    assert_eq!(
++        f.hub.audited("release.downloaded").await,
++        [(
++            format!("user:{}", f.member.id),
++            format!("release:{}", id_of(&r)),
++            json!({
++                "artifact_id": id_of(&a),
++                "platform": LINUX,
++                "filename": "wipestation-1.0.0",
++                "sha256": sha256_hex(&bytes),
++                "organization_id": f.org_id,
++            }),
++        )]
++    );
++
++    // The same link again before it expires: another download each.
++    let again = f.fetch(&url).await;
++    assert_eq!(again.status(), StatusCode::OK);
++    assert_eq!(again.bytes().await.unwrap().as_ref(), bytes.as_slice());
++    assert_eq!(f.downloads_rows().await, 2);
++    assert_eq!(f.hub.audited("release.downloaded").await.len(), 2);
++}
++
++#[tokio::test]
++async fn a_missing_tampered_or_expired_link_is_403_and_writes_nothing() {
++    let f = fixture().await;
++    let (_, a) = f.published("1.0.0", &build(1, 100)).await;
++    let (_, other) = f.published("1.1.0", &build(2, 100)).await;
++    let url = f.link(&f.member, &id_of(&a)).await["url"]
++        .as_str()
++        .unwrap()
++        .to_string();
++    let sig = query_field(&url, "sig");
++    let expires: i64 = query_field(&url, "expires").parse().unwrap();
++    let mut flipped = sig.clone().into_bytes();
++    flipped[3] = if flipped[3] == b'A' { b'B' } else { b'A' };
++    let flipped = String::from_utf8(flipped).unwrap();
++    let path = format!("/api/downloads/{}/file", id_of(&a));
++    let before = f.written().await;
++
++    for bad in [
++        path.clone(),
++        format!("{path}?"),
++        with_field(&url, "sig", &flipped),
++        with_field(&url, "sig", "not base64!"),
++        with_field(&url, "user", &f.owner.id),
++        with_field(&url, "user", "nobody"),
++        with_field(&url, "expires", &(expires + 3600).to_string()),
++        with_field(&url, "expires", "soon"),
++        url.replace(&id_of(&a), &id_of(&other)),
++        url.replace(&id_of(&a), "not-a-uuid"),
++        format!("{url}&sig={sig}"),
++    ] {
++        assert_error(f.fetch(&bad).await, StatusCode::FORBIDDEN, MSG_LINK_INVALID).await;
++    }
++    assert_eq!(f.written().await, before);
++
++    // A link with no lifetime is already expired.
++    let zero =
++        fixture_on(spawn_hub_config(|_| {}, |c| c.download_link_ttl = Duration::ZERO).await).await;
++    let (_, a) = zero.published("1.0.0", &build(1, 10)).await;
++    let url = zero.link(&zero.owner, &id_of(&a)).await["url"]
++        .as_str()
++        .unwrap()
++        .to_string();
++    let before = zero.written().await;
++    assert_error(
++        zero.fetch(&url).await,
++        StatusCode::FORBIDDEN,
++        MSG_LINK_INVALID,
++    )
++    .await;
++    assert_eq!(zero.written().await, before);
++}
++
++#[tokio::test]
++async fn a_link_stops_working_once_the_entitlement_lapses_or_the_user_is_removed() {
++    let f = fixture().await;
++    let (_, a) = f.published("1.0.0", &build(1, 10)).await;
++    let member_url = f.link(&f.member, &id_of(&a)).await["url"]
++        .as_str()
++        .unwrap()
++        .to_string();
++    let owner_url = f.link(&f.owner, &id_of(&a)).await["url"]
++        .as_str()
++        .unwrap()
++        .to_string();
++
++    // The member is removed from the team: their links are void.
++    let resp = f.hub.remove(&f.owner, &f.member.id).await;
++    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
++    let before = f.written().await;
++    assert_error(
++        f.fetch(&member_url).await,
++        StatusCode::FORBIDDEN,
++        MSG_LINK_INVALID,
++    )
++    .await;
++    assert_eq!(f.written().await, before);
++
++    // The entitlement is refunded: the owner's link is refused too.
++    f.refund().await;
++    assert_error(
++        f.fetch(&owner_url).await,
++        StatusCode::FORBIDDEN,
++        MSG_NOT_ENTITLED,
++    )
++    .await;
++    assert_eq!(f.written().await, before);
++}
++
++#[tokio::test]
++async fn a_link_to_a_release_withdrawn_since_is_404() {
++    let f = fixture().await;
++    let (r, a) = f.published("1.0.0", &build(1, 10)).await;
++    let url = f.link(&f.owner, &id_of(&a)).await["url"]
++        .as_str()
++        .unwrap()
++        .to_string();
++    f.withdraw(&id_of(&r)).await;
++    let before = f.written().await;
++    assert_error(f.fetch(&url).await, StatusCode::NOT_FOUND, MSG_NO_DOWNLOAD).await;
++    assert_eq!(f.written().await, before);
++}
++
++#[tokio::test]
++async fn a_stored_file_gone_from_the_artifact_directory_is_503() {
++    let f = fixture().await;
++    let (_, a) = f.published("1.0.0", &build(1, 10)).await;
++    let url = f.link(&f.owner, &id_of(&a)).await["url"]
++        .as_str()
++        .unwrap()
++        .to_string();
++    std::fs::remove_file(f.hub.artifacts.path().join(id_of(&a))).unwrap();
++    let before = f.written().await;
++    assert_error(
++        f.fetch(&url).await,
++        StatusCode::SERVICE_UNAVAILABLE,
++        MSG_STORAGE_UNAVAILABLE,
++    )
++    .await;
++    assert_eq!(f.written().await, before);
++}
++
++#[tokio::test]
++async fn a_link_is_a_bearer_credential_recorded_as_its_own_user() {
++    let f = fixture().await;
++    let bytes = build(9, 64);
++    let (_, a) = f.published("1.0.0", &bytes).await;
++    let url = f.link(&f.member, &id_of(&a)).await["url"]
++        .as_str()
++        .unwrap()
++        .to_string();
++    // Organization B's owner (itself entitled) fetches A's member's link,
++    // with B's session cookie: recorded as A's member, in A's organization.
++    let b = f.hub.verified_owner("Bravo Holdings").await;
++    let offering = f.hub.published_offering("Bravo annual").await;
++    buy(&f.hub, &b, &offering).await;
++    let resp = f.hub.get(&url, Some(&b.cookie)).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    assert_eq!(resp.bytes().await.unwrap().as_ref(), bytes.as_slice());
++    let rows: Vec<(Uuid, Uuid)> =
++        sqlx::query_as("SELECT user_id, organization_id FROM release_downloads")
++            .fetch_all(&f.hub.db.pool)
++            .await
++            .unwrap();
++    assert_eq!(rows, [(Uuid::parse_str(&f.member.id).unwrap(), f.org_id)]);
++    let audited = f.hub.audited("release.downloaded").await;
++    assert_eq!(audited[0].0, format!("user:{}", f.member.id));
++}
++
++// ---------------------------------------------------------------------------
++// Admin view
++
++#[tokio::test]
++async fn admins_see_each_releases_downloads_newest_first_audited() {
++    let f = fixture().await;
++    let (r, a) = f.published("1.0.0", &build(1, 10)).await;
++    let (other, other_a) = f.published("1.1.0", &build(2, 10)).await;
++    for (who, artifact) in [(&f.owner, &a), (&f.member, &a), (&f.owner, &other_a)] {
++        let url = f.link(who, &id_of(artifact)).await["url"]
++            .as_str()
++            .unwrap()
++            .to_string();
++        assert_eq!(f.fetch(&url).await.status(), StatusCode::OK);
++    }
++    let org_name = f.hub.org_name(&f.owner).await;
++
++    let viewed_before = f.hub.audited("admin.release_downloads_viewed").await.len();
++    let body = ok_json(
++        f.admin_downloads(&id_of(&r), Some(&f.admin)).await,
++        StatusCode::OK,
++    )
++    .await;
++    let rows = body["downloads"].as_array().unwrap();
++    assert_eq!(rows.len(), 2, "{body}");
++    // Newest first: the member's download came second.
++    assert_eq!(rows[0]["user_email"], f.member.email.as_str());
++    assert_eq!(rows[1]["user_email"], f.owner.email.as_str());
++    let row = &rows[0];
++    let keys: Vec<&String> = row.as_object().unwrap().keys().collect();
++    assert_eq!(
++        keys,
++        [
++            "artifact_id",
++            "downloaded_at",
++            "filename",
++            "id",
++            "organization_id",
++            "organization_name",
++            "platform",
++            "user_email",
++            "user_id",
++        ]
++    );
++    assert_eq!(row["artifact_id"], a["id"]);
++    assert_eq!(row["platform"], LINUX);
++    assert_eq!(row["filename"], "wipestation-1.0.0");
++    assert_eq!(row["user_id"], f.member.id.as_str());
++    assert_eq!(row["organization_id"], f.org_id.to_string());
++    assert_eq!(row["organization_name"], org_name.as_str());
++    assert!(row["downloaded_at"].as_str().unwrap().ends_with('Z'));
++    assert_eq!(
++        f.hub.audited("admin.release_downloads_viewed").await[viewed_before..],
++        [(
++            format!("user:{}", f.admin.id),
++            format!("release:{}", id_of(&r)),
++            json!({}),
++        )]
++    );
++
++    // Any status: still listed after withdrawal, and a removed member's
++    // download stays recorded with their email.
++    f.withdraw(&id_of(&r)).await;
++    assert_eq!(
++        f.hub.remove(&f.owner, &f.member.id).await.status(),
++        StatusCode::NO_CONTENT
++    );
++    let body = ok_json(
++        f.admin_downloads(&id_of(&r), Some(&f.admin)).await,
++        StatusCode::OK,
++    )
++    .await;
++    assert_eq!(body["downloads"].as_array().unwrap().len(), 2);
++    assert_eq!(body["downloads"][0]["user_email"], f.member.email.as_str());
++    let body = ok_json(
++        f.admin_downloads(&id_of(&other), Some(&f.admin)).await,
++        StatusCode::OK,
++    )
++    .await;
++    assert_eq!(body["downloads"].as_array().unwrap().len(), 1);
++
++    // Unknown or non-UUID: 404, nothing audited.
++    let before = f.hub.count("audit_log").await;
++    for id in [Uuid::new_v4().to_string(), "nope".to_string()] {
++        assert_error(
++            f.admin_downloads(&id, Some(&f.admin)).await,
++            StatusCode::NOT_FOUND,
++            MSG_NO_RELEASE,
++        )
++        .await;
++    }
++    // A customer is refused; no session is 401.
++    assert_error(
++        f.admin_downloads(&id_of(&r), Some(&f.owner)).await,
++        StatusCode::FORBIDDEN,
++        ADMIN_ONLY,
++    )
++    .await;
++    assert_error(
++        f.admin_downloads(&id_of(&r), None).await,
++        StatusCode::UNAUTHORIZED,
++        NOT_SIGNED_IN,
++    )
++    .await;
++    assert_eq!(f.hub.count("audit_log").await, before);
++}
++
++// ---------------------------------------------------------------------------
++// Acceptance: a CLI-published build, downloaded by an entitled member
++
++/// `wipe-hub release publish` against the test database and artifact
++/// directory (as in `tests/releases.rs`).
++fn release_publish(db_url: &str, artifact_dir: &Path, args: &[&str]) -> Output {
++    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wipe-hub"));
++    for (key, _) in std::env::vars_os() {
++        if key.to_string_lossy().starts_with("WIPE_HUB_") {
++            cmd.env_remove(&key);
++        }
++    }
++    cmd.env("RUST_LOG", "warn")
++        .args([
++            "release",
++            "publish",
++            "--database-url",
++            db_url,
++            "--artifact-dir",
++        ])
++        .arg(artifact_dir)
++        .args(args)
++        .output()
++        .unwrap()
++}
++
++#[tokio::test]
++async fn a_cli_published_build_downloads_with_a_matching_checksum() {
++    let f = fixture().await;
++    let files = tempfile::tempdir().unwrap();
++    let path = files.path().join("wipestation");
++    let bytes = build(42, 500_000);
++    std::fs::write(&path, &bytes).unwrap();
++    let out = release_publish(
++        &f.hub.db.url,
++        f.hub.artifacts.path(),
++        &[
++            "--version",
++            "0.2.0",
++            "--notes",
++            "First build",
++            "--file",
++            &format!("{LINUX}={}", path.display()),
++        ],
++    );
++    assert_ok(&out);
++
++    let list = ok_json(f.list(Some(&f.member)).await, StatusCode::OK).await;
++    let release = &list["releases"][0];
++    let file = &release["artifacts"][0];
++    let url = f.link(&f.member, &id_of(file)).await["url"]
++        .as_str()
++        .unwrap()
++        .to_string();
++    let resp = f.fetch(&url).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let body = resp.bytes().await.unwrap();
++    let on_disk = sha256_hex(&std::fs::read(&path).unwrap());
++    assert_eq!(sha256_hex(&body), file["sha256"].as_str().unwrap());
++    assert_eq!(sha256_hex(&body), on_disk);
++
++    let admin = ok_json(
++        f.admin_downloads(&id_of(release), Some(&f.admin)).await,
++        StatusCode::OK,
++    )
++    .await;
++    let row = &admin["downloads"][0];
++    assert_eq!(row["user_email"], f.member.email.as_str());
++    assert_eq!(row["organization_id"], f.org_id.to_string());
++    assert_eq!(row["artifact_id"], file["id"]);
++    assert_eq!(row["filename"], "wipestation");
++}
+diff --git a/crates/wipe-hub/tests/isolation.rs b/crates/wipe-hub/tests/isolation.rs
+index fc57cbf..e03d532 100644
+--- a/crates/wipe-hub/tests/isolation.rs
++++ b/crates/wipe-hub/tests/isolation.rs
+@@ -152,6 +152,13 @@ const ROUTES: &[(&str, &str, Class)] = &[
+     ("GET", "/api/licensing/root", Customer),
+     ("GET", "/api/organization/lapse-policy", Customer),
+     ("POST", "/api/organization/lapse-policy", Customer),
++    ("GET", "/api/downloads", Customer),
++    ("POST", "/api/downloads/:artifact_id/link", Customer),
++    (
++        "GET",
++        "/api/downloads/:artifact_id/file",
++        Anonymous("the signed link is the credential; re-checked against its user's organization"),
++    ),
+     ("GET", "/api/admin/organizations", Admin),
+     ("GET", "/api/admin/users", Admin),
+     ("GET", "/api/admin/organizations/:id", Admin),
+@@ -176,6 +183,7 @@ const ROUTES: &[(&str, &str, Class)] = &[
+     ("GET", "/api/admin/releases", Admin),
+     ("POST", "/api/admin/releases", Admin),
+     ("GET", "/api/admin/releases/:id", Admin),
++    ("GET", "/api/admin/releases/:id/downloads", Admin),
+     ("POST", "/api/admin/releases/:id/artifacts", Admin),
+     (
+         "POST",
+diff --git a/crates/wipe-hub/tests/migrations.rs b/crates/wipe-hub/tests/migrations.rs
+index 4d3279d..d51f0c4 100644
+--- a/crates/wipe-hub/tests/migrations.rs
++++ b/crates/wipe-hub/tests/migrations.rs
+@@ -1124,3 +1124,113 @@ async fn a_release_skips_no_step_and_publishes_only_with_a_file() {
+         other => panic!("{other:?}"),
+     }
+ }
++
++/// A customer organization and one of its users: their ids.
++async fn customer(pool: &sqlx::PgPool) -> (uuid::Uuid, uuid::Uuid) {
++    let org: uuid::Uuid =
++        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ('Acme') RETURNING id")
++            .fetch_one(pool)
++            .await
++            .unwrap();
++    (org, uuid::Uuid::new_v4())
++}
++
++async fn insert_download(
++    pool: &sqlx::PgPool,
++    release: uuid::Uuid,
++    artifact: uuid::Uuid,
++    org: uuid::Uuid,
++    user: uuid::Uuid,
++) -> Result<uuid::Uuid, sqlx::Error> {
++    sqlx::query_scalar(
++        "INSERT INTO release_downloads (release_id, artifact_id, organization_id, user_id, \
++                                        user_email) \
++         VALUES ($1, $2, $3, $4, 'ada@example.com') RETURNING id",
++    )
++    .bind(release)
++    .bind(artifact)
++    .bind(org)
++    .bind(user)
++    .fetch_one(pool)
++    .await
++}
++
++fn db_message(err: sqlx::Error) -> String {
++    match err {
++        sqlx::Error::Database(d) => d.message().to_string(),
++        other => panic!("expected a database error, got {other:?}"),
++    }
++}
++
++#[tokio::test]
++async fn release_downloads_are_append_only_and_of_published_files_only() {
++    let t = TestDb::migrated().await;
++    let pool = &t.pool;
++    let (org, user) = customer(pool).await;
++    let (release, artifact) = draft_release_with_artifact(pool, "1.0.0").await;
++
++    // A draft release's file cannot be recorded as downloaded.
++    let m = db_message(
++        insert_download(pool, release, artifact, org, user)
++            .await
++            .unwrap_err(),
++    );
++    assert!(m.contains("only a published release"), "{m}");
++
++    sqlx::query("UPDATE releases SET status = 'published', published_at = now() WHERE id = $1")
++        .bind(release)
++        .execute(pool)
++        .await
++        .unwrap();
++    // The user need not exist (team removal deletes users).
++    let id = insert_download(pool, release, artifact, org, user)
++        .await
++        .unwrap();
++
++    // Another release's artifact is refused.
++    let (other, other_artifact) = draft_release_with_artifact(pool, "2.0.0").await;
++    sqlx::query("UPDATE releases SET status = 'published', published_at = now() WHERE id = $1")
++        .bind(other)
++        .execute(pool)
++        .await
++        .unwrap();
++    let m = db_message(
++        insert_download(pool, release, other_artifact, org, user)
++            .await
++            .unwrap_err(),
++    );
++    assert!(m.contains("must belong to its release"), "{m}");
++
++    // Never updated, deleted or truncated.
++    for sql in [
++        "UPDATE release_downloads SET user_email = 'x@example.com' WHERE id = $1",
++        "UPDATE release_downloads SET downloaded_at = now() - interval '1 day' WHERE id = $1",
++        "DELETE FROM release_downloads WHERE id = $1",
++    ] {
++        let m = refused(pool, sql, id).await;
++        assert!(m.contains("append-only"), "{sql}: {m}");
++    }
++    let err = sqlx::query("TRUNCATE release_downloads")
++        .execute(pool)
++        .await
++        .unwrap_err();
++    assert!(db_message(err).contains("append-only"));
++
++    // A withdrawn release's file can no longer be recorded; its rows stay.
++    sqlx::query("UPDATE releases SET status = 'withdrawn', withdrawn_at = now() WHERE id = $1")
++        .bind(release)
++        .execute(pool)
++        .await
++        .unwrap();
++    let m = db_message(
++        insert_download(pool, release, artifact, org, user)
++            .await
++            .unwrap_err(),
++    );
++    assert!(m.contains("only a published release"), "{m}");
++    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM release_downloads")
++        .fetch_one(pool)
++        .await
++        .unwrap();
++    assert_eq!(n, 1);
++}
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index 5f36e49..3f8ca01 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -345,7 +345,7 @@ and **0008** (station ↔ hub protocol and the reconciliation contract).
+   change (licence-delivery story 4).
+   Revocation reaches no station (A2.3), and the root is still file-held (A1.5).*
+ - A1.3 Vendor console UI: customers, licences, entitlements, issue/inspect.
+-  *Customers part shipped 2026-11-08: search and audited views (portal-accounts story 5). Offerings part shipped 2026-11-08: vendor admins create, edit, publish and retire offerings, whose grants are what an entitlement will carry (offerings-and-payments story 1). Customers can buy them since 2026-11-08: checkout creates an order that only a verified payment-provider event marks paid, tested end to end with the in-process Fake provider (offerings-and-payments story 2). Since 2026-11-08 they can pay through Stripe: Stripe Checkout, the Stripe billing portal, and a signed `POST /api/payments/webhook` whose events are stored once by id and applied idempotently (offerings-and-payments story 3). Stripe has been exercised only against a local mock of its API and hand-built event fixtures, never a real account, and live payments wait on the sales-tax/VAT decision (DECISIONS D14). Since 2026-11-08 a paid order grants the organization one entitlement (seats, scope, quota, features, term), listed with its available licence seats at `/seats`; annual offerings are Stripe subscriptions whose paid renewals extend the term by a year, an owner cancels in Stripe's billing portal, and a full refund withdraws the seats, none of it touching an issued licence (offerings-and-payments story 4; renewals likewise exercised only against fixtures and the Fake provider's test actions). Issuing licences from entitlements is `licence-delivery`. Licences part shipped 2026-11-08: an organization's page lists every licence it holds and issues a vendor licence; a licence page shows the decoded file, its verification against the hub's root, a download and revocation; `/admin/licences/inspect` decodes and verifies a pasted file (licence-delivery story 3). Releases part shipped 2026-11-08: vendor admins create draft releases (SemVer version, notes, `stable`/`preview` channel), upload one file per platform whose SHA-256 the hub computes while storing it behind an `ArtifactStore` (a local directory for now), publish and withdraw them, and `wipe-hub release publish` does the same in one step from the command line (software-downloads story 1); customers cannot download releases until software-downloads story 2. Still open: an admin view of an organization's orders and entitlements.*
++  *Customers part shipped 2026-11-08: search and audited views (portal-accounts story 5). Offerings part shipped 2026-11-08: vendor admins create, edit, publish and retire offerings, whose grants are what an entitlement will carry (offerings-and-payments story 1). Customers can buy them since 2026-11-08: checkout creates an order that only a verified payment-provider event marks paid, tested end to end with the in-process Fake provider (offerings-and-payments story 2). Since 2026-11-08 they can pay through Stripe: Stripe Checkout, the Stripe billing portal, and a signed `POST /api/payments/webhook` whose events are stored once by id and applied idempotently (offerings-and-payments story 3). Stripe has been exercised only against a local mock of its API and hand-built event fixtures, never a real account, and live payments wait on the sales-tax/VAT decision (DECISIONS D14). Since 2026-11-08 a paid order grants the organization one entitlement (seats, scope, quota, features, term), listed with its available licence seats at `/seats`; annual offerings are Stripe subscriptions whose paid renewals extend the term by a year, an owner cancels in Stripe's billing portal, and a full refund withdraws the seats, none of it touching an issued licence (offerings-and-payments story 4; renewals likewise exercised only against fixtures and the Fake provider's test actions). Issuing licences from entitlements is `licence-delivery`. Licences part shipped 2026-11-08: an organization's page lists every licence it holds and issues a vendor licence; a licence page shows the decoded file, its verification against the hub's root, a download and revocation; `/admin/licences/inspect` decodes and verifies a pasted file (licence-delivery story 3). Releases part shipped 2026-11-08: vendor admins create draft releases (SemVer version, notes, `stable`/`preview` channel), upload one file per platform whose SHA-256 the hub computes while storing it behind an `ArtifactStore` (a local directory for now), publish and withdraw them, and `wipe-hub release publish` does the same in one step from the command line (software-downloads story 1). ~~Customer downloads~~ shipped 2026-11-08: any user of an organization with a current entitlement lists the published releases at `/downloads` with each file's SHA-256 and downloads a file through a five-minute signed link; every download is recorded (user, organization, file, time) and audited, and vendor admins see each release's downloads (software-downloads story 2). Still open: an admin view of an organization's orders and entitlements.*
+ - A1.4 Vendor action audit log.
+ - A1.5 Key custody decision and implementation — where the vendor root lives
+   (HSM/KMS vs file), because a leaked root invalidates the entire trust model.

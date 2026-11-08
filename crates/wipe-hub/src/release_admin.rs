@@ -3,7 +3,8 @@
 //! Vendor admins manage them through the routes in [`crate::admin_routes`];
 //! `wipe-hub release publish` ([`publish_from_cli`]) does create, upload and
 //! publish in one step from the command line. Customers' listing and
-//! downloads are story 2.
+//! downloads are [`crate::downloads`] (story 2); [`downloads`] here is the
+//! admin view of who downloaded a release's files.
 //!
 //! - **Lifecycle** `draft → published → withdrawn`, plus `draft →
 //!   withdrawn`; `withdrawn` is terminal and nothing is ever deleted. A
@@ -24,10 +25,10 @@
 //!   `release.artifact_added` / `release.artifact_removed {artifact_id,
 //!   platform, filename, size_bytes, sha256}`, `release.published
 //!   {artifact_ids}`, `release.withdrawn {previous_status}`. Admin reads are
-//!   audited through [`audit_read`] as `admin.releases_listed {release_ids}`
-//!   and `admin.release_viewed {}`. The actor is `user:<admin id>`, or
-//!   [`CLI_ACTOR`] with `{os_user}` added to the detail. A refused request,
-//!   or an unknown id, writes nothing.
+//!   audited through [`audit_read`] as `admin.releases_listed {release_ids}`,
+//!   `admin.release_viewed {}` and `admin.release_downloads_viewed {}`. The
+//!   actor is `user:<admin id>`, or [`CLI_ACTOR`] with `{os_user}` added to
+//!   the detail. A refused request, or an unknown id, writes nothing.
 //!
 //! Migration 0017 repeats every lifecycle rule as a CHECK or trigger.
 //! Timestamps are RFC 3339 UTC strings formatted in SQL.
@@ -455,6 +456,74 @@ pub async fn detail(
     let release = fetch(conn, id).await?;
     audit_read(conn, admin, "admin.release_viewed", &subject(id), json!({})).await?;
     Ok(release)
+}
+
+/// One recorded download of a release's file (migration 0018), as the
+/// admin area shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ReleaseDownload {
+    pub id: Uuid,
+    pub artifact_id: Uuid,
+    pub platform: String,
+    pub filename: String,
+    /// The downloading user; they may since have left the organization.
+    pub user_id: Uuid,
+    /// Their current email; `None` once they have been removed from their
+    /// team (the download record keeps their id only, never a copy of the
+    /// email).
+    pub user_email: Option<String>,
+    pub organization_id: Uuid,
+    /// The organization's current name.
+    pub organization_name: String,
+    /// RFC 3339, UTC.
+    pub downloaded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseDownloads {
+    /// Newest first.
+    pub downloads: Vec<ReleaseDownload>,
+}
+
+/// Every recorded download of release `id`'s files, newest first, whatever
+/// the release's status; [`MSG_NO_RELEASE`] (no audit row) when there is
+/// none. Audited as `admin.release_downloads_viewed {}`.
+pub async fn downloads(
+    conn: &mut PgConnection,
+    admin: &VendorAdmin,
+    id: Uuid,
+) -> Result<ReleaseDownloads, ReleaseError> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM releases WHERE id = $1)")
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await?;
+    if !exists {
+        return Err(ReleaseError::NotFound(MSG_NO_RELEASE));
+    }
+    let downloads: Vec<ReleaseDownload> = sqlx::query_as(&format!(
+        "SELECT d.id, d.artifact_id, a.platform, a.filename, d.user_id, \
+                u.email AS user_email, \
+                d.organization_id, o.name AS organization_name, \
+                to_char(d.downloaded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS downloaded_at \
+         FROM release_downloads d \
+         JOIN release_artifacts a ON a.id = d.artifact_id \
+         JOIN organizations o ON o.id = d.organization_id \
+         LEFT JOIN users u ON u.id = d.user_id \
+         WHERE d.release_id = $1 \
+         ORDER BY d.downloaded_at DESC, d.id DESC"
+    ))
+    .bind(id)
+    .fetch_all(&mut *conn)
+    .await?;
+    audit_read(
+        conn,
+        admin,
+        "admin.release_downloads_viewed",
+        &subject(id),
+        json!({}),
+    )
+    .await?;
+    Ok(ReleaseDownloads { downloads })
 }
 
 // ---------------------------------------------------------------------------

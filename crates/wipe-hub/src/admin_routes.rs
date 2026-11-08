@@ -44,6 +44,9 @@
 //! - `POST /api/admin/releases {version, notes, channel}` — create a draft
 //!   release (201 `{release}`); 409 [`release_admin::MSG_VERSION_TAKEN`].
 //! - `GET /api/admin/releases/:id` — `{release}`.
+//! - `GET /api/admin/releases/:id/downloads` — `{downloads}`: every recorded
+//!   download of the release's files (user email, organization, file),
+//!   newest first, whatever the release's status.
 //! - `POST /api/admin/releases/:id/artifacts?platform=&filename=` — the raw
 //!   request body (`application/octet-stream`, else 415) is one file, stored
 //!   and hashed by the hub (201 `{artifact}`); over the limit 413
@@ -107,7 +110,7 @@ use crate::auth::{session_token, ApiError, JsonBody, MSG_NOT_SIGNED_IN};
 use crate::lead_admin::{self, FilterParams, LeadDetail, LeadFilter, LeadList};
 use crate::licence_admin::{self, InspectRequest, IssueRequest, RevokeRequest, MSG_NOT_A_LICENCE};
 use crate::offering_admin::{self, NewOffering, OfferingError, OfferingList, OfferingRequest};
-use crate::release_admin::{self, ReleaseError, ReleaseList, ReleaseRequest};
+use crate::release_admin::{self, ReleaseDownloads, ReleaseError, ReleaseList, ReleaseRequest};
 use crate::station_routes::licence_file_response;
 use crate::stations::{self, MSG_ISSUANCE_UNAVAILABLE, MSG_NO_LICENCE};
 use crate::AppState;
@@ -154,6 +157,7 @@ pub fn routes() -> Router<AppState> {
             get(list_releases).post(create_release),
         )
         .route("/api/admin/releases/:id", get(release_detail))
+        .route("/api/admin/releases/:id/downloads", get(release_downloads))
         .route("/api/admin/releases/:id/artifacts", post(upload_artifact))
         .route(
             "/api/admin/releases/:id/artifacts/:artifact_id/remove",
@@ -685,6 +689,18 @@ async fn release_detail(
     let release = release_admin::detail(&mut tx, &admin, id).await?;
     tx.commit().await?;
     Ok(Json(json!({ "release": release })))
+}
+
+async fn release_downloads(
+    State(state): State<AppState>,
+    admin: VendorAdmin,
+    Path(id): Path<String>,
+) -> Result<Json<ReleaseDownloads>, ApiError> {
+    let id = release_id(&id)?;
+    let mut tx = state.pool.begin().await?;
+    let found = release_admin::downloads(&mut tx, &admin, id).await?;
+    tx.commit().await?;
+    Ok(Json(found))
 }
 
 /// The upload's query string. Unknown keys are refused.

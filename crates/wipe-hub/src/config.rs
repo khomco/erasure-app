@@ -221,6 +221,10 @@ pub struct Config {
     /// The largest artifact accepted: [`ARTIFACT_MAX_BYTES`]. Not a flag;
     /// tests lower it.
     pub artifact_max_bytes: u64,
+    /// How long a download link is good for:
+    /// [`crate::downloads::DOWNLOAD_LINK_TTL`]. Not a flag; tests set zero
+    /// to get an already-expired link.
+    pub download_link_ttl: std::time::Duration,
 }
 
 #[derive(Debug, Error)]
@@ -314,6 +318,7 @@ impl Config {
             site_origin,
             artifact_dir,
             artifact_max_bytes: ARTIFACT_MAX_BYTES,
+            download_link_ttl: crate::downloads::DOWNLOAD_LINK_TTL,
         })
     }
 }
@@ -402,6 +407,7 @@ impl fmt::Debug for Config {
             .field("site_origin", &self.site_origin)
             .field("artifact_dir", &self.artifact_dir.display().to_string())
             .field("artifact_max_bytes", &self.artifact_max_bytes)
+            .field("download_link_ttl", &self.download_link_ttl)
             .finish()
     }
 }
@@ -1104,11 +1110,13 @@ mod tests {
     fn the_artifact_limit_is_a_gibibyte_and_in_debug() {
         let c = Config::from_args(args()).unwrap();
         assert_eq!(c.artifact_max_bytes, 1 << 30);
+        assert_eq!(c.download_link_ttl, std::time::Duration::from_secs(300));
         let debug = format!("{c:?}");
         assert!(
             debug.contains(&c.artifact_dir.display().to_string()),
             "{debug}"
         );
+        assert!(debug.contains("download_link_ttl: 300s"), "{debug}");
     }
 
     #[test]

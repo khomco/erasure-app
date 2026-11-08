@@ -284,8 +284,9 @@ impl From<StationRow> for Station {
     }
 }
 
-/// An entitlement `e` that still grants seats: not refunded, term not ended.
-const ENTITLEMENT_CURRENT: &str = "(e.status <> 'refunded' AND e.term_end > now())";
+/// An entitlement `e` that still grants seats: not refunded, term not ended
+/// ([`crate::entitlements::CURRENT_SQL`]).
+const ENTITLEMENT_CURRENT: &str = crate::entitlements::CURRENT_SQL;
 
 /// The station `s`'s latest licence as `l` (absent: all NULL): its active
 /// one if it has one, else the most recently issued. Active first, so a hub

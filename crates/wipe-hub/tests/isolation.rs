@@ -152,6 +152,13 @@ const ROUTES: &[(&str, &str, Class)] = &[
     ("GET", "/api/licensing/root", Customer),
     ("GET", "/api/organization/lapse-policy", Customer),
     ("POST", "/api/organization/lapse-policy", Customer),
+    ("GET", "/api/downloads", Customer),
+    ("POST", "/api/downloads/:artifact_id/link", Customer),
+    (
+        "GET",
+        "/api/downloads/:artifact_id/file",
+        Anonymous("the signed link is the credential; re-checked against its user's organization"),
+    ),
     ("GET", "/api/admin/organizations", Admin),
     ("GET", "/api/admin/users", Admin),
     ("GET", "/api/admin/organizations/:id", Admin),
@@ -176,6 +183,7 @@ const ROUTES: &[(&str, &str, Class)] = &[
     ("GET", "/api/admin/releases", Admin),
     ("POST", "/api/admin/releases", Admin),
     ("GET", "/api/admin/releases/:id", Admin),
+    ("GET", "/api/admin/releases/:id/downloads", Admin),
     ("POST", "/api/admin/releases/:id/artifacts", Admin),
     (
         "POST",

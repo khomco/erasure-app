@@ -50,7 +50,8 @@ export function AdminReleasesPage() {
         <>
           <p className="text-sm text-slate-400">
             Station software, one file per platform. Listing releases, opening one and every
-            change are recorded in the audit log. Customers cannot download releases yet.
+            change are recorded in the audit log. Customers with a current entitlement download
+            published releases from their Downloads page; each release page lists who did.
           </p>
           <Releases />
         </>

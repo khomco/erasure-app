@@ -222,3 +222,49 @@ export async function withdrawRelease(id: string, fetchImpl: Fetch = fetch): Pro
   const res = await ensureOk(await request(fetchImpl, "POST", releasePath(id, "withdraw"), {}));
   return (await json(res, isReleaseBody, "release withdraw")).release;
 }
+
+/**
+ * One recorded download of a release's file
+ * (`wipe_hub::release_admin::ReleaseDownload`). `user_email` is the user's
+ * current address, `null` once they have been removed from their team: the
+ * hub keeps their id only, never a copy of the email.
+ */
+export interface ReleaseDownload {
+  id: string;
+  artifact_id: string;
+  platform: string;
+  filename: string;
+  user_id: string;
+  user_email: string | null;
+  organization_id: string;
+  organization_name: string;
+  /** RFC 3339 UTC. */
+  downloaded_at: string;
+}
+
+export function isReleaseDownload(v: unknown): v is ReleaseDownload {
+  return (
+    isObject(v) &&
+    typeof v.id === "string" &&
+    typeof v.artifact_id === "string" &&
+    typeof v.platform === "string" &&
+    typeof v.filename === "string" &&
+    typeof v.user_id === "string" &&
+    (typeof v.user_email === "string" || v.user_email === null) &&
+    typeof v.organization_id === "string" &&
+    typeof v.organization_name === "string" &&
+    typeof v.downloaded_at === "string"
+  );
+}
+
+const isDownloadsBody = (v: unknown): v is { downloads: ReleaseDownload[] } =>
+  isObject(v) && Array.isArray(v.downloads) && v.downloads.every(isReleaseDownload);
+
+/** `GET /api/admin/releases/{id}/downloads`: who downloaded its files, newest first. Audited. */
+export async function listReleaseDownloads(
+  id: string,
+  fetchImpl: Fetch = fetch,
+): Promise<ReleaseDownload[]> {
+  const res = await ensureOk(await request(fetchImpl, "GET", releasePath(id, "downloads")));
+  return (await json(res, isDownloadsBody, "release downloads")).downloads;
+}

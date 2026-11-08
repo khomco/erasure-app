@@ -9,6 +9,7 @@ import {
   formatSize,
   isFileName,
   isPlatformLabel,
+  listReleaseDownloads,
   listReleases,
   publishRelease,
   removeArtifact,
@@ -17,6 +18,7 @@ import {
   withdrawRelease,
   type Release,
   type ReleaseArtifact,
+  type ReleaseDownload,
 } from "./adminReleases";
 
 const SHA = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -235,5 +237,43 @@ describe("release calls", () => {
       method: "POST",
       csrf: "csrf-1",
     });
+  });
+
+  it("lists a release's downloads with a GET and checks the answer", async () => {
+    const download: ReleaseDownload = {
+      id: "9b2e7c1a-3d4f-4a5b-8c6d-7e8f9a0b1c2d",
+      artifact_id: artifact.id,
+      platform: "linux-x86_64",
+      filename: "wipestation",
+      user_id: "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+      user_email: "ada@example.com",
+      organization_id: "2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f6a",
+      organization_name: "Acme Recyclers",
+      downloaded_at: "2026-11-08T12:00:00Z",
+    };
+    const f = respond(200, { downloads: [download] });
+    expect(await listReleaseDownloads(release.id, f.impl)).toEqual([download]);
+    expect(f.calls).toEqual([
+      {
+        url: `/api/admin/releases/${release.id}/downloads`,
+        method: "GET",
+        body: undefined,
+        contentType: null,
+        csrf: null,
+      },
+    ]);
+    // A removed user has no email any more.
+    const removed = respond(200, { downloads: [{ ...download, user_email: null }] });
+    expect(await listReleaseDownloads(release.id, removed.impl)).toEqual([
+      { ...download, user_email: null },
+    ]);
+    const bad = respond(200, { downloads: [{ ...download, user_email: 7 }] });
+    expect(await rejection(listReleaseDownloads(release.id, bad.impl))).toBeInstanceOf(Error);
+    const noId = respond(200, { downloads: [{ ...download, user_id: null }] });
+    expect(await rejection(listReleaseDownloads(release.id, noId.impl))).toBeInstanceOf(Error);
+    const missing = respond(404, { error: "no such release" });
+    const err = await rejection(listReleaseDownloads("x/y", missing.impl));
+    expect((err as HubError).status).toBe(404);
+    expect(missing.calls[0].url).toBe("/api/admin/releases/x%2Fy/downloads");
   });
 });

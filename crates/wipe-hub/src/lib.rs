@@ -19,6 +19,8 @@ pub mod config;
 pub mod cors;
 pub mod csrf;
 pub mod db;
+pub mod download_routes;
+pub mod downloads;
 pub mod entitlements;
 pub mod health;
 pub mod lapse_policy;
@@ -64,6 +66,9 @@ pub struct AppState {
     pub payments: Arc<dyn payments::PaymentProvider>,
     /// Where release files are kept (ADR-0007 §5): `--artifact-dir`.
     pub artifacts: Arc<dyn artifacts::ArtifactStore>,
+    /// Signs and verifies download links with a key drawn at start, so a
+    /// restart voids outstanding links ([`downloads::DownloadSigner`]).
+    pub download_signer: Arc<downloads::DownloadSigner>,
 }
 
 impl AppState {
@@ -88,6 +93,7 @@ impl AppState {
             mailer,
             payments,
             artifacts,
+            download_signer: Arc::new(downloads::DownloadSigner::random()),
         })
     }
 }
@@ -101,6 +107,7 @@ pub fn router(state: AppState) -> Router {
         .merge(lead_routes::routes())
         .merge(order_routes::routes())
         .merge(station_routes::routes())
+        .merge(download_routes::routes())
         // Unknown API paths are JSON 404s, portal or not: a typo in a client
         // must never get `index.html` back with a 200.
         .route("/api", any(api_not_found))

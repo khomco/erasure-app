@@ -8,6 +8,7 @@ import {
   fileProblem,
   formatSize,
   isPlatformLabel,
+  listReleaseDownloads,
   publishRelease,
   removeArtifact,
   uploadArtifact,
@@ -15,6 +16,7 @@ import {
   withdrawRelease,
   type Release,
   type ReleaseArtifact,
+  type ReleaseDownload,
 } from "@/api/adminReleases";
 import { SignInPrompt } from "./AccountPage";
 import { FormError, SubmitButton } from "./AuthForm";
@@ -170,10 +172,12 @@ function ReleaseView({ release: r, show }: { release: Release; show: (r: Release
 
       {can.editFiles && <UploadForm release={r} show={show} />}
 
+      {r.status !== "draft" && <DownloadsSection key={r.id} releaseId={r.id} />}
+
       {can.publish && (
         <ConfirmedAction
           title="Publish"
-          explain="Freezes this release's files: none can be added or removed afterwards. Customers cannot download releases yet."
+          explain="Freezes this release's files: none can be added or removed afterwards, and customers with a current entitlement can download them from the portal."
           start="Publish release"
           confirm="Publish now"
           run={() => publishRelease(r.id)}
@@ -183,7 +187,7 @@ function ReleaseView({ release: r, show }: { release: Release; show: (r: Release
       {can.withdraw && (
         <ConfirmedAction
           title="Withdraw"
-          explain="Takes this release out of use, for good. It can never be published again and its version cannot be reused; its files are kept and it stays listed here."
+          explain="Takes this release out of use, for good: customers no longer see it or can download its files. It can never be published again and its version cannot be reused; its files are kept and it stays listed here."
           start="Withdraw release"
           confirm="Withdraw permanently"
           run={() => withdrawRelease(r.id)}
@@ -320,6 +324,76 @@ function UploadForm({ release: r, show }: { release: Release; show: (r: Release)
         {upload.isPending ? "Uploading…" : "Upload file"}
       </SubmitButton>
     </form>
+  );
+}
+
+/** "2026-11-08 12:00 UTC" from an RFC 3339 UTC timestamp. */
+export function downloadedWhen(timestamp: string): string {
+  return `${timestamp.slice(0, 10)} ${timestamp.slice(11, 16)} UTC`;
+}
+
+/**
+ * Who downloaded this release's files, newest first. Reading it is audited
+ * on the hub, so it loads on a press, not with the page.
+ */
+function DownloadsSection({ releaseId }: { releaseId: string }) {
+  const load = useMutation({ mutationFn: () => listReleaseDownloads(releaseId) });
+  return (
+    <div className="space-y-2 border-t border-slate-800 pt-4">
+      <h2 className="text-sm font-medium text-slate-400">Downloads</h2>
+      <button
+        type="button"
+        disabled={load.isPending}
+        onClick={() => load.mutate()}
+        className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+      >
+        {load.isPending ? "Loading…" : load.data ? "Refresh downloads" : "Show downloads"}
+      </button>
+      <FormError error={load.error} />
+      {load.data && <DownloadsTable downloads={load.data} />}
+    </div>
+  );
+}
+
+export function DownloadsTable({ downloads }: { downloads: ReleaseDownload[] }) {
+  if (downloads.length === 0) {
+    return <p className="text-sm text-slate-400">No one has downloaded this release yet.</p>;
+  }
+  return (
+    <table className="w-full text-left text-sm">
+      <thead className="text-slate-400">
+        <tr>
+          <th className="py-1 pr-3 font-medium">When</th>
+          <th className="py-1 pr-3 font-medium">User</th>
+          <th className="py-1 pr-3 font-medium">Organization</th>
+          <th className="py-1 pr-3 font-medium">Platform</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-slate-800">
+        {downloads.map((d) => (
+          <tr key={d.id} className="align-top">
+            <td className="py-1 pr-3 whitespace-nowrap">{downloadedWhen(d.downloaded_at)}</td>
+            <td className="py-1 pr-3">
+              {d.user_email ?? (
+                <span className="text-slate-400">
+                  Removed user <span className="font-mono text-xs">{d.user_id}</span>
+                </span>
+              )}
+            </td>
+            <td className="py-1 pr-3">
+              <Link
+                to="/admin/organizations/$id"
+                params={{ id: d.organization_id }}
+                className="text-indigo-400 hover:underline"
+              >
+                {d.organization_name}
+              </Link>
+            </td>
+            <td className="py-1 pr-3">{d.platform}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 

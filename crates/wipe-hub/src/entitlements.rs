@@ -136,6 +136,13 @@ impl From<EntitlementRow> for Entitlement {
     }
 }
 
+/// Whether the entitlement `e` is current: not refunded and its term has not
+/// ended (a cancelled one stays current until then). The one definition of
+/// the rule, shared by [`list`]'s `current`, station seats
+/// ([`crate::stations`]) and the download check
+/// ([`crate::downloads::is_entitled`]), so they cannot diverge.
+pub(crate) const CURRENT_SQL: &str = "(e.status <> 'refunded' AND e.term_end > now())";
+
 /// `SELECT … FROM entitlements e JOIN orders o`, every column of
 /// [`EntitlementRow`]; callers add the `WHERE`.
 fn select_entitlements() -> String {
@@ -145,7 +152,7 @@ fn select_entitlements() -> String {
                 to_char(e.term_start AT TIME ZONE 'UTC', {RFC3339_UTC}) AS term_start, \
                 to_char(e.term_end AT TIME ZONE 'UTC', {RFC3339_UTC}) AS term_end, \
                 e.status, e.renews, \
-                (e.status <> 'refunded' AND e.term_end > now()) AS current, \
+                {CURRENT_SQL} AS current, \
                 to_char(e.cancelled_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS cancelled_at, \
                 to_char(e.refunded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS refunded_at \
          FROM entitlements e JOIN orders o ON o.id = e.order_id"

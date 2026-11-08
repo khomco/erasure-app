@@ -1124,3 +1124,112 @@ async fn a_release_skips_no_step_and_publishes_only_with_a_file() {
         other => panic!("{other:?}"),
     }
 }
+
+/// A customer organization and one of its users: their ids.
+async fn customer(pool: &sqlx::PgPool) -> (uuid::Uuid, uuid::Uuid) {
+    let org: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ('Acme') RETURNING id")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    (org, uuid::Uuid::new_v4())
+}
+
+async fn insert_download(
+    pool: &sqlx::PgPool,
+    release: uuid::Uuid,
+    artifact: uuid::Uuid,
+    org: uuid::Uuid,
+    user: uuid::Uuid,
+) -> Result<uuid::Uuid, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO release_downloads (release_id, artifact_id, organization_id, user_id) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(release)
+    .bind(artifact)
+    .bind(org)
+    .bind(user)
+    .fetch_one(pool)
+    .await
+}
+
+fn db_message(err: sqlx::Error) -> String {
+    match err {
+        sqlx::Error::Database(d) => d.message().to_string(),
+        other => panic!("expected a database error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn release_downloads_are_append_only_and_of_published_files_only() {
+    let t = TestDb::migrated().await;
+    let pool = &t.pool;
+    let (org, user) = customer(pool).await;
+    let (release, artifact) = draft_release_with_artifact(pool, "1.0.0").await;
+
+    // A draft release's file cannot be recorded as downloaded.
+    let m = db_message(
+        insert_download(pool, release, artifact, org, user)
+            .await
+            .unwrap_err(),
+    );
+    assert!(m.contains("only a published release"), "{m}");
+
+    sqlx::query("UPDATE releases SET status = 'published', published_at = now() WHERE id = $1")
+        .bind(release)
+        .execute(pool)
+        .await
+        .unwrap();
+    // The user need not exist (team removal deletes users).
+    let id = insert_download(pool, release, artifact, org, user)
+        .await
+        .unwrap();
+
+    // Another release's artifact is refused.
+    let (other, other_artifact) = draft_release_with_artifact(pool, "2.0.0").await;
+    sqlx::query("UPDATE releases SET status = 'published', published_at = now() WHERE id = $1")
+        .bind(other)
+        .execute(pool)
+        .await
+        .unwrap();
+    let m = db_message(
+        insert_download(pool, release, other_artifact, org, user)
+            .await
+            .unwrap_err(),
+    );
+    assert!(m.contains("must belong to its release"), "{m}");
+
+    // Never updated, deleted or truncated.
+    for sql in [
+        "UPDATE release_downloads SET user_id = gen_random_uuid() WHERE id = $1",
+        "UPDATE release_downloads SET downloaded_at = now() - interval '1 day' WHERE id = $1",
+        "DELETE FROM release_downloads WHERE id = $1",
+    ] {
+        let m = refused(pool, sql, id).await;
+        assert!(m.contains("append-only"), "{sql}: {m}");
+    }
+    let err = sqlx::query("TRUNCATE release_downloads")
+        .execute(pool)
+        .await
+        .unwrap_err();
+    assert!(db_message(err).contains("append-only"));
+
+    // A withdrawn release's file can no longer be recorded; its rows stay.
+    sqlx::query("UPDATE releases SET status = 'withdrawn', withdrawn_at = now() WHERE id = $1")
+        .bind(release)
+        .execute(pool)
+        .await
+        .unwrap();
+    let m = db_message(
+        insert_download(pool, release, artifact, org, user)
+            .await
+            .unwrap_err(),
+    );
+    assert!(m.contains("only a published release"), "{m}");
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM release_downloads")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}
