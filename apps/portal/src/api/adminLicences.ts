@@ -10,7 +10,12 @@
 
 import { ensureOk, isObject, isOrganization, json, request, type Fetch, type Organization } from "./auth";
 import { FEATURES, SCOPES, type Feature, type Scope } from "./adminOfferings";
-import { LICENCE_STATUSES, type LicenceStatus } from "./stations";
+import {
+  LAPSE_POLICIES,
+  LICENCE_STATUSES,
+  type LapsePolicy,
+  type LicenceStatus,
+} from "./stations";
 
 /** Where a licence came from: a registered station, or a vendor admin. */
 export const LICENCE_SOURCES = ["station", "vendor"] as const;
@@ -55,6 +60,8 @@ export interface AdminLicence {
   issue_reason: string | null;
   /** Vendor-internal: never shown to the customer. */
   revocation_reason: string | null;
+  /** The lapse policy signed into the file (ADR-0012). */
+  lapse_policy: LapsePolicy;
 }
 
 /** `wipe_license::Quota`. */
@@ -80,6 +87,8 @@ export interface LicenseBody {
     machine_binding?: string;
   };
   issued_at: string;
+  /** Absent means `evaluation`: the field is omitted from such files. */
+  lapse_policy?: LapsePolicy;
 }
 
 /** Whether a licence file verifies against the hub's vendor root. */
@@ -149,7 +158,8 @@ export function isAdminLicence(v: unknown): v is AdminLicence {
     isNullableString(v.superseded_at) &&
     isNullableString(v.revoked_at) &&
     isNullableString(v.issue_reason) &&
-    isNullableString(v.revocation_reason)
+    isNullableString(v.revocation_reason) &&
+    oneOf(LAPSE_POLICIES, v.lapse_policy)
   );
 }
 
@@ -184,7 +194,8 @@ export function isLicenseBody(v: unknown): v is LicenseBody {
     e.features.every((f) => typeof f === "string") &&
     isObject(e.allowed_methods) &&
     typeof e.allowed_methods.kind === "string" &&
-    (e.machine_binding === undefined || typeof e.machine_binding === "string")
+    (e.machine_binding === undefined || typeof e.machine_binding === "string") &&
+    (v.lapse_policy === undefined || oneOf(LAPSE_POLICIES, v.lapse_policy))
   );
 }
 

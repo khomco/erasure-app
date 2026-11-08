@@ -70,6 +70,10 @@ licence has expired, been revoked or had its clock rolled back. Even then:
 - an unreachable hub or licence server never triggers it;
 - without the opt-in, everything above holds unchanged.
 
+The hub only writes the policy into the licences it signs (licence-delivery
+story 4, shipped 2026-11-08); nothing in the hub enforces it or can stop a
+station erasing. Station enforcement is `licence-visibility` story 5.
+
 ### 0.3 The archive is an index, never an authority
 
 Certificates are offline-verifiable by construction (ADR-0005; `verify-cert`
@@ -336,6 +340,9 @@ and **0008** (station ↔ hub protocol and the reconciliation contract).
   organization outside entitlements and seats (trial, evaluation, goodwill) with
   a mandatory audited reason, inspects any stored or pasted licence file against
   the hub's root, and records a revocation in the hub (licence-delivery story 3).
+  An owner sets the organization's lapse policy (ADR-0012), which every licence
+  the hub signs carries, and issues each station an updated licence after a
+  change (licence-delivery story 4).
   Revocation reaches no station (A2.3), and the root is still file-held (A1.5).*
 - A1.3 Vendor console UI: customers, licences, entitlements, issue/inspect.
   *Customers part shipped 2026-11-08: search and audited views (portal-accounts story 5). Offerings part shipped 2026-11-08: vendor admins create, edit, publish and retire offerings, whose grants are what an entitlement will carry (offerings-and-payments story 1). Customers can buy them since 2026-11-08: checkout creates an order that only a verified payment-provider event marks paid, tested end to end with the in-process Fake provider (offerings-and-payments story 2). Since 2026-11-08 they can pay through Stripe: Stripe Checkout, the Stripe billing portal, and a signed `POST /api/payments/webhook` whose events are stored once by id and applied idempotently (offerings-and-payments story 3). Stripe has been exercised only against a local mock of its API and hand-built event fixtures, never a real account, and live payments wait on the sales-tax/VAT decision (DECISIONS D14). Since 2026-11-08 a paid order grants the organization one entitlement (seats, scope, quota, features, term), listed with its available licence seats at `/seats`; annual offerings are Stripe subscriptions whose paid renewals extend the term by a year, an owner cancels in Stripe's billing portal, and a full refund withdraws the seats, none of it touching an issued licence (offerings-and-payments story 4; renewals likewise exercised only against fixtures and the Fake provider's test actions). Issuing licences from entitlements is `licence-delivery`. Licences part shipped 2026-11-08: an organization's page lists every licence it holds and issues a vendor licence; a licence page shows the decoded file, its verification against the hub's root, a download and revocation; `/admin/licences/inspect` decodes and verifies a pasted file (licence-delivery story 3). Still open: an admin view of an organization's orders and entitlements.*
@@ -499,7 +506,9 @@ it: three tiers a customer can buy, activate, renew and outgrow.
   erasing and drops to `evaluation` certificates, with an unmissable banner.
   The exception is a licence carrying the customer's opt-in `stop` lapse policy
   (ADR-0012). Its station then refuses to start new jobs, but never interrupts a
-  running one.
+  running one. Since 2026-11-08 the hub signs the policy into every licence it
+  issues (licence-delivery story 4); stations enforce it from `licence-visibility`
+  story 5.
   Annual offerings renew automatically as Stripe subscriptions (D15). Since
   2026-11-08 an owner issues each renewed station a renewed licence file from
   the portal and installs it by hand (licence-delivery story 2). A connected

@@ -385,6 +385,7 @@ async fn a_vendor_issued_machine_licence_installs_and_uses_no_seat() {
                 "quota_erasures": null,
                 "features": ["hub_sync", "pdf_certificates"],
                 "reason": "30-day evaluation agreed with Acme",
+                "lapse_policy": "evaluation",
             }),
         )]
     );
@@ -642,6 +643,7 @@ async fn the_list_shows_station_and_vendor_licences_newest_first_and_is_audited(
             "instance_key_id",
             "issue_reason",
             "issued_at",
+            "lapse_policy",
             "not_after",
             "organization",
             "revocation_reason",
@@ -1149,4 +1151,91 @@ async fn a_revoke_waits_for_a_reissue_holding_the_station_lock() {
     assert!(v["licence"]["superseded_at"].as_str().is_some());
     let revoked = f.hub.audited("licence.revoked").await;
     assert_eq!(revoked.last().unwrap().2["previous_status"], "superseded");
+}
+
+// ---------------------------------------------------------------------------
+// Lapse policy (story 4, CAP-6, ADR-0012)
+
+#[tokio::test]
+async fn a_vendor_issued_licence_carries_the_organizations_lapse_policy() {
+    let f = fixture().await;
+    let resp = f
+        .hub
+        .post(
+            "/api/organization/lapse-policy",
+            json!({ "lapse_policy": "stop" }),
+            Some(&f.owner.cookie),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let key = new_key();
+    let licence = f.issue_machine(&key).await;
+    let id = licence["id"].as_str().unwrap();
+    assert_eq!(licence["lapse_policy"], "stop");
+    let file = f.stored_document(id).await;
+    let doc: Value = serde_json::from_str(&file).unwrap();
+    assert_eq!(doc["body"]["lapse_policy"], "stop");
+    let cert = install(&file, &key, &f.root);
+    assert_eq!(cert.body.lapse_policy, wipe_license::LapsePolicy::Stop);
+    assert_eq!(
+        f.hub.audited("licence.issued").await[0].2["lapse_policy"],
+        "stop"
+    );
+
+    // The admin licence page and organization page show it read-only.
+    let v = ok_json(
+        f.admin_get(&format!("/api/admin/licences/{id}")).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(v["licence"]["lapse_policy"], "stop");
+    assert_eq!(v["body"]["lapse_policy"], "stop");
+    let v = ok_json(
+        f.admin_get(&format!("/api/admin/organizations/{}", f.org_id))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(v["lapse_policy"], "stop");
+
+    // The vendor has no route that changes a customer's policy: its own
+    // POST is refused, and changes nothing of the customer's.
+    let resp = f
+        .hub
+        .post(
+            "/api/organization/lapse-policy",
+            json!({ "lapse_policy": "evaluation" }),
+            Some(&f.admin.cookie),
+        )
+        .await;
+    assert_error(
+        resp,
+        StatusCode::FORBIDDEN,
+        wipe_hub::stations::MSG_OWNER_ONLY_LAPSE_POLICY,
+    )
+    .await;
+    let policy: String = sqlx::query_scalar("SELECT lapse_policy FROM organizations WHERE id = $1")
+        .bind(f.org_id)
+        .fetch_one(&f.hub.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(policy, "stop");
+}
+
+#[tokio::test]
+async fn an_organization_on_evaluation_shows_evaluation_to_the_admin() {
+    let f = fixture().await;
+    let licence = f.issue_machine(&new_key()).await;
+    assert_eq!(licence["lapse_policy"], "evaluation");
+    let doc: Value =
+        serde_json::from_str(&f.stored_document(licence["id"].as_str().unwrap()).await).unwrap();
+    assert!(doc["body"].get("lapse_policy").is_none(), "{doc}");
+    let v = ok_json(
+        f.admin_get(&format!("/api/admin/organizations/{}", f.org_id))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(v["lapse_policy"], "evaluation");
 }

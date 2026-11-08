@@ -18,6 +18,7 @@ import {
   type Organization,
   type Role,
 } from "./auth";
+import { LAPSE_POLICIES, type LapsePolicy } from "./stations";
 
 /** A customer organization in search results. Timestamps are RFC 3339 UTC. */
 export interface AdminOrganization {
@@ -57,6 +58,8 @@ export interface UserSearch {
 export interface AdminOrganizationDetail {
   organization: { id: string; name: string; created_at: string };
   users: AdminMember[];
+  /** What the organization's stations do when a licence lapses (ADR-0012); read-only here. */
+  lapse_policy: LapsePolicy;
 }
 
 function isRole(v: unknown): v is Role {
@@ -115,7 +118,9 @@ function isOrganizationDetail(v: unknown): v is AdminOrganizationDetail {
     typeof v.organization.name === "string" &&
     typeof v.organization.created_at === "string" &&
     Array.isArray(v.users) &&
-    v.users.every(isAdminMember)
+    v.users.every(isAdminMember) &&
+    typeof v.lapse_policy === "string" &&
+    (LAPSE_POLICIES as readonly string[]).includes(v.lapse_policy)
   );
 }
 

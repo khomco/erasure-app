@@ -41,6 +41,7 @@ const vendorLicence: AdminLicence = {
   revoked_at: null,
   issue_reason: "30-day evaluation",
   revocation_reason: null,
+  lapse_policy: "evaluation",
 };
 
 const stationLicence: AdminLicence = {
@@ -136,6 +137,9 @@ describe("guards", () => {
         },
       }),
     ).toBe(true);
+    expect(isAdminLicence({ ...vendorLicence, lapse_policy: "stop" })).toBe(true);
+    expect(isLicenseBody({ ...body, lapse_policy: "stop" })).toBe(true);
+    expect(isLicenseBody({ ...body, lapse_policy: "evaluation" })).toBe(true);
     expect(isLicenceDetail({ licence: vendorLicence, body, verification: verified })).toBe(true);
     expect(isInspected({ body, verification: verified, licence: null })).toBe(true);
   });
@@ -149,6 +153,9 @@ describe("guards", () => {
       false,
     );
     expect(isLicenseBody({ ...body, license_id: 7 })).toBe(false);
+    expect(isAdminLicence({ ...vendorLicence, lapse_policy: undefined })).toBe(false);
+    expect(isAdminLicence({ ...vendorLicence, lapse_policy: "sometimes" })).toBe(false);
+    expect(isLicenseBody({ ...body, lapse_policy: "sometimes" })).toBe(false);
     expect(
       isInspected({ body, verification: { ...verified, status: "maybe" }, licence: null }),
     ).toBe(false);

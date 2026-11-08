@@ -29,6 +29,48 @@ use crate::{LicenseError, LicenseResult};
 
 pub const LICENSE_FORMAT_VERSION: u32 = 1;
 
+/// What a station does once its licence lapses (ADR-0012).
+///
+/// The customer's choice, made per organization in the portal and carried
+/// inside the signed licence so an operator cannot switch it off. This crate
+/// only carries it; enforcement belongs to the station's job start path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LapsePolicy {
+    /// Keep erasing and mark certificates `evaluation` (ADR-0005 §5). The
+    /// default, and what every licence without the field means.
+    #[default]
+    Evaluation,
+    /// Refuse to start new jobs once the licence has expired, was revoked or
+    /// the clock was rolled back. A job already running always finishes.
+    Stop,
+}
+
+impl LapsePolicy {
+    /// True for the default. Used to omit the field from serialized bodies,
+    /// so every licence without `stop` keeps the canonical bytes, and
+    /// therefore the signature, it had before the field existed.
+    pub fn is_evaluation(&self) -> bool {
+        matches!(self, Self::Evaluation)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Evaluation => "evaluation",
+            Self::Stop => "stop",
+        }
+    }
+
+    /// Parse the wire / database spelling.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "evaluation" => Some(Self::Evaluation),
+            "stop" => Some(Self::Stop),
+            _ => None,
+        }
+    }
+}
+
 /// The body a vendor signs. Split from the signature so canonicalization has
 /// exactly one subject, the same discipline `wipe-cert` already uses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +88,12 @@ pub struct LicenseBody {
     pub entitlements: Entitlements,
     #[serde(with = "time::serde::rfc3339")]
     pub issued_at: OffsetDateTime,
+    /// The customer's lapse policy (ADR-0012). Omitted when `evaluation`:
+    /// `verify` re-canonicalizes the parsed body, so serializing the default
+    /// would change the bytes of every licence signed before this field
+    /// existed and report them all as tampered.
+    #[serde(default, skip_serializing_if = "LapsePolicy::is_evaluation")]
+    pub lapse_policy: LapsePolicy,
 }
 
 /// A vendor-signed license.
@@ -95,13 +143,32 @@ impl VendorRoot {
         self.key.0.to_bytes()
     }
 
-    /// Issue a license binding `instance_public_key_id` to `entitlements`.
+    /// Issue a license binding `instance_public_key_id` to `entitlements`,
+    /// with the default `evaluation` lapse policy.
     pub fn issue(
         &self,
         license_id: impl Into<String>,
         instance_public_key_id: impl Into<String>,
         entitlements: Entitlements,
         issued_at: OffsetDateTime,
+    ) -> LicenseResult<LicenseCertificate> {
+        self.issue_with_lapse_policy(
+            license_id,
+            instance_public_key_id,
+            entitlements,
+            issued_at,
+            LapsePolicy::Evaluation,
+        )
+    }
+
+    /// Issue a license carrying the customer's `lapse_policy` (ADR-0012).
+    pub fn issue_with_lapse_policy(
+        &self,
+        license_id: impl Into<String>,
+        instance_public_key_id: impl Into<String>,
+        entitlements: Entitlements,
+        issued_at: OffsetDateTime,
+        lapse_policy: LapsePolicy,
     ) -> LicenseResult<LicenseCertificate> {
         let body = LicenseBody {
             license_format_version: LICENSE_FORMAT_VERSION,
@@ -110,6 +177,7 @@ impl VendorRoot {
             instance_public_key_id: instance_public_key_id.into(),
             entitlements,
             issued_at,
+            lapse_policy,
         };
         let bytes = canonical_bytes(&body).map_err(|e| LicenseError::Encoding(e.to_string()))?;
         let sig: Signature = self.key.0.sign(&bytes);

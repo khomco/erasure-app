@@ -17,6 +17,7 @@ import {
   type LicenseBody,
   type Verification,
 } from "@/api/adminLicences";
+import { LAPSE_POLICY_LABELS } from "@/api/stations";
 import { SignInPrompt } from "./AccountPage";
 import { FormError } from "./AuthForm";
 
@@ -105,6 +106,8 @@ export function LicenceBodyView({
             <dd className="font-mono text-xs break-all">{e.machine_binding}</dd>
           </>
         )}
+        <dt className="text-slate-400">When it lapses</dt>
+        <dd>{LAPSE_POLICY_LABELS[body.lapse_policy ?? "evaluation"]}</dd>
         <dt className="text-slate-400">Signed by</dt>
         <dd className="font-mono text-xs break-all">{body.root_key_id}</dd>
         <dt className="text-slate-400">Issued</dt>
@@ -146,6 +149,8 @@ export function LicenceRecord({ licence: l }: { licence: AdminLicence }) {
       )}
       <dt className="text-slate-400">Expires</dt>
       <dd>{l.not_after}</dd>
+      <dt className="text-slate-400">When it lapses</dt>
+      <dd>{LAPSE_POLICY_LABELS[l.lapse_policy]}</dd>
     </dl>
   );
 }

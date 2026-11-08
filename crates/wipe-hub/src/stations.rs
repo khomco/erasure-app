@@ -9,7 +9,8 @@
 //!   UPDATE`, checks the entitlement is current (not refunded, term not
 //!   ended), the key is not already registered in the organization and a seat
 //!   is free (seats used = stations on the entitlement not released), then
-//!   signs through [`wipe_license::VendorRoot::issue`] and stores the station,
+//!   signs through [`wipe_license::VendorRoot::issue_with_lapse_policy`] and
+//!   stores the station,
 //!   the licence file and two audit rows (`station.registered`,
 //!   `licence.issued`) in the caller's transaction. Nothing is written on
 //!   any refusal.
@@ -38,6 +39,19 @@
 //!   station and no entitlement and is stored with `source = 'vendor'`.
 //! - Register, reissue and vendor issue sign and store through one core
 //!   (`sign_and_store`), so the three cannot drift.
+//! - **Lapse policy** (story 4, CAP-6, ADR-0012): every licence the hub signs
+//!   carries the organization's [`LapsePolicy`] at signing time, read `FOR
+//!   SHARE` in the issuing transaction (the policy change in
+//!   [`crate::lapse_policy`] takes the organization row `FOR UPDATE`).
+//!   `evaluation` is omitted from the signed body, so those files are what
+//!   they were before the field existed. A licence's policy is never stored
+//!   beside it: it is read from the stored signed document in SQL, so it
+//!   cannot disagree with the file. A
+//!   station whose active licence carries another policy than its
+//!   organization's shows `lapse_policy_update_available`, and [`reissue`]
+//!   issues it an updated file (`licence.superseded {reason: "lapse policy
+//!   changed"}`). The hub only writes the policy into licences; nothing here
+//!   enforces it or can stop a station erasing (ROADMAP §0.2).
 //! - **Revoke** ([`revoke`], story 3): a vendor admin marks an `active` or
 //!   `superseded` licence `revoked` with a reason; `revoked` is terminal. The
 //!   station (if any) keeps its registration and seat and can be released,
@@ -70,7 +84,8 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use wipe_license::{
-    machine_fingerprint, AllowedMethods, Entitlements, Feature, Quota, Scope, VendorRoot,
+    machine_fingerprint, AllowedMethods, Entitlements, Feature, LapsePolicy, Quota, Scope,
+    VendorRoot,
 };
 
 use crate::admin::{VendorAdmin, RFC3339_UTC};
@@ -92,8 +107,10 @@ pub const MSG_ISSUANCE_UNAVAILABLE: &str =
     "licence issuance is unavailable: this hub has no vendor root configured";
 pub const MSG_OWNER_ONLY_STATIONS: &str =
     "only an organization owner can register, renew or release stations";
-pub const MSG_LICENCE_UP_TO_DATE: &str =
-    "this station's licence already runs to the end of its entitlement's term";
+pub const MSG_LICENCE_UP_TO_DATE: &str = "this station's licence already runs to the end of its \
+     entitlement's term and carries your organization's lapse policy";
+pub const MSG_OWNER_ONLY_LAPSE_POLICY: &str =
+    "only an organization owner can change what stations do when a licence lapses";
 pub const MSG_ALREADY_RELEASED: &str = "this station has already been released";
 pub const MSG_NO_STATION: &str = "no such station";
 pub const MSG_NO_LICENCE: &str = "no such licence";
@@ -137,6 +154,20 @@ pub struct Licence {
     pub superseded_at: Option<String>,
     /// Set exactly when `revoked`.
     pub revoked_at: Option<String>,
+    /// `evaluation` or `stop`: the lapse policy signed into the file.
+    pub lapse_policy: String,
+}
+
+/// The lapse policy signed into the stored licence document of `alias`
+/// (`""` for an unqualified `licences` column): the file is the only
+/// authority, so this can never disagree with what a station installs.
+pub(crate) fn licence_lapse_policy(alias: &str) -> String {
+    let column = if alias.is_empty() {
+        "document".to_string()
+    } else {
+        format!("{alias}.document")
+    };
+    format!("COALESCE(({column}::jsonb)->'body'->>'lapse_policy', 'evaluation')")
 }
 
 /// The [`Licence`] columns of `licences` (unqualified).
@@ -147,7 +178,9 @@ fn licence_columns() -> String {
          to_char(issued_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS issued_at, \
          status, \
          to_char(superseded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS superseded_at, \
-         to_char(revoked_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS revoked_at"
+         to_char(revoked_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS revoked_at, \
+         {} AS lapse_policy",
+        licence_lapse_policy("")
     )
 }
 
@@ -183,8 +216,12 @@ pub struct Station {
     /// A renewed licence can be issued: the station is not released, its
     /// entitlement is current and its latest licence is active but ends
     /// before the entitlement's `term_end` (it was renewed). [`reissue`] is
-    /// allowed exactly when this is true.
+    /// allowed when this or `lapse_policy_update_available` is true.
     pub renewal_available: bool,
+    /// A licence carrying the organization's current lapse policy can be
+    /// issued: the station is not released, its entitlement is current and
+    /// its latest licence is active but was signed with another policy.
+    pub lapse_policy_update_available: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -206,7 +243,9 @@ struct StationRow {
     licence_status: Option<String>,
     superseded_at: Option<String>,
     revoked_at: Option<String>,
+    licence_lapse_policy: Option<String>,
     renewal_available: bool,
+    lapse_policy_update_available: bool,
 }
 
 impl From<StationRow> for Station {
@@ -223,6 +262,7 @@ impl From<StationRow> for Station {
                 status: r.licence_status.unwrap_or_default(),
                 superseded_at: r.superseded_at,
                 revoked_at: r.revoked_at,
+                lapse_policy: r.licence_lapse_policy.unwrap_or_default(),
             }),
             _ => None,
         };
@@ -239,6 +279,7 @@ impl From<StationRow> for Station {
             released_at: r.released_at,
             licence,
             renewal_available: r.renewal_available,
+            lapse_policy_update_available: r.lapse_policy_update_available,
         }
     }
 }
@@ -260,6 +301,15 @@ const LATEST_LICENCE: &str = "LEFT JOIN LATERAL (SELECT * FROM licences \
 /// term (compared as timestamps): a renewal moved the term on.
 const LICENCE_BEHIND_TERM: &str = "(l.status = 'active' AND l.not_after < e.term_end)";
 
+/// The latest licence `l` is active and was signed with another lapse policy
+/// than its organization `org`'s current one.
+fn licence_policy_differs() -> String {
+    format!(
+        "(l.status = 'active' AND {} <> org.lapse_policy)",
+        licence_lapse_policy("l")
+    )
+}
+
 /// `SELECT … FROM stations s …`, every column of [`StationRow`] with the
 /// station's latest licence; callers add the `WHERE` on `s`.
 fn select_stations() -> String {
@@ -274,12 +324,19 @@ fn select_stations() -> String {
                 l.status AS licence_status, \
                 to_char(l.superseded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS superseded_at, \
                 to_char(l.revoked_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS revoked_at, \
+                CASE WHEN l.id IS NULL THEN NULL ELSE {policy} END \
+                    AS licence_lapse_policy, \
                 COALESCE(s.released_at IS NULL AND {ENTITLEMENT_CURRENT} \
-                         AND {LICENCE_BEHIND_TERM}, false) AS renewal_available \
+                         AND {LICENCE_BEHIND_TERM}, false) AS renewal_available, \
+                COALESCE(s.released_at IS NULL AND {ENTITLEMENT_CURRENT} \
+                         AND {differs}, false) AS lapse_policy_update_available \
          FROM stations s \
          JOIN entitlements e ON e.id = s.entitlement_id \
          JOIN orders o ON o.id = e.order_id \
-         {LATEST_LICENCE}"
+         JOIN organizations org ON org.id = s.organization_id \
+         {LATEST_LICENCE}",
+        policy = licence_lapse_policy("l"),
+        differs = licence_policy_differs()
     )
 }
 
@@ -536,11 +593,17 @@ struct SignAndStore<'a> {
     detail: Value,
 }
 
-/// Sign `req.entitlements` with `root` (`issued_at` = their `not_before`),
-/// store the exact file and audit `licence.issued`, in the caller's
+/// Sign `req.entitlements` with `root` (`issued_at` = their `not_before`)
+/// and the organization's current lapse policy, store the exact file and
+/// audit `licence.issued` (with `lapse_policy`), in the caller's
 /// transaction: the licence's id. The only code that signs or inserts a
 /// licence, so register, reissue and vendor issue cannot drift. A station
 /// must have no active licence left (`licences_active_station_idx`).
+///
+/// The policy is read with the organization row `FOR SHARE`, so it waits
+/// for a policy change in flight and then signs the committed value; a
+/// change made after this commits leaves the station showing
+/// `lapse_policy_update_available`.
 async fn sign_and_store(
     conn: &mut PgConnection,
     root: &VendorRoot,
@@ -548,13 +611,21 @@ async fn sign_and_store(
 ) -> Result<Uuid, StationError> {
     let issued = req.entitlements.not_before;
     let not_after = req.entitlements.not_after;
+    let policy: String =
+        sqlx::query_scalar("SELECT lapse_policy FROM organizations WHERE id = $1 FOR SHARE")
+            .bind(req.organization_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    let lapse_policy = LapsePolicy::parse(&policy)
+        .ok_or_else(|| StationError::Issue(format!("unknown lapse policy {policy:?}")))?;
     let licence_id = Uuid::new_v4();
     let certificate = root
-        .issue(
+        .issue_with_lapse_policy(
             licence_id.to_string(),
             req.instance_key_id.to_string(),
             req.entitlements,
             issued,
+            lapse_policy,
         )
         .map_err(|e| StationError::Issue(e.to_string()))?;
     // Exactly what `wipe_license::save_license` writes.
@@ -594,6 +665,7 @@ async fn sign_and_store(
     let mut detail = req.detail;
     detail["root_key_id"] = json!(root_key_id);
     detail["not_after"] = json!(stored_not_after);
+    detail["lapse_policy"] = json!(lapse_policy.as_str());
     audit::record(
         &mut *conn,
         &AuditEntry {
@@ -811,19 +883,24 @@ struct LockedStation {
     ent: LockedEntitlement,
 }
 
-/// Issue the organization's station `id` a renewed licence on behalf of
+/// Issue the organization's station `id` a renewed or policy-updated licence
+/// on behalf of
 /// `user_id`, signing it with `root`, in the caller's transaction (which the
 /// caller commits). Refusals, in this order and before any write (but see
 /// below): 404
 /// [`MSG_NO_STATION`] for an unknown or foreign station, 409
 /// [`MSG_ALREADY_RELEASED`], 409 [`MSG_ENTITLEMENT_NOT_CURRENT`], 409
 /// [`MSG_LICENCE_REVOKED`] when its latest licence is revoked, and 409
-/// [`MSG_LICENCE_UP_TO_DATE`] unless its latest licence is active and ends
-/// before the entitlement's `term_end` (the station's `renewal_available`).
-/// Otherwise the old licence is `superseded` and a new one is signed exactly
-/// as [`register`] signs, for the stored key, station id and site, to the
-/// current `term_end`; audits `licence.issued {…, reissue_of}` and
-/// `licence.superseded {station_id, reason: "renewed", superseded_by}`.
+/// [`MSG_LICENCE_UP_TO_DATE`] unless its latest licence is active and either
+/// ends before the entitlement's `term_end` (the station's
+/// `renewal_available`) or was signed with another lapse policy than the
+/// organization's (`lapse_policy_update_available`). Otherwise the old
+/// licence is `superseded` and a new one is signed exactly as [`register`]
+/// signs, for the stored key, station id and site, to the current
+/// `term_end` and with the current policy; audits `licence.issued {…,
+/// reissue_of}` and `licence.superseded {station_id, reason, superseded_by}`
+/// with reason `"renewed"` when the licence was behind the term (whether or
+/// not the policy differs too), else `"lapse policy changed"`.
 /// One refusal comes after the supersede: a term that ends in the instant
 /// between the database's clock and ours, found while signing, is 409
 /// [`MSG_ENTITLEMENT_NOT_CURRENT`] and leaves its writes to roll back with
@@ -861,13 +938,20 @@ pub async fn reissue(
     // A statement of its own, after the lock: under READ COMMITTED it sees a
     // concurrent reissue's licence, or a revocation, that committed while
     // this one waited (revoke takes the same station lock), so that loser
-    // is refused here.
-    let (old, latest_status, behind): (Option<Uuid>, Option<String>, bool) =
+    // is refused here. The organization row is taken `FOR SHARE` (as
+    // `sign_and_store` takes it again), so the policy compared here is the
+    // one signed: a policy change cannot slip in between.
+    let (old, latest_status, behind, policy_differs): (Option<Uuid>, Option<String>, bool, bool) =
         sqlx::query_as(&format!(
-            "SELECT l.id, l.status, COALESCE({LICENCE_BEHIND_TERM}, false) FROM stations s \
+            "SELECT l.id, l.status, COALESCE({LICENCE_BEHIND_TERM}, false), \
+                    COALESCE({differs}, false) \
+             FROM stations s \
              JOIN entitlements e ON e.id = s.entitlement_id \
+             JOIN organizations org ON org.id = s.organization_id \
              {LATEST_LICENCE} \
-             WHERE s.id = $1"
+             WHERE s.id = $1 \
+             FOR SHARE OF org",
+            differs = licence_policy_differs()
         ))
         .bind(id)
         .fetch_one(&mut *conn)
@@ -875,8 +959,15 @@ pub async fn reissue(
     if latest_status.as_deref() == Some("revoked") {
         return Err(StationError::Conflict(MSG_LICENCE_REVOKED));
     }
-    let (Some(old), true) = (old, behind) else {
+    let (Some(old), true) = (old, behind || policy_differs) else {
         return Err(StationError::Conflict(MSG_LICENCE_UP_TO_DATE));
+    };
+    // The renewal is the larger change; the new file carries the current
+    // policy either way.
+    let reason = if behind {
+        "renewed"
+    } else {
+        "lapse policy changed"
     };
 
     // One active licence per station: supersede before inserting.
@@ -910,7 +1001,7 @@ pub async fn reissue(
             subject: &licence_subject(old),
             detail: json!({
                 "station_id": id,
-                "reason": "renewed",
+                "reason": reason,
                 "superseded_by": licence.id,
             }),
         },

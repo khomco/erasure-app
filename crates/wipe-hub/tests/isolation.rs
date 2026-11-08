@@ -150,6 +150,8 @@ const ROUTES: &[(&str, &str, Class)] = &[
     ("POST", "/api/stations/:id/reissue", Customer),
     ("GET", "/api/licences/:id/download", Customer),
     ("GET", "/api/licensing/root", Customer),
+    ("GET", "/api/organization/lapse-policy", Customer),
+    ("POST", "/api/organization/lapse-policy", Customer),
     ("GET", "/api/admin/organizations", Admin),
     ("GET", "/api/admin/users", Admin),
     ("GET", "/api/admin/organizations/:id", Admin),
@@ -498,6 +500,9 @@ async fn organization_a_never_sees_or_changes_organization_b() {
                 }
                 "/api/account/profile" => Some(json!({"name": "Alpha Person"})),
                 "/api/organization" => Some(json!({"name": "Alpha Works Renamed"})),
+                "/api/organization/lapse-policy" if method == "POST" => {
+                    Some(json!({"lapse_policy": "stop"}))
+                }
                 "/api/organization/members/:id/role" => Some(json!({"role": "owner"})),
                 "/api/checkout" => Some(json!({ "offering_id": offering })),
                 "/api/stations" if method == "POST" => Some(json!({

@@ -831,3 +831,44 @@ async fn licences_refuse_illegal_sources_and_revocations() {
             .unwrap();
     assert!(superseded);
 }
+
+#[tokio::test]
+async fn an_organization_lapse_policy_defaults_to_evaluation_and_is_checked() {
+    let t = TestDb::migrated().await;
+    let (id, policy): (uuid::Uuid, String) = sqlx::query_as(
+        "INSERT INTO organizations (name) VALUES ('Customer') RETURNING id, lapse_policy",
+    )
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    assert_eq!(policy, "evaluation");
+    sqlx::query("UPDATE organizations SET lapse_policy = 'stop' WHERE id = $1")
+        .bind(id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    for bad in ["sometimes", "Stop", ""] {
+        let err = sqlx::query("UPDATE organizations SET lapse_policy = $2 WHERE id = $1")
+            .bind(id)
+            .bind(bad)
+            .execute(&t.pool)
+            .await
+            .unwrap_err();
+        match err {
+            sqlx::Error::Database(d) => {
+                assert_eq!(
+                    d.constraint(),
+                    Some("organizations_lapse_policy_check"),
+                    "{bad}"
+                )
+            }
+            other => panic!("expected a check violation, got {other:?}"),
+        }
+    }
+    let err = sqlx::query("UPDATE organizations SET lapse_policy = NULL WHERE id = $1")
+        .bind(id)
+        .execute(&t.pool)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, sqlx::Error::Database(_)), "{err:?}");
+}

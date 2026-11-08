@@ -1,0 +1,35 @@
+{
+  "body": {
+    "license_format_version": 1,
+    "license_id": "lic-fixture-0001",
+    "root_key_id": "ed25519:/oEsEvOrTOasXbaaw1L5Bg",
+    "instance_public_key_id": "ed25519:28KYJRxRMhtyZueNHBUcKw",
+    "entitlements": {
+      "customer_id": "org-fixture",
+      "customer_name": "Fixture Recyclers Ltd",
+      "quota": {
+        "kind": "count",
+        "erasures": 500
+      },
+      "scope": {
+        "kind": "machine",
+        "fingerprint": "fp-fixture"
+      },
+      "not_before": "2026-05-28T20:26:40Z",
+      "not_after": "2027-05-28T20:26:40Z",
+      "features": [
+        "hub_sync"
+      ],
+      "allowed_methods": {
+        "kind": "all"
+      }
+    },
+    "issued_at": "2026-05-28T20:26:40Z"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "public_key_id": "ed25519:/oEsEvOrTOasXbaaw1L5Bg",
+    "canonical_sha256_hex": "a24f11e17dcac5b5913b5e60cd228de13456c69e18eb6c11263b89f151b5729b",
+    "signature_b64": "E9TOGJwJXFz3K4cc28Ba8JzzjHaUGaXhVbx+7JJDuAresTLg7VhvFVXk9ZOXRFO7lR8QMzswftUGr9VTWE7QCA"
+  }
+}

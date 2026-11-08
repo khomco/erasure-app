@@ -31,6 +31,7 @@ const user: AdminUser = { ...member, organization: { id: org.id, name: org.name 
 const detail: AdminOrganizationDetail = {
   organization: { id: org.id, name: org.name, created_at: org.created_at },
   users: [member],
+  lapse_policy: "evaluation",
 };
 
 interface Call {
@@ -112,6 +113,16 @@ describe("admin organization view", () => {
     expect(f.calls).toEqual([
       { url: `/api/admin/organizations/${org.id}`, method: "GET", csrf: null },
     ]);
+  });
+
+  it("carries the organization's lapse policy, and rejects an unknown one", async () => {
+    const stop = { ...detail, lapse_policy: "stop" };
+    expect(await fetchOrganization(org.id, respond(200, stop).impl)).toEqual(stop);
+    for (const bad of [{ ...detail, lapse_policy: "sometimes" }, { ...detail, lapse_policy: undefined }]) {
+      await expect(fetchOrganization(org.id, respond(200, bad).impl)).rejects.toThrow(
+        "unexpected body",
+      );
+    }
   });
 
   it("an unknown organization is a 404 HubError", async () => {

@@ -7,12 +7,17 @@ import type { Station } from "@/api/stations";
 import {
   installCommand,
   KeyIdHowTo,
+  LapsePolicyPanel,
+  LapsePolicyText,
+  nextPolicyChange,
   preselected,
+  reissueKind,
   RenewalAction,
   RenewedNotice,
   StationRow,
   seatChoices,
   stationName,
+  STOP_CONFIRMATION,
   stationState,
   SupersessionNote,
   VendorRootSection,
@@ -63,8 +68,10 @@ const station: Station = {
     status: "active",
     superseded_at: null,
     revoked_at: null,
+    lapse_policy: "evaluation",
   },
   renewal_available: false,
+  lapse_policy_update_available: false,
 };
 
 /** The markup's text with tags removed. */
@@ -278,5 +285,117 @@ describe("guidance every member sees", () => {
   it("says when the hub has no vendor root", () => {
     const t = text(renderToStaticMarkup(createElement(VendorRootSection, { root: null })));
     expect(t).toContain("no vendor root configured");
+  });
+});
+
+describe("lapse policy", () => {
+  const updatable: Station = { ...station, lapse_policy_update_available: true };
+
+  it("asks before switching to stop, and sends nothing when the owner declines", () => {
+    const asked: string[] = [];
+    const decline = (m: string) => (asked.push(m), false);
+    const accept = (m: string) => (asked.push(m), true);
+    expect(nextPolicyChange("evaluation", decline)).toBeNull();
+    expect(nextPolicyChange("evaluation", accept)).toBe("stop");
+    expect(asked).toEqual([STOP_CONFIRMATION, STOP_CONFIRMATION]);
+  });
+
+  it("switches back to evaluation without asking", () => {
+    const never = () => {
+      throw new Error("asked");
+    };
+    expect(nextPolicyChange("stop", never)).toBe("evaluation");
+  });
+
+  it("names a reissue by what the hub issued, not by the row pressed", () => {
+    const licence = station.licence!;
+    const longer = { ...licence, not_after: "2028-11-08T10:00:00Z" };
+    // The row said only the policy changed, but the hub also renewed it.
+    expect(reissueKind(updatable, longer)).toBe("renewed");
+    expect(reissueKind(updatable, { ...licence })).toBe("updated");
+  });
+
+  function renderIn(node: ReturnType<typeof createElement>): string {
+    return text(
+      renderToStaticMarkup(createElement(QueryClientProvider, { client: new QueryClient() }, node)),
+    );
+  }
+
+  function renderRow(s: Station, canRelease: boolean): string {
+    return renderIn(
+      createElement(
+        "table",
+        null,
+        createElement("tbody", null, createElement(StationRow, { station: s, canRelease })),
+      ),
+    );
+  }
+
+  it("shows the current policy to everyone, and only owners can change it", () => {
+    const member = renderIn(createElement(LapsePolicyPanel, { policy: "evaluation", canChange: false }));
+    expect(member).toContain(
+      "Current setting: Keep erasing and mark certificates evaluation (default)",
+    );
+    expect(member).toContain("Only an organization owner can change this.");
+    expect(member).not.toContain("Change to");
+
+    const owner = renderIn(createElement(LapsePolicyPanel, { policy: "evaluation", canChange: true }));
+    expect(owner).toContain("Change to: Stop new jobs");
+    expect(owner).not.toContain("Only an organization owner");
+
+    const stopped = renderIn(createElement(LapsePolicyPanel, { policy: "stop", canChange: true }));
+    expect(stopped).toContain("Current setting: Stop new jobs");
+    expect(stopped).toContain("Change to: Keep erasing and mark certificates evaluation (default)");
+  });
+
+  it("says what each policy does, and what it never does", () => {
+    const t = text(renderToStaticMarkup(createElement(LapsePolicyText)));
+    expect(t).toContain("keeps erasing and marks its certificates evaluation");
+    expect(t).toContain(
+      "refuses to start new jobs once its licence has expired, was revoked or its clock was rolled back",
+    );
+    expect(t).toContain("A job already running always finishes and is certified.");
+    expect(t).toContain("never stops because it cannot reach this hub");
+    expect(t).toContain("applies only to licence files issued afterwards");
+    expect(t).toContain("install the file on the station");
+    // The truthful-copy note while stations do not enforce it yet.
+    expect(t).toContain("Stations enforce Stop new jobs from a later station release.");
+    expect(STOP_CONFIRMATION).toContain("refuse to start new jobs");
+  });
+
+  it("states an updated licence is available", () => {
+    expect(stationState(updatable, new Date("2026-12-01T00:00:00Z"))).toBe(
+      "Updated licence available: lapse policy changed (current licence to 2027-11-08)",
+    );
+    // A renewal takes precedence: it carries the current policy too.
+    expect(
+      stationState({ ...updatable, renewal_available: true }, new Date("2026-12-01T00:00:00Z")),
+    ).toBe("Renewal available (current licence to 2027-11-08)");
+    expect(stationState({ ...updatable, released_at: "2026-12-01T00:00:00Z" })).toBe(
+      "Released on 2026-12-01",
+    );
+  });
+
+  it("offers owners the updated licence in the row and tells members", () => {
+    const owner = renderRow(updatable, true);
+    expect(owner).toContain("Issue updated licence");
+    expect(owner).not.toContain("Issue renewed licence");
+    const member = renderRow(updatable, false);
+    expect(member).toContain("An owner can issue the updated licence.");
+    expect(member).not.toContain("Issue updated licence");
+    const both = renderRow({ ...updatable, renewal_available: true }, true);
+    expect(both).toContain("Issue renewed licence");
+    expect(both).not.toContain("Issue updated licence");
+    expect(renderRow(station, true)).not.toContain("updated licence");
+  });
+
+  it("links an updated licence and says to install it", () => {
+    const html = renderToStaticMarkup(
+      createElement(RenewedNotice, { licence: station.licence!, kind: "updated" }),
+    );
+    const t = text(html);
+    expect(t).toContain("Updated licence issued, to 2027-11-08.");
+    expect(t).toContain("Download the updated licence");
+    expect(html).toContain(`href="/api/licences/${station.licence!.id}/download"`);
   });
 });

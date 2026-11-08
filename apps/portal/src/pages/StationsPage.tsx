@@ -4,6 +4,7 @@ import { Link } from "@tanstack/react-router";
 import { fetchMe, type Account } from "@/api/auth";
 import { fetchSeats, type Entitlement } from "@/api/orders";
 import {
+  fetchLapsePolicy,
   fetchStations,
   fetchVendorRoot,
   isInstanceKeyId,
@@ -11,6 +12,9 @@ import {
   registerStation,
   reissueStation,
   releaseStation,
+  setLapsePolicy,
+  LAPSE_POLICY_LABELS,
+  type LapsePolicy,
   type Licence,
   type Station,
   type VendorRootKey,
@@ -56,9 +60,9 @@ export function stationName(s: Station): string {
 }
 
 /**
- * "Released on …", "Revoked on …", "Renewal available …", "Expired on …",
- * "Licensed to …" or "No licence", as of `now`. A revocation's reason is the
- * vendor's and never reaches this page.
+ * "Released on …", "Revoked on …", "Renewal available …", "Updated licence
+ * available …", "Expired on …", "Licensed to …" or "No licence", as of `now`.
+ * A revocation's reason is the vendor's and never reaches this page.
  */
 export function stationState(s: Station, now: Date = new Date()): string {
   if (s.released_at) return `Released on ${day(s.released_at)}`;
@@ -71,6 +75,11 @@ export function stationState(s: Station, now: Date = new Date()): string {
       return `Renewal available (current licence ${expired ? "expired on" : "to"} ${day(
         s.licence.not_after,
       )})`;
+    }
+    if (s.lapse_policy_update_available) {
+      return `Updated licence available: lapse policy changed (current licence ${
+        expired ? "expired on" : "to"
+      } ${day(s.licence.not_after)})`;
     }
     return expired
       ? `Expired on ${day(s.licence.not_after)}`
@@ -88,9 +97,10 @@ export function installCommand(root: VendorRootKey | null): string {
 
 /**
  * `/stations`: the organization's registered stations and their licences.
- * Every member sees the list, downloads licence files and reads how to
- * install one; owners also register stations against a free seat, issue
- * renewed licences after an entitlement renews, and release stations.
+ * Every member sees the list and the lapse policy, downloads licence files
+ * and reads how to install one; owners also register stations against a
+ * free seat, issue renewed or updated licences after an entitlement renews
+ * or the lapse policy changes, change the lapse policy, and release stations.
  */
 export function StationsPage() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => fetchMe(), retry: false });
@@ -126,6 +136,7 @@ function StationsSection({ account }: { account: Account }) {
         </Link>
       </p>
       <SupersessionNote />
+      <LapsePolicySection owner={owner} />
       {stations.isPending && <p className="text-sm text-slate-400">Loading…</p>}
       <FormError error={stations.error} />
       {stations.data && <StationTable stations={stations.data} canRelease={owner} />}
@@ -171,13 +182,23 @@ export function SupersessionNote() {
   );
 }
 
-/** What a renewed licence needs next, with its download link. */
-export function RenewedNotice({ licence }: { licence: Licence }) {
+/** Why a station is reissued: a renewal, or only a lapse policy change. */
+export type ReissueKind = "renewed" | "updated";
+
+/** What a renewed or updated licence needs next, with its download link. */
+export function RenewedNotice({
+  licence,
+  kind = "renewed",
+}: {
+  licence: Licence;
+  kind?: ReissueKind;
+}) {
+  const what = kind === "renewed" ? "renewed" : "updated";
   return (
     <p className="text-sm whitespace-normal text-emerald-400">
-      Renewed licence issued, to {day(licence.not_after)}.{" "}
+      {kind === "renewed" ? "Renewed" : "Updated"} licence issued, to {day(licence.not_after)}.{" "}
       <a href={licenceDownloadPath(licence.id)} className="text-indigo-400 hover:underline">
-        Download the renewed licence
+        Download the {what} licence
       </a>{" "}
       and install it on the station: until then it keeps using the old file, which works until
       its own expiry date.
@@ -186,8 +207,9 @@ export function RenewedNotice({ licence }: { licence: Licence }) {
 }
 
 /**
- * A station's renewal, when one is available: owners issue the renewed
- * licence and then download it; members are told an owner can issue it.
+ * A station's reissue, when one is available: a renewal, or a licence
+ * carrying the organization's changed lapse policy. Owners issue it and then
+ * download it; members are told an owner can issue it.
  */
 export function RenewalAction({ station: s, canRenew }: { station: Station; canRenew: boolean }) {
   const queryClient = useQueryClient();
@@ -197,10 +219,20 @@ export function RenewalAction({ station: s, canRenew }: { station: Station; canR
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["stations"] }),
   });
   if (s.released_at !== null) return null;
-  if (reissue.isSuccess) return <RenewedNotice licence={reissue.data.licence} />;
-  if (!s.renewal_available) return null;
+  if (reissue.isSuccess) {
+    return (
+      <RenewedNotice licence={reissue.data.licence} kind={reissueKind(s, reissue.data.licence)} />
+    );
+  }
+  // A renewal also carries the current policy, so it takes precedence.
+  const kind: ReissueKind | null = s.renewal_available
+    ? "renewed"
+    : s.lapse_policy_update_available
+      ? "updated"
+      : null;
+  if (kind === null) return null;
   if (!canRenew) {
-    return <span className="text-slate-400">An owner can issue the renewed licence.</span>;
+    return <span className="text-slate-400">An owner can issue the {kind} licence.</span>;
   }
   return (
     <>
@@ -210,9 +242,135 @@ export function RenewalAction({ station: s, canRenew }: { station: Station; canR
         onClick={() => reissue.mutate()}
         className="text-emerald-400 hover:underline disabled:opacity-50"
       >
-        Issue renewed licence
+        {kind === "renewed" ? "Issue renewed licence" : "Issue updated licence"}
       </button>
       <FormError error={reissue.error} />
+    </>
+  );
+}
+
+/**
+ * What the hub actually issued, read from its answer rather than from the row
+ * the owner pressed (which may be stale): a licence running past the old one's
+ * expiry is a renewal, anything else only carries the changed lapse policy.
+ */
+export function reissueKind(before: Station, issued: Licence): ReissueKind {
+  const old = before.licence?.not_after;
+  return old !== undefined && Date.parse(issued.not_after) > Date.parse(old) ? "renewed" : "updated";
+}
+
+/** The confirmation an owner accepts before choosing `stop`. */
+export const STOP_CONFIRMATION =
+  "Stop new jobs when a licence lapses? A station whose licence has expired, was revoked or " +
+  "whose clock was rolled back will refuse to start new jobs until a valid licence is " +
+  "installed. This applies to each station once its updated licence file is installed, and " +
+  "only from the station release that enforces it; until then a lapsed station keeps erasing " +
+  "and marks its certificates evaluation.";
+
+/**
+ * The policy to post when an owner presses the change button on `current`, or
+ * `null` when they decline: switching to `stop` asks `confirm` first, switching
+ * back to `evaluation` does not.
+ */
+export function nextPolicyChange(
+  current: LapsePolicy,
+  confirm: (message: string) => boolean,
+): LapsePolicy | null {
+  const next: LapsePolicy = current === "evaluation" ? "stop" : "evaluation";
+  if (next === "stop" && !confirm(STOP_CONFIRMATION)) return null;
+  return next;
+}
+
+/** What the two lapse policies do, stated plainly, for every member. */
+export function LapsePolicyText() {
+  return (
+    <div className="space-y-2 text-slate-300">
+      <p>
+        <span className="font-medium">{LAPSE_POLICY_LABELS.evaluation}:</span> a station whose
+        licence has lapsed keeps erasing and marks its certificates evaluation.
+      </p>
+      <p>
+        <span className="font-medium">{LAPSE_POLICY_LABELS.stop}:</span> a station refuses to start new jobs
+        once its licence has expired, was revoked or its clock was rolled back. A job already
+        running always finishes and is certified. A station never stops because it cannot reach
+        this hub.
+      </p>
+      <p>
+        A change applies only to licence files issued afterwards. Each station then shows Updated
+        licence available: issue its updated licence here and install the file on the station.
+      </p>
+      <p>
+        Stations enforce Stop new jobs from a later station release. Until then, a station whose
+        licence has lapsed keeps erasing and marks its certificates evaluation whichever is set
+        here.
+      </p>
+    </div>
+  );
+}
+
+/** `/stations` section: the organization's lapse policy (ADR-0012). */
+function LapsePolicySection({ owner }: { owner: boolean }) {
+  const policy = useQuery({ queryKey: ["lapse-policy"], queryFn: () => fetchLapsePolicy() });
+  return (
+    <div className="space-y-2 rounded-md border border-slate-800 p-3 text-sm">
+      <h2 className="font-medium">When a licence lapses</h2>
+      {policy.isPending && <p className="text-slate-400">Loading…</p>}
+      <FormError error={policy.error} />
+      {policy.data && <LapsePolicyPanel policy={policy.data} canChange={owner} />}
+    </div>
+  );
+}
+
+/**
+ * The current lapse policy and what it means; owners switch it (confirming
+ * before `stop`), members are told only an owner can.
+ */
+export function LapsePolicyPanel({
+  policy,
+  canChange,
+}: {
+  policy: LapsePolicy;
+  canChange: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const change = useMutation({
+    mutationFn: (next: LapsePolicy) => setLapsePolicy(next),
+    onSuccess: (now) => queryClient.setQueryData(["lapse-policy"], now),
+    // Also after a refusal: another owner may have changed it, or this user
+    // may no longer be an owner.
+    onSettled: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["lapse-policy"] }),
+        queryClient.invalidateQueries({ queryKey: ["stations"] }),
+        queryClient.invalidateQueries({ queryKey: ["me"] }),
+      ]),
+  });
+  const other: LapsePolicy = policy === "evaluation" ? "stop" : "evaluation";
+  return (
+    <>
+      <p>
+        <span className="text-slate-400">Current setting: </span>
+        {LAPSE_POLICY_LABELS[policy]}
+      </p>
+      <LapsePolicyText />
+      {canChange ? (
+        <>
+          <button
+            type="button"
+            disabled={change.isPending}
+            onClick={() => {
+              const next = nextPolicyChange(policy, (m) => window.confirm(m));
+              if (next !== null) change.mutate(next);
+            }}
+            className="text-indigo-400 hover:underline disabled:opacity-50"
+          >
+            Change to: {LAPSE_POLICY_LABELS[other]}
+          </button>
+          <FormError error={change.error} />
+        </>
+      ) : (
+        <p className="text-slate-400">Only an organization owner can change this.</p>
+      )}
     </>
   );
 }
