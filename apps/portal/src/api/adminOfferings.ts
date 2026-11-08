@@ -85,7 +85,7 @@ const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInt
 const oneOf = (values: readonly string[], v: unknown) =>
   typeof v === "string" && values.includes(v);
 
-function isGrants(v: unknown): v is Grants {
+export function isGrants(v: unknown): v is Grants {
   return (
     isObject(v) &&
     oneOf(SCOPES, v.scope) &&

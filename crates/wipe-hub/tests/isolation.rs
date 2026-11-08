@@ -116,6 +116,14 @@ const ROUTES: &[(&str, &str, Class)] = &[
     ("GET", "/api/organization/invitations", Customer),
     ("POST", "/api/organization/invitations", Customer),
     ("POST", "/api/organization/invitations/:id/revoke", Customer),
+    ("GET", "/api/offerings", Customer),
+    ("POST", "/api/checkout", Customer),
+    ("GET", "/api/orders", Customer),
+    ("GET", "/api/orders/:id", Customer),
+    ("POST", "/api/billing/portal", Customer),
+    ("GET", "/api/payments/fake/sessions/:id", Customer),
+    ("POST", "/api/payments/fake/sessions/:id/pay", Customer),
+    ("POST", "/api/payments/fake/sessions/:id/abandon", Customer),
     ("GET", "/api/admin/organizations", Admin),
     ("GET", "/api/admin/users", Admin),
     ("GET", "/api/admin/organizations/:id", Admin),
@@ -199,16 +207,19 @@ fn the_literal_scanner_finds_routes_only() {
 // ---------------------------------------------------------------------------
 // The sweep
 
-/// One organization: verified owner, member, pending invitation.
+/// One organization: verified owner, member, pending invitation, and a
+/// pending order with its checkout session id.
 struct Tenant {
     org: Uuid,
     owner: Who,
     member: Who,
     invitation: String,
     invited: String,
+    order: String,
+    session: String,
 }
 
-async fn tenant(hub: &Hub, org_name: &str, names: Option<(&str, &str)>) -> Tenant {
+async fn tenant(hub: &Hub, org_name: &str, names: Option<(&str, &str)>, offering: &str) -> Tenant {
     let owner = hub.verified_owner(org_name).await;
     let member = hub.add(&owner, "member").await;
     let invited = unique_address();
@@ -221,6 +232,22 @@ async fn tenant(hub: &Hub, org_name: &str, names: Option<(&str, &str)>) -> Tenan
         .fetch_one(&hub.db.pool)
         .await
         .unwrap();
+    let resp = hub
+        .post(
+            "/api/checkout",
+            json!({ "offering_id": offering }),
+            Some(&owner.cookie),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: Value = resp.json().await.unwrap();
+    let order = body["order"]["id"].as_str().unwrap().to_string();
+    let session: String =
+        sqlx::query_scalar("SELECT provider_session_id FROM orders WHERE id = $1::uuid")
+            .bind(&order)
+            .fetch_one(&hub.db.pool)
+            .await
+            .unwrap();
     if let Some((owner_name, member_name)) = names {
         // Names no other user has, so a leak cannot hide behind a shared one.
         for (who, name) in [(&owner, owner_name), (&member, member_name)] {
@@ -238,18 +265,21 @@ async fn tenant(hub: &Hub, org_name: &str, names: Option<(&str, &str)>) -> Tenan
         member,
         invitation,
         invited,
+        order,
+        session,
     }
 }
 
 /// Everything stored about organization `org`, as JSON text: the
-/// organization row, its users, its invitations, and its users' sessions and
-/// emailed tokens (hashes, expiries, `used_at`), each in full.
+/// organization row, its users, its invitations, its orders, and its users'
+/// sessions and emailed tokens (hashes, expiries, `used_at`), each in full.
 async fn rows_of(hub: &Hub, org: Uuid) -> Vec<String> {
     let mut out = Vec::new();
     for sql in [
         "SELECT row_to_json(o)::text FROM organizations o WHERE id = $1",
         "SELECT row_to_json(u)::text FROM users u WHERE organization_id = $1 ORDER BY id",
         "SELECT row_to_json(i)::text FROM invitations i WHERE organization_id = $1 ORDER BY id",
+        "SELECT row_to_json(o)::text FROM orders o WHERE organization_id = $1 ORDER BY id",
         "SELECT row_to_json(s)::text FROM sessions s JOIN users u ON u.id = s.user_id \
          WHERE u.organization_id = $1 ORDER BY s.token_hash",
         "SELECT row_to_json(t)::text FROM auth_tokens t JOIN users u ON u.id = t.user_id \
@@ -278,11 +308,14 @@ async fn fresh_cookie(hub: &Hub, user_id: &str) -> String {
 #[tokio::test]
 async fn organization_a_never_sees_or_changes_organization_b() {
     let hub = spawn_hub().await;
-    let a = tenant(&hub, "Alpha Works", None).await;
+    // Offerings are the vendor's, the same for every organization.
+    let offering = hub.published_offering("Station annual").await;
+    let a = tenant(&hub, "Alpha Works", None, &offering).await;
     let b = tenant(
         &hub,
         "Bravo Holdings",
         Some(("Bertha Quill", "Boris Quill")),
+        &offering,
     )
     .await;
     let b_before = rows_of(&hub, b.org).await;
@@ -299,6 +332,8 @@ async fn organization_a_never_sees_or_changes_organization_b() {
         "Bertha Quill".into(),
         "Boris Quill".into(),
         b.invitation.clone(),
+        b.order.clone(),
+        b.session.clone(),
     ];
 
     let mut swept = 0;
@@ -311,6 +346,10 @@ async fn organization_a_never_sees_or_changes_organization_b() {
                 b.member.id.clone()
             } else if path.starts_with("/api/organization/invitations/") {
                 b.invitation.clone()
+            } else if path.starts_with("/api/orders/") {
+                b.order.clone()
+            } else if path.starts_with("/api/payments/fake/sessions/") {
+                b.session.clone()
             } else {
                 // Only admin routes remain with `:id`; they refuse a
                 // customer before reading it.
@@ -324,6 +363,7 @@ async fn organization_a_never_sees_or_changes_organization_b() {
                 "/api/account/profile" => Some(json!({"name": "Alpha Person"})),
                 "/api/organization" => Some(json!({"name": "Alpha Works Renamed"})),
                 "/api/organization/members/:id/role" => Some(json!({"role": "owner"})),
+                "/api/checkout" => Some(json!({ "offering_id": offering })),
                 "/api/organization/invitations" if method == "POST" => {
                     Some(json!({"email": b.member.email, "role": "member"}))
                 }
@@ -346,8 +386,9 @@ async fn organization_a_never_sees_or_changes_organization_b() {
                 assert_eq!(status, StatusCode::FORBIDDEN, "{role} {method} {url_path}");
             }
             if path.contains(":id") && class == Customer {
-                // A's owner hears "no such …"; A's member is refused first.
-                let want = if role == "owner" {
+                // A's owner hears "no such …"; A's member is refused first,
+                // except where every role may read (an order).
+                let want = if role == "owner" || path == "/api/orders/:id" {
                     StatusCode::NOT_FOUND
                 } else {
                     StatusCode::FORBIDDEN

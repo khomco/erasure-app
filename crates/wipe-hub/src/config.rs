@@ -311,6 +311,18 @@ pub fn startup_warnings(config: &Config) -> Vec<String> {
              serve the hub over https or use a localhost URL for development"
         ));
     }
+    if config.payment_provider == PaymentProvider::Fake {
+        out.push(if crate::auth::is_local_host(base) {
+            "payment provider is fake: no money moves, and the portal's test checkout page \
+             marks orders paid; never sell with it"
+                .to_string()
+        } else {
+            format!(
+                "payment provider is fake on non-local --public-base-url {base}: checkout, \
+                 billing and test payments are refused; use --payment-provider stripe"
+            )
+        });
+    }
     if config.portal_dir.is_none() {
         let looked = std::env::current_dir()
             .map(|cwd| cwd.join(DEFAULT_PORTAL_DIR))
@@ -770,6 +782,31 @@ mod tests {
             .unwrap_or_else(|| panic!("{warnings:?}"));
         assert!(w.contains(PORTAL_BUILD_HINT), "{w}");
         assert!(w.contains("--portal-dir"), "{w}");
+    }
+
+    #[test]
+    fn the_fake_payment_provider_always_warns() {
+        let fake_warnings = |base: &str, provider: PaymentProvider| {
+            let mut a = args();
+            a.public_base_url = base.into();
+            a.payment_provider = provider;
+            a.stripe_webhook_secret = Some("whsec_test".into());
+            let c = Config::from_args(a).unwrap();
+            startup_warnings(&c)
+                .into_iter()
+                .filter(|w| w.contains("payment provider is fake"))
+                .collect::<Vec<_>>()
+        };
+        let local = fake_warnings("http://127.0.0.1:7900", PaymentProvider::Fake);
+        assert_eq!(local.len(), 1, "{local:?}");
+        assert!(local[0].contains("no money moves"), "{local:?}");
+        let remote = fake_warnings("https://hub.example.com", PaymentProvider::Fake);
+        assert_eq!(remote.len(), 1, "{remote:?}");
+        assert!(remote[0].contains("https://hub.example.com"), "{remote:?}");
+        assert!(remote[0].contains("refused"), "{remote:?}");
+        assert!(fake_warnings("http://127.0.0.1:7900", PaymentProvider::Stripe).is_empty());
+        assert_eq!(PaymentProvider::Fake.as_str(), "fake");
+        assert_eq!(PaymentProvider::Stripe.as_str(), "stripe");
     }
 
     #[test]

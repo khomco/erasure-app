@@ -24,6 +24,9 @@ pub mod lead_routes;
 pub mod leads;
 pub mod mail;
 pub mod offering_admin;
+pub mod order_routes;
+pub mod orders;
+pub mod payments;
 pub mod team;
 pub mod team_routes;
 pub mod throttle;
@@ -48,6 +51,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub pool: PgPool,
     pub mailer: Mailer,
+    /// The payment provider `--payment-provider` selects (ADR-0007 §4).
+    pub payments: Arc<dyn payments::PaymentProvider>,
 }
 
 impl AppState {
@@ -64,10 +69,12 @@ impl AppState {
             config.smtp_port,
             config.mail_from.clone(),
         );
+        let payments = payments::provider_for(&config);
         Ok(Self {
             config: Arc::new(config),
             pool,
             mailer,
+            payments,
         })
     }
 }
@@ -79,6 +86,7 @@ pub fn router(state: AppState) -> Router {
         .merge(team_routes::routes())
         .merge(admin_routes::routes())
         .merge(lead_routes::routes())
+        .merge(order_routes::routes())
         // Unknown API paths are JSON 404s, portal or not: a typo in a client
         // must never get `index.html` back with a 200.
         .route("/api", any(api_not_found))

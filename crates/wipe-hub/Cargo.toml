@@ -34,6 +34,9 @@ thiserror = { workspace = true }
 url = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+hex = { workspace = true }
+# Already in the graph through sqlx; signs and verifies Fake payment events.
+hmac = "0.12"
 base64 = { workspace = true }
 uuid = { workspace = true }
 # argon2 0.6 needs a newer Rust than the 1.80 MSRV.

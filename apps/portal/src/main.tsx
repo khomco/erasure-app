@@ -19,9 +19,14 @@ import { AdminOfferingPage } from "./pages/AdminOfferingPage";
 import { AdminOfferingsPage } from "./pages/AdminOfferingsPage";
 import { AdminOrganizationPage } from "./pages/AdminOrganizationPage";
 import { AdminPage } from "./pages/AdminPage";
+import { BuyPage } from "./pages/BuyPage";
+import { FakeBillingPage } from "./pages/FakeBillingPage";
+import { FakeCheckoutPage } from "./pages/FakeCheckoutPage";
 import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
 import { HomePage } from "./pages/HomePage";
 import { MagicLinkPage } from "./pages/MagicLinkPage";
+import { OrderPage } from "./pages/OrderPage";
+import { OrdersPage } from "./pages/OrdersPage";
 import { OrganizationPage } from "./pages/OrganizationPage";
 import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SignInLinkPage } from "./pages/SignInLinkPage";
@@ -169,6 +174,46 @@ const acceptInviteRoute = createRoute({
   },
 });
 
+const buyRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/buy",
+  component: BuyPage,
+});
+
+const ordersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/orders",
+  component: OrdersPage,
+});
+
+const orderRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/orders/$id",
+  component: function OrderRoute() {
+    const { id } = orderRoute.useParams();
+    return <OrderPage id={id} />;
+  },
+});
+
+// The Fake payment provider's checkout URL: `{public_base_url}/checkout/fake?session=…`.
+const fakeCheckoutRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/checkout/fake",
+  validateSearch: (search: Record<string, unknown>): { session?: string } =>
+    typeof search.session === "string" ? { session: search.session } : {},
+  component: function FakeCheckoutRoute() {
+    const { session } = fakeCheckoutRoute.useSearch();
+    return <FakeCheckoutPage session={session} />;
+  },
+});
+
+// The Fake payment provider's billing URL: `{public_base_url}/billing/fake`.
+const fakeBillingRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/billing/fake",
+  component: FakeBillingPage,
+});
+
 // Vendor admins only; the hub enforces it (the home page merely hides the link).
 const adminRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -228,6 +273,11 @@ const routeTree = rootRoute.addChildren([
   accountRoute,
   organizationRoute,
   acceptInviteRoute,
+  buyRoute,
+  ordersRoute,
+  orderRoute,
+  fakeCheckoutRoute,
+  fakeBillingRoute,
   adminRoute,
   adminOrganizationRoute,
   adminLeadsRoute,

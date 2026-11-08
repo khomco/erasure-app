@@ -41,12 +41,17 @@ pub struct Hub {
 }
 
 pub async fn spawn_hub_with(smtp_port: u16) -> Hub {
+    spawn_hub_args(|a| a.smtp_port = smtp_port).await
+}
+
+/// A hub whose default arguments `edit` changes first.
+pub async fn spawn_hub_args(edit: impl FnOnce(&mut Args)) -> Hub {
     let db = TestDb::migrated().await;
-    let args = Args {
+    let mut args = Args {
         addr: "127.0.0.1:0".parse().unwrap(),
         database_url: db.url.clone(),
         smtp_host: DEFAULT_SMTP_HOST.into(),
-        smtp_port,
+        smtp_port: DEFAULT_SMTP_PORT,
         mail_from: DEFAULT_MAIL_FROM.into(),
         public_base_url: BASE.into(),
         payment_provider: wipe_hub::PaymentProvider::Fake,
@@ -55,6 +60,7 @@ pub async fn spawn_hub_with(smtp_port: u16) -> Hub {
         portal_dir: None,
         site_origin: wipe_hub::config::DEFAULT_SITE_ORIGIN.into(),
     };
+    edit(&mut args);
     let mut config = Config::from_args(args).unwrap();
     config.portal_dir = None;
     let state = AppState::new(config).unwrap();
@@ -277,6 +283,23 @@ impl Hub {
             .fetch_all(&self.db.pool)
             .await
             .unwrap()
+    }
+
+    /// A published offering inserted directly (no vendor admin needed):
+    /// its id. Annual, USD 1,200.00, one machine seat, unlimited erasures.
+    pub async fn published_offering(&self, name: &str) -> String {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO offerings (name, description, price_minor, currency, billing_interval, \
+                                    status, scope, seats, quota_erasures, features, term_months, \
+                                    published_at) \
+             VALUES ($1, 'One station.', 120000, 'USD', 'annual', 'published', 'machine', 1, \
+                     NULL, '{hub_sync,pdf_certificates}', 12, now()) RETURNING id",
+        )
+        .bind(name)
+        .fetch_one(&self.db.pool)
+        .await
+        .unwrap();
+        id.to_string()
     }
 
     pub async fn org_name(&self, owner: &Who) -> String {

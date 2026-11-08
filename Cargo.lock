@@ -6428,6 +6428,8 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "clap",
+ "hex",
+ "hmac",
  "lettre",
  "rand",
  "reqwest 0.12.28",
