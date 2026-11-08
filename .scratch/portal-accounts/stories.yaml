@@ -12,7 +12,9 @@
 - id: "3"
   title: Magic link and password reset
   description: >-
-    CAP-2 (magic link, reset). Single-use expiring tokens by email.
+    CAP-2 (magic link, reset). Single-use expiring tokens by email. Rate-limit
+    every route that sends email (sign-up, resend verification, magic link,
+    reset) with story 2's throttle.
 - id: "4"
   title: Account and team management
   description: >-

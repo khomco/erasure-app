@@ -1,0 +1,2104 @@
+diff --git a/CONTEXT.md b/CONTEXT.md
+index 93f85f0..db3476e 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -690,7 +690,8 @@ folder or in `.scratch/DECISIONS.md`.
+ | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
+ | Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check; landing page (problem, offline-verifiable certificate, differentiators, "what we are not", one early-access CTA); product, standards posture (certification roadmap labelled future), segment (ITAD, enterprise IT, government), pricing ("early-access pricing on request"), contact, privacy and terms pages; early-access and contact forms | ADR-0006 / ROADMAP W1.1–W1.4 | ✅ partial | The forms post nowhere (no `action`, submit disabled) until `lead-capture` adds `POST /api/leads`; pricing has no amounts until `offerings-and-payments`; privacy and terms are placeholders to publish before launch; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); copy and statuses await vendor sign-off |
+ | Vendor hub foundation — `crates/wipe-hub` (`wipe-hub serve`), flag/`WIPE_HUB_*` env config validated at start-up (`fake`\|`stripe` payment provider; `stripe` refuses to start without a webhook secret; optional 32-byte vendor root seed file, warned as file-held on every start), lazy Postgres pool, embedded sqlx migrations applied before listening (start-up exits within ~5 s if Postgres is unreachable), append-only `audit_log` table (ADR-0007 §6; written only through `audit::record`, which takes any executor so an action and its audit row share a transaction; UPDATE/DELETE/TRUNCATE rejected by triggers), `GET /api/health` probing Postgres and SMTP (≤2 s each; 503 `degraded` when either is down), root `compose.yaml` with Postgres and Mailpit, integration-test harness (`tests/support`: per-test `TestDb` databases dropped with their guard, `Mailpit` API client), portal serving (`apps/portal/dist` under the working directory or `--portal-dir`/`WIPE_HUB_PORTAL_DIR`; SPA fallback to `index.html`, `/assets/*` with no fallback, unknown `/api/*` paths JSON 404s; an explicit `--portal-dir` without `index.html` refuses to start, an unbuilt default is warned and non-API paths 404 naming the build) | ADR-0007 / ADR-0006 §1 / ROADMAP A1.1, A1.4 | ✅ partial | Only auth events call `audit::record` so far (row below); append-only does not stop the table owner (the hub's own role) or a superuser disabling the triggers (a separate unprivileged runtime role is a deployment decision, ROADMAP §0.5); no payments or licence issuance; vendor root custody is a file (production must not launch on it, ROADMAP A1.5); `cargo test --workspace` now needs `docker compose up -d` |
+-| Hub accounts: sign-up, email verification and password sign-in — migration `0003_accounts` (`organizations`; `users` with role `owner`\|`member`\|`vendor_admin`, unique on `lower(email)`; `auth_tokens` and `sessions` storing only the SHA-256 of 32-byte OS-RNG tokens), Argon2id password hashes (12–1024 chars, hashed off the async runtime), `/api/auth/{sign-up,verify-email,sign-in,sign-out,me,verification-email}` (sign-up creates an organization and its `owner` and signs them in; verification links `{public_base_url}/verify-email?token=…` are single-use and expire in 24 h; one generic 401 for a wrong password or unknown email, which still runs one Argon2 verification), server-side session per sign-up/sign-in in the `wipehub_session` cookie (`HttpOnly; SameSite=Lax; Path=/`, 14 days, `Secure` when `--public-base-url` is https), plain-SMTP mailer with `--mail-from`/`WIPE_HUB_MAIL_FROM` sent after commit (SMTP down at sign-up: account still created, `verification_email_sent:false`, resend route recovers), every auth event audited in its transaction (`auth.sign_up`, `auth.email_verified`, `auth.sign_in`, `auth.sign_in_failed`, `auth.sign_out`), customer reads scoped by organization id in `accounts`; portal `/sign-up`, `/sign-in`, `/verify-email` pages and an account panel on home (verify notice with resend, sign-out) | ADR-0007 §3 / SPEC portal-accounts CAP-1, CAP-2 | ✅ partial | No CSRF tokens, rate limiting, wrong-password lockout or sign-out everywhere (story 2); no magic link or password reset (story 3); no team or profile pages (story 4); no `vendor_admin` creation or admin area (story 5); nothing is purchase-gated yet (no purchase route; `email_verified` in `/api/auth/me` is the field to gate on); plain SMTP only, no STARTTLS/auth for a production relay (ROADMAP §0.5); expired sessions and tokens are never purged; sign-up's 409 for a taken email reveals whether that email is registered; the cookie is `Secure` only when `--public-base-url` is https, which departs from ADR-0007 §3's "Secure outside localhost" until story 2 sets the cookie policy |
++| Hub accounts: sign-up, email verification and password sign-in — migration `0003_accounts` (`organizations`; `users` with role `owner`\|`member`\|`vendor_admin`, unique on `lower(email)`; `auth_tokens` and `sessions` storing only the SHA-256 of 32-byte OS-RNG tokens), Argon2id password hashes (12–1024 chars, hashed off the async runtime), `/api/auth/{sign-up,verify-email,sign-in,sign-out,me,verification-email}` (sign-up creates an organization and its `owner` and signs them in; verification links `{public_base_url}/verify-email?token=…` are single-use and expire in 24 h; one generic 401 for a wrong password or unknown email, which still runs one Argon2 verification), server-side session per sign-up/sign-in in the `wipehub_session` cookie (`HttpOnly; SameSite=Lax; Path=/`, 14 days; `Secure` policy in the story-2 row below), plain-SMTP mailer with `--mail-from`/`WIPE_HUB_MAIL_FROM` sent after commit (SMTP down at sign-up: account still created, `verification_email_sent:false`, resend route recovers), every auth event audited in its transaction (`auth.sign_up`, `auth.email_verified`, `auth.sign_in`, `auth.sign_in_failed`, `auth.sign_out`), customer reads scoped by organization id in `accounts`; portal `/sign-up`, `/sign-in`, `/verify-email` pages and an account panel on home (verify notice with resend, sign-out) | ADR-0007 §3 / SPEC portal-accounts CAP-1, CAP-2 | ✅ partial | No magic link or password reset (story 3); no team or profile pages (story 4); no `vendor_admin` creation or admin area (story 5); nothing is purchase-gated yet (no purchase route; `email_verified` in `/api/auth/me` is the field to gate on); plain SMTP only, no STARTTLS/auth for a production relay (ROADMAP §0.5); expired email tokens are never purged (a user's expired sessions are purged when they next sign in); sign-up's 409 for a taken email reveals whether that email is registered |
++| Hub sessions hardened: CSRF, sign-in throttles, rotation, sign out everywhere — double-submit CSRF token (`GET /api/auth/csrf` returns `{csrf_token}` with `Cache-Control: no-store`, reusing a well-formed `wipehub_csrf` cookie or minting 32 OS-RNG bytes; every non-GET/HEAD/OPTIONS `/api/*` request, unknown paths included, needs an `X-CSRF-Token` header equal to the cookie, compared in constant time, else 403 `missing or invalid CSRF token` before any handler or audit write; middleware `csrf::require`, no exemptions); migration `0004_auth_throttle` and `throttle::{check, record_failure, clear}` (fixed 15-min window from the first failure; the 5th failure for `email:<address>` or the 20th for `ip:<peer>` locks the key for 15 min; while either key is locked sign-in answers 429 with `Retry-After` before any lookup or Argon2 work, even for the right password, audited as `auth.sign_in_failed` reason `locked` without extending the lock; the engaging failure audits `auth.sign_in_locked` with `{until}`; a success clears the email key only; known and unknown emails count alike); sign-in and sign-up delete the incoming session in the new session's transaction (`auth.sign_in` detail `{rotated}`); `POST /api/auth/sign-out-everywhere` ends every session of the signed-in user (`auth.sign_out_everywhere`, `{sessions: n}`); session and CSRF cookies are `Secure` unless `--public-base-url` is http on `localhost`, `*.localhost` or a loopback IP (http on any other host gets `Secure` and a start-up warning that browsers will drop the cookies); the portal client fetches and caches the token, sends it on every POST and refetches/retries once on a CSRF 403; "Sign out everywhere" on home | ADR-0007 §3 / SPEC portal-accounts CAP-2, CAP-3 | ✅ partial | The IP throttle keys on the TCP peer only (`X-Forwarded-For` is never trusted, ROADMAP §0.5), so behind a reverse proxy every client shares one IP key and 20 failures anywhere lock everyone out; anyone who knows an email can lock that account out of password sign-in for 15 min at a time; double-submit CSRF is open to cookie-tossing from a sibling subdomain until hosting is decided; no Origin/`Sec-Fetch-Site` checks; no idle timeout (sessions last 14 days unless signed out); magic-link and reset rate limits are story 3 |
+ 
+ ## 11. Deferred — known and committed
+ 
+@@ -1050,6 +1051,14 @@ and resolve. None of these have a decided answer.
+   held by the browser as the `wipehub_session` cookie (only its SHA-256 is
+   stored). Unrelated to the station's session-scoped operator identity
+   (§8).
++- **CSRF token** — the hub's double-submit token: 32 random bytes held in
++  the `wipehub_csrf` cookie and echoed by the portal in the
++  `X-CSRF-Token` header on every state-changing `/api` request. Not tied
++  to a portal session, so sign-in and sign-up are covered too.
++- **Sign-in throttle** — a failure counter in the hub's `auth_throttle`
++  table, keyed `email:<address>` or `ip:<peer>`, that locks password
++  sign-in for that key after too many failures in a fixed window. A
++  lockout is a throttle in its locked state, not a disabled account.
+ - **Verification portal / playground** — public, client-side certificate
+   verification. Runs the same code path as offline `verify-cert`, with
+   no network call and no lookup against us.
+diff --git a/README.md b/README.md
+index 687e3fe..10c831e 100644
+--- a/README.md
++++ b/README.md
+@@ -45,9 +45,9 @@ co-sign. See [ADR-0001](docs/adr/0001-job-as-outcome-bearing-composition.md).
+ | `wipe-fleet` | mDNS service advertise / browse + deterministic lead election |
+ | `wipe-server` | Axum REST API + WebSocket event stream; auto-signs certs when a Job reaches `Erased` or `PendingCoSign`; destruction-manifest assembly and co-sign |
+ | `wipe-cli` | `wipestation serve / inspect / verify-cert` binary |
+-| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*`, every auth event audited. Payments and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
++| `wipe-hub` | Vendor-side hub (ADR-0007), `wipe-hub serve`: Axum + Postgres (sqlx), flag/env config validated at start-up, `GET /api/health` probing Postgres and SMTP, serving the built portal (`apps/portal/dist` or `--portal-dir`) with SPA fallback while unknown `/api/*` paths stay JSON 404s, an append-only audit log (`audit::record`; UPDATE/DELETE/TRUNCATE rejected by database triggers), and accounts: organizations and `owner`/`member`/`vendor_admin` users, sign-up with an emailed verification link (`--mail-from`, plain SMTP), Argon2id password sign-in and server-side sessions under `/api/auth/*` (double-submit CSRF token on every state-changing `/api` request, per-email and per-IP sign-in lockout, session rotation on sign-in, sign out everywhere), every auth event audited. Payments and licence delivery are not built yet. Depends only on `wipe-common`/`wipe-cert`/`wipe-license`; no station crate depends on it |
+ | `apps/desktop` | Vite + React + TanStack Router + Tailwind frontend, plus Tauri 2 shell |
+-| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in and email-verification pages, and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend) |
++| `apps/portal` | Vite + React + TanStack Router/Query + Tailwind customer and vendor portal, served by `wipe-hub` from the same origin as its API (ADR-0006 §1). Sign-up, sign-in and email-verification pages, and a home page showing the hub's status and the signed-in account (with an unverified-email notice and resend, sign out and sign out everywhere); its API client sends the hub's CSRF token on every POST |
+ | `sites/www` | Static Astro + Tailwind marketing site (pre-launch): landing, product, standards, segment (ITAD, enterprise IT, government), pricing, contact, privacy and terms pages, `/capabilities`, and early-access/contact forms that post nowhere until `lead-capture`; a build-time check fails `astro build` on any capability overclaim, missing meta/OG tag, missing sitemap, or resource loaded from another origin (ADR-0006 §2). See [`sites/www/README.md`](sites/www/README.md) |
+ 
+ ## Quick start
+diff --git a/apps/portal/src/api/auth.test.ts b/apps/portal/src/api/auth.test.ts
+index 54a1fcd..4e7ec38 100644
+--- a/apps/portal/src/api/auth.test.ts
++++ b/apps/portal/src/api/auth.test.ts
+@@ -1,10 +1,13 @@
+-import { describe, expect, it } from "vitest";
++import { beforeEach, describe, expect, it } from "vitest";
+ import {
++  CSRF_ERROR,
+   HubError,
+   fetchMe,
+   resendVerification,
++  resetCsrfCache,
+   signIn,
+   signOut,
++  signOutEverywhere,
+   signUp,
+   verifyEmail,
+   type Account,
+@@ -25,25 +28,60 @@ interface Call {
+   url: string;
+   method: string;
+   body: unknown;
++  /** The `X-CSRF-Token` header sent, or `null`. */
++  csrf: string | null;
+ }
+ 
+-/** A fetch that records its call and answers `status` with `body`. */
+-function respond(status: number, body?: string) {
++type Answer = { status: number; body?: string };
++
++/**
++ * A fake hub. `GET /api/auth/csrf` answers `csrf-1`, `csrf-2`, … (one per
++ * call, counted in `csrfFetches`); every other call is recorded in `calls`
++ * and answered by `answer` (given the call's index among them).
++ */
++function fakeHub(answer: (call: Call, index: number) => Answer) {
+   const calls: Call[] = [];
++  let csrfFetches = 0;
+   const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+-    calls.push({
+-      url: String(input),
+-      method: init?.method ?? "GET",
++    const url = String(input);
++    const method = init?.method ?? "GET";
++    if (url === "/api/auth/csrf" && method === "GET") {
++      csrfFetches += 1;
++      return new Response(JSON.stringify({ csrf_token: `csrf-${csrfFetches}` }), {
++        status: 200,
++        headers: { "Content-Type": "application/json" },
++      });
++    }
++    const headers = (init?.headers ?? {}) as Record<string, string>;
++    const call: Call = {
++      url,
++      method,
+       body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+-    });
++      csrf: headers["X-CSRF-Token"] ?? null,
++    };
++    calls.push(call);
++    const { status, body } = answer(call, calls.length - 1);
+     return new Response(body ?? null, {
+       status,
+       headers: body ? { "Content-Type": "application/json" } : {},
+     });
+   }) as typeof fetch;
+-  return { impl, calls };
++  return {
++    impl,
++    calls,
++    get csrfFetches() {
++      return csrfFetches;
++    },
++  };
+ }
+ 
++/** A fake hub answering every non-CSRF call with `status` and `body`. */
++function respond(status: number, body?: string) {
++  return fakeHub(() => ({ status, body }));
++}
++
++beforeEach(() => resetCsrfCache());
++
+ function hubError(status: number, message: string) {
+   return respond(status, JSON.stringify({ error: message }));
+ }
+@@ -70,7 +108,9 @@ describe("signUp", () => {
+     const f = respond(201, JSON.stringify({ ...account, verification_email_sent: true }));
+     const r = await signUp(input, f.impl);
+     expect(r).toEqual({ ...account, verification_email_sent: true });
+-    expect(f.calls).toEqual([{ url: "/api/auth/sign-up", method: "POST", body: input }]);
++    expect(f.calls).toEqual([
++      { url: "/api/auth/sign-up", method: "POST", body: input, csrf: "csrf-1" },
++    ]);
+   });
+ 
+   it("surfaces a 409 duplicate email", async () => {
+@@ -98,6 +138,7 @@ describe("signIn", () => {
+         url: "/api/auth/sign-in",
+         method: "POST",
+         body: { email: "ada@example.com", password: "pw" },
++        csrf: "csrf-1",
+       },
+     ]);
+   });
+@@ -107,6 +148,15 @@ describe("signIn", () => {
+     await expectHubError(signIn("a@b.co", "x", f.impl), 401, "invalid email or password");
+   });
+ 
++  it("surfaces a 429 lockout with the hub's message", async () => {
++    const f = hubError(429, "too many failed sign-in attempts; try again later");
++    await expectHubError(
++      signIn("a@b.co", "x", f.impl),
++      429,
++      "too many failed sign-in attempts; try again later",
++    );
++  });
++
+   it("falls back to a generic message for a non-JSON error", async () => {
+     const f = respond(502, undefined);
+     await expectHubError(signIn("a@b.co", "x", f.impl), 502, "request failed (HTTP 502)");
+@@ -117,7 +167,9 @@ describe("signOut", () => {
+   it("posts and resolves on 204", async () => {
+     const f = respond(204);
+     await expect(signOut(f.impl)).resolves.toBeUndefined();
+-    expect(f.calls).toEqual([{ url: "/api/auth/sign-out", method: "POST", body: undefined }]);
++    expect(f.calls).toEqual([
++      { url: "/api/auth/sign-out", method: "POST", body: undefined, csrf: "csrf-1" },
++    ]);
+   });
+ 
+   it("surfaces an error", async () => {
+@@ -130,7 +182,8 @@ describe("fetchMe", () => {
+   it("returns the account when signed in", async () => {
+     const f = respond(200, JSON.stringify(account));
+     expect(await fetchMe(f.impl)).toEqual(account);
+-    expect(f.calls[0]).toMatchObject({ url: "/api/auth/me", method: "GET" });
++    expect(f.calls).toEqual([{ url: "/api/auth/me", method: "GET", body: undefined, csrf: null }]);
++    expect(f.csrfFetches).toBe(0);
+   });
+ 
+   it("returns null when not signed in", async () => {
+@@ -154,7 +207,7 @@ describe("verifyEmail", () => {
+     const f = respond(200, JSON.stringify({ email_verified: true }));
+     await verifyEmail("tok", f.impl);
+     expect(f.calls).toEqual([
+-      { url: "/api/auth/verify-email", method: "POST", body: { token: "tok" } },
++      { url: "/api/auth/verify-email", method: "POST", body: { token: "tok" }, csrf: "csrf-1" },
+     ]);
+   });
+ 
+@@ -173,7 +226,7 @@ describe("resendVerification", () => {
+     const f = respond(202, JSON.stringify({ verification_email_sent: true }));
+     await resendVerification(f.impl);
+     expect(f.calls).toEqual([
+-      { url: "/api/auth/verification-email", method: "POST", body: undefined },
++      { url: "/api/auth/verification-email", method: "POST", body: undefined, csrf: "csrf-1" },
+     ]);
+   });
+ 
+@@ -185,3 +238,93 @@ describe("resendVerification", () => {
+     await expectHubError(resendVerification(hubError(status, message).impl), status, message);
+   });
+ });
++
++describe("signOutEverywhere", () => {
++  it("posts and resolves on 204", async () => {
++    const f = respond(204);
++    await expect(signOutEverywhere(f.impl)).resolves.toBeUndefined();
++    expect(f.calls).toEqual([
++      { url: "/api/auth/sign-out-everywhere", method: "POST", body: undefined, csrf: "csrf-1" },
++    ]);
++  });
++
++  it("surfaces 401 when not signed in", async () => {
++    const f = hubError(401, "not signed in");
++    await expectHubError(signOutEverywhere(f.impl), 401, "not signed in");
++  });
++});
++
++describe("CSRF token", () => {
++  const posts: [string, (f: typeof fetch) => Promise<unknown>][] = [
++    ["sign-up", (f) => signUp({ email: "a", password: "b", name: "c", organization_name: "d" }, f)],
++    ["sign-in", (f) => signIn("a@b.co", "pw", f)],
++    ["sign-out", (f) => signOut(f)],
++    ["sign-out-everywhere", (f) => signOutEverywhere(f)],
++    ["verify-email", (f) => verifyEmail("tok", f)],
++    ["verification-email", (f) => resendVerification(f)],
++  ];
++
++  it.each(posts)("%s sends X-CSRF-Token from /api/auth/csrf", async (_, call) => {
++    const f = respond(500, JSON.stringify({ error: "internal error" }));
++    await call(f.impl).catch(() => undefined);
++    expect(f.csrfFetches).toBe(1);
++    expect(f.calls).toHaveLength(1);
++    expect(f.calls[0].method).toBe("POST");
++    expect(f.calls[0].csrf).toBe("csrf-1");
++  });
++
++  it("is fetched once and reused across POSTs", async () => {
++    const f = respond(204);
++    await signOut(f.impl);
++    await signOut(f.impl);
++    await resendVerification(f.impl).catch(() => undefined);
++    expect(f.csrfFetches).toBe(1);
++    expect(f.calls.map((c) => c.csrf)).toEqual(["csrf-1", "csrf-1", "csrf-1"]);
++  });
++
++  it("refetches and retries once after a CSRF 403", async () => {
++    const f = fakeHub((_, i) =>
++      i === 0
++        ? { status: 403, body: JSON.stringify({ error: CSRF_ERROR }) }
++        : { status: 200, body: JSON.stringify(account) },
++    );
++    expect(await signIn("ada@example.com", "pw", f.impl)).toEqual(account);
++    expect(f.csrfFetches).toBe(2);
++    expect(f.calls.map((c) => [c.url, c.csrf, c.body])).toEqual([
++      ["/api/auth/sign-in", "csrf-1", { email: "ada@example.com", password: "pw" }],
++      ["/api/auth/sign-in", "csrf-2", { email: "ada@example.com", password: "pw" }],
++    ]);
++  });
++
++  it("gives up after a second CSRF 403", async () => {
++    const f = hubError(403, CSRF_ERROR);
++    await expectHubError(signOut(f.impl), 403, CSRF_ERROR);
++    expect(f.calls).toHaveLength(2);
++    expect(f.csrfFetches).toBe(2);
++  });
++
++  it("does not retry other 403s", async () => {
++    const f = hubError(403, "forbidden");
++    await expectHubError(signOut(f.impl), 403, "forbidden");
++    expect(f.calls).toHaveLength(1);
++    expect(f.csrfFetches).toBe(1);
++  });
++
++  it("does not cache a failed token fetch", async () => {
++    let fail = true;
++    const calls: string[] = [];
++    const impl = (async (input: RequestInfo | URL) => {
++      const url = String(input);
++      calls.push(url);
++      if (url === "/api/auth/csrf") {
++        if (fail) return new Response(null, { status: 502 });
++        return new Response(JSON.stringify({ csrf_token: "good" }), { status: 200 });
++      }
++      return new Response(null, { status: 204 });
++    }) as typeof fetch;
++    await expectHubError(signOut(impl), 502, "request failed (HTTP 502)");
++    fail = false;
++    await signOut(impl);
++    expect(calls).toEqual(["/api/auth/csrf", "/api/auth/csrf", "/api/auth/sign-out"]);
++  });
++});
+diff --git a/apps/portal/src/api/auth.ts b/apps/portal/src/api/auth.ts
+index 279872f..db0dc84 100644
+--- a/apps/portal/src/api/auth.ts
++++ b/apps/portal/src/api/auth.ts
+@@ -45,19 +45,80 @@ export class HubError extends Error {
+ 
+ type Fetch = typeof fetch;
+ 
++/** The hub's 403 text for a missing or mismatched CSRF token (crates/wipe-hub/src/csrf.rs). */
++export const CSRF_ERROR = "missing or invalid CSRF token";
++
++let cachedCsrf: Promise<string> | null = null;
++
++/**
++ * The double-submit CSRF token from `GET /api/auth/csrf`, fetched once and
++ * cached for the page's life. The hub sets the matching cookie; every POST
++ * echoes the token in `X-CSRF-Token`.
++ */
++function csrfToken(fetchImpl: Fetch): Promise<string> {
++  if (cachedCsrf === null) {
++    const pending = fetchCsrf(fetchImpl);
++    cachedCsrf = pending;
++    // A failed fetch is not cached: the next POST tries again.
++    pending.catch(() => {
++      if (cachedCsrf === pending) cachedCsrf = null;
++    });
++  }
++  return cachedCsrf;
++}
++
++async function fetchCsrf(fetchImpl: Fetch): Promise<string> {
++  const res = await ensureOk(
++    await fetchImpl("/api/auth/csrf", {
++      method: "GET",
++      headers: { Accept: "application/json" },
++      credentials: "same-origin",
++    }),
++  );
++  const body = await json(
++    res,
++    (v): v is { csrf_token: string } => isObject(v) && typeof v.csrf_token === "string",
++    "csrf",
++  );
++  return body.csrf_token;
++}
++
++/** Test only: forget the cached CSRF token. */
++export function resetCsrfCache(): void {
++  cachedCsrf = null;
++}
++
++async function isCsrfRejection(res: Response): Promise<boolean> {
++  if (res.status !== 403) return false;
++  try {
++    const body: unknown = await res.clone().json();
++    return isObject(body) && body.error === CSRF_ERROR;
++  } catch {
++    return false;
++  }
++}
++
+ async function request(
+   fetchImpl: Fetch,
+   method: "GET" | "POST",
+   path: string,
+   body?: unknown,
+ ): Promise<Response> {
+-  const headers: Record<string, string> = { Accept: "application/json" };
+-  const init: RequestInit = { method, headers, credentials: "same-origin" };
+-  if (body !== undefined) {
+-    headers["Content-Type"] = "application/json";
+-    init.body = JSON.stringify(body);
+-  }
+-  return fetchImpl(path, init);
++  const send = async (): Promise<Response> => {
++    const headers: Record<string, string> = { Accept: "application/json" };
++    const init: RequestInit = { method, headers, credentials: "same-origin" };
++    if (body !== undefined) {
++      headers["Content-Type"] = "application/json";
++      init.body = JSON.stringify(body);
++    }
++    if (method === "POST") headers["X-CSRF-Token"] = await csrfToken(fetchImpl);
++    return fetchImpl(path, init);
++  };
++  const res = await send();
++  if (method !== "POST" || !(await isCsrfRejection(res))) return res;
++  // The cached token went stale (e.g. the cookie expired): refetch and retry once.
++  resetCsrfCache();
++  return send();
+ }
+ 
+ /** Throws a `HubError` carrying the hub's `error` message for a non-2xx. */
+@@ -90,7 +151,10 @@ export async function signUp(input: SignUpInput, fetchImpl: Fetch = fetch): Prom
+   return json(res, isSignUpResult, "sign-up");
+ }
+ 
+-/** `POST /api/auth/sign-in`. A wrong email or password is a 401 `HubError`. */
++/**
++ * `POST /api/auth/sign-in`. A wrong email or password is a 401 `HubError`;
++ * too many failures is a 429 `HubError` with the hub's message.
++ */
+ export async function signIn(
+   email: string,
+   password: string,
+@@ -107,6 +171,11 @@ export async function signOut(fetchImpl: Fetch = fetch): Promise<void> {
+   await ensureOk(await request(fetchImpl, "POST", "/api/auth/sign-out"));
+ }
+ 
++/** `POST /api/auth/sign-out-everywhere` (204): end every session of this user. */
++export async function signOutEverywhere(fetchImpl: Fetch = fetch): Promise<void> {
++  await ensureOk(await request(fetchImpl, "POST", "/api/auth/sign-out-everywhere"));
++}
++
+ /** `GET /api/auth/me`: the signed-in account, or `null` when signed out (401). */
+ export async function fetchMe(fetchImpl: Fetch = fetch): Promise<Account | null> {
+   const res = await request(fetchImpl, "GET", "/api/auth/me");
+diff --git a/apps/portal/src/pages/HomePage.tsx b/apps/portal/src/pages/HomePage.tsx
+index a568c5e..4d726d3 100644
+--- a/apps/portal/src/pages/HomePage.tsx
++++ b/apps/portal/src/pages/HomePage.tsx
+@@ -1,6 +1,12 @@
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+ import { Link } from "@tanstack/react-router";
+-import { fetchMe, resendVerification, signOut, type Account } from "@/api/auth";
++import {
++  fetchMe,
++  resendVerification,
++  signOut,
++  signOutEverywhere,
++  type Account,
++} from "@/api/auth";
+ import { fetchHealth, type HealthReport } from "@/api/health";
+ 
+ export function HomePage() {
+@@ -79,7 +85,12 @@ function SignedIn({ account }: { account: Account }) {
+     mutationFn: () => signOut(),
+     onSuccess: () => queryClient.setQueryData(["me"], null),
+   });
++  const everywhere = useMutation({
++    mutationFn: () => signOutEverywhere(),
++    onSuccess: () => queryClient.setQueryData(["me"], null),
++  });
+   const resend = useMutation({ mutationFn: () => resendVerification() });
++  const signingOut = out.isPending || everywhere.isPending;
+   const { user, organization } = account;
+ 
+   return (
+@@ -116,19 +127,37 @@ function SignedIn({ account }: { account: Account }) {
+           )}
+         </div>
+       )}
+-      <button
+-        type="button"
+-        onClick={() => out.mutate()}
+-        disabled={out.isPending}
+-        className="rounded-md border border-slate-700 px-3 py-1 hover:bg-slate-800 disabled:opacity-50"
+-      >
+-        Sign out
+-      </button>
++      <div className="flex gap-2">
++        <button
++          type="button"
++          onClick={() => out.mutate()}
++          disabled={signingOut}
++          className="rounded-md border border-slate-700 px-3 py-1 hover:bg-slate-800 disabled:opacity-50"
++        >
++          Sign out
++        </button>
++        <button
++          type="button"
++          onClick={() => everywhere.mutate()}
++          disabled={signingOut}
++          title="End every session of this account, on every device"
++          className="rounded-md border border-slate-700 px-3 py-1 hover:bg-slate-800 disabled:opacity-50"
++        >
++          Sign out everywhere
++        </button>
++      </div>
+       {out.isError && (
+         <p role="alert" className="text-rose-400">
+           {out.error instanceof Error ? out.error.message : "Could not sign out"}
+         </p>
+       )}
++      {everywhere.isError && (
++        <p role="alert" className="text-rose-400">
++          {everywhere.error instanceof Error
++            ? everywhere.error.message
++            : "Could not sign out everywhere"}
++        </p>
++      )}
+     </div>
+   );
+ }
+diff --git a/crates/wipe-hub/migrations/0004_auth_throttle.sql b/crates/wipe-hub/migrations/0004_auth_throttle.sql
+new file mode 100644
+index 0000000..d2c36b0
+--- /dev/null
++++ b/crates/wipe-hub/migrations/0004_auth_throttle.sql
+@@ -0,0 +1,13 @@
++-- Failure throttles (ADR-0007 §3, portal-accounts story 2): shared,
++-- restart-proof counters keyed by what is being throttled, e.g.
++-- `email:<address>` or `ip:<peer address>`. Written only through
++-- `wipe_hub::throttle`. A row counts failures in a fixed window starting at
++-- the first failure; `locked_until` is set when a limit is reached.
++-- Never edit an applied migration; add a new NNNN_name.sql.
++
++CREATE TABLE auth_throttle (
++    key               text PRIMARY KEY CHECK (key ~ '\S'),
++    failures          int NOT NULL CHECK (failures > 0),
++    window_started_at timestamptz NOT NULL,
++    locked_until      timestamptz
++);
+diff --git a/crates/wipe-hub/src/accounts.rs b/crates/wipe-hub/src/accounts.rs
+index a4574d8..64f501a 100644
+--- a/crates/wipe-hub/src/accounts.rs
++++ b/crates/wipe-hub/src/accounts.rs
+@@ -437,13 +437,15 @@ pub async fn consume_verification_token(
+ }
+ 
+ /// Start a session for `user_id`; returns the raw token for the cookie.
++/// Also purges that user's expired sessions.
+ pub async fn create_session<'e, E: sqlx::PgExecutor<'e>>(
+     executor: E,
+     user_id: Uuid,
+ ) -> Result<String, sqlx::Error> {
+     let token = Token::generate();
+     sqlx::query(
+-        "INSERT INTO sessions (token_hash, user_id, expires_at) \
++        "WITH purged AS (DELETE FROM sessions WHERE user_id = $2 AND expires_at <= now()) \
++         INSERT INTO sessions (token_hash, user_id, expires_at) \
+          VALUES ($1, $2, now() + make_interval(secs => $3))",
+     )
+     .bind(&token.hash[..])
+@@ -485,6 +487,18 @@ pub async fn delete_session<'e, E: sqlx::PgExecutor<'e>>(
+         .await
+ }
+ 
++/// End every session of `user_id`; returns how many there were.
++pub async fn delete_user_sessions<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    user_id: Uuid,
++) -> Result<u64, sqlx::Error> {
++    let done = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
++        .bind(user_id)
++        .execute(executor)
++        .await?;
++    Ok(done.rows_affected())
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/wipe-hub/src/auth.rs b/crates/wipe-hub/src/auth.rs
+index 7881f41..aeec88c 100644
+--- a/crates/wipe-hub/src/auth.rs
++++ b/crates/wipe-hub/src/auth.rs
+@@ -1,5 +1,16 @@
+ //! `/api/auth/*`: sign-up, email verification, password sign-in, sign-out,
+-//! `me` and resending the verification email (portal-accounts story 1).
++//! `me` and resending the verification email (portal-accounts story 1);
++//! the CSRF token, sign-in throttles, session rotation and sign-out
++//! everywhere (story 2).
++//!
++//! - Sign-in and sign-up delete the request's incoming session in the
++//!   transaction that creates the new one.
++//! - Failed sign-ins count against `email:<address>` and `ip:<peer>`
++//!   throttles ([`crate::throttle`]); a locked key answers 429 before any
++//!   lookup or Argon2 work. The peer is axum's `ConnectInfo`; proxy headers
++//!   are never trusted.
++//! - Both cookies are `Secure` except on an http localhost/loopback
++//!   `--public-base-url` ([`secure_cookies`]).
+ //!
+ //! Every auth event is audited in the same transaction as its effect. Mail is
+ //! sent after commit, so an SMTP outage never rolls back an account; the
+@@ -8,8 +19,10 @@
+ 
+ use axum::async_trait;
+ use axum::extract::rejection::JsonRejection;
+-use axum::extract::{FromRequest, FromRequestParts, Request, State};
+-use axum::http::header::{COOKIE, SET_COOKIE};
++use std::net::{IpAddr, SocketAddr};
++
++use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Request, State};
++use axum::http::header::{COOKIE, RETRY_AFTER, SET_COOKIE};
+ use axum::http::request::Parts;
+ use axum::http::{HeaderMap, HeaderValue, StatusCode};
+ use axum::response::{IntoResponse, Response};
+@@ -18,12 +31,13 @@ use axum::{Json, Router};
+ use serde::de::DeserializeOwned;
+ use serde::{Deserialize, Serialize};
+ use serde_json::json;
+-use url::Url;
++use url::{Host, Url};
+ use uuid::Uuid;
+ 
+ use crate::accounts::{self, Account, CreateAccountError};
+ use crate::audit::{self, AuditEntry, AuditError};
+-use crate::AppState;
++use crate::throttle::{self, Throttle};
++use crate::{csrf, AppState};
+ 
+ /// Name of the session cookie.
+ pub const SESSION_COOKIE: &str = "wipehub_session";
+@@ -34,6 +48,7 @@ pub const MSG_BAD_SIGN_IN: &str = "invalid email or password";
+ pub const MSG_NOT_SIGNED_IN: &str = "not signed in";
+ pub const MSG_ALREADY_VERIFIED: &str = "this email address is already verified";
+ pub const MSG_MAIL_FAILED: &str = "the verification email could not be sent; try again later";
++pub const MSG_LOCKED: &str = "too many failed sign-in attempts; try again later";
+ 
+ pub fn routes() -> Router<AppState> {
+     Router::new()
+@@ -41,6 +56,8 @@ pub fn routes() -> Router<AppState> {
+         .route("/api/auth/verify-email", post(verify_email))
+         .route("/api/auth/sign-in", post(sign_in))
+         .route("/api/auth/sign-out", post(sign_out))
++        .route("/api/auth/sign-out-everywhere", post(sign_out_everywhere))
++        .route("/api/auth/csrf", get(csrf::get_token))
+         .route("/api/auth/me", get(me))
+         .route("/api/auth/verification-email", post(resend_verification))
+ }
+@@ -125,41 +142,74 @@ where
+ 
+ /// `Set-Cookie` value for a new session.
+ pub fn session_cookie(token: &str, secure: bool) -> HeaderValue {
+-    cookie_header(token, accounts::SESSION_TTL.as_secs(), secure)
++    cookie_header(
++        SESSION_COOKIE,
++        token,
++        accounts::SESSION_TTL.as_secs(),
++        secure,
++    )
+ }
+ 
+ /// `Set-Cookie` value that clears the session cookie.
+ pub fn cleared_cookie(secure: bool) -> HeaderValue {
+-    cookie_header("", 0, secure)
++    cookie_header(SESSION_COOKIE, "", 0, secure)
+ }
+ 
+-fn cookie_header(value: &str, max_age: u64, secure: bool) -> HeaderValue {
+-    let mut s =
+-        format!("{SESSION_COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}");
++/// `Set-Cookie` value for cookie `name`. Values are base64url tokens (or
++/// empty), so the header is always valid.
++pub fn cookie_header(name: &str, value: &str, max_age: u64, secure: bool) -> HeaderValue {
++    let mut s = format!("{name}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}");
+     if secure {
+         s.push_str("; Secure");
+     }
+-    // Token is base64url, so the value is always a valid header.
+     HeaderValue::from_str(&s).expect("cookie header is ASCII")
+ }
+ 
+-fn secure_cookies(state: &AppState) -> bool {
+-    state.config.public_base_url.scheme() == "https"
++/// Whether cookies carry `Secure` (ADR-0007 §3): always on https, and on http
++/// unless the host is `localhost`, `*.localhost` or a loopback IP. Http on any
++/// other host still gets `Secure` (browsers then drop the cookie, and
++/// start-up warns).
++pub fn secure_cookies(base: &Url) -> bool {
++    base.scheme() == "https" || !is_local_host(base)
+ }
+ 
+-/// The session token from the request's `Cookie` headers, if any.
+-pub fn session_token(headers: &HeaderMap) -> Option<String> {
++/// `localhost`, `*.localhost`, `127.0.0.0/8` or `::1` (including the
++/// IPv4-mapped form).
++pub fn is_local_host(base: &Url) -> bool {
++    match base.host() {
++        Some(Host::Domain(d)) => {
++            let d = d.trim_end_matches('.').to_ascii_lowercase();
++            d == "localhost" || d.ends_with(".localhost")
++        }
++        Some(Host::Ipv4(ip)) => ip.is_loopback(),
++        Some(Host::Ipv6(ip)) => IpAddr::V6(ip).to_canonical().is_loopback(),
++        None => false,
++    }
++}
++
++fn secure(state: &AppState) -> bool {
++    secure_cookies(&state.config.public_base_url)
++}
++
++/// The value of cookie `name` from the request's `Cookie` headers, if any
++/// and non-empty. The first occurrence wins.
++pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+     headers
+         .get_all(COOKIE)
+         .iter()
+         .filter_map(|v| v.to_str().ok())
+         .flat_map(|v| v.split(';'))
+         .filter_map(|pair| pair.trim().split_once('='))
+-        .find(|(name, _)| *name == SESSION_COOKIE)
++        .find(|(n, _)| *n == name)
+         .map(|(_, value)| value.trim().to_string())
+         .filter(|v| !v.is_empty())
+ }
+ 
++/// The session token from the request's `Cookie` headers, if any.
++pub fn session_token(headers: &HeaderMap) -> Option<String> {
++    cookie_value(headers, SESSION_COOKIE)
++}
++
+ /// The signed-in user, from a live session cookie; 401 `not signed in`
+ /// otherwise.
+ #[derive(Debug, Clone, Copy)]
+@@ -231,6 +281,7 @@ pub struct SignUpResponse {
+ 
+ async fn sign_up(
+     State(state): State<AppState>,
++    headers: HeaderMap,
+     JsonBody(req): JsonBody<SignUpRequest>,
+ ) -> Result<Response, ApiError> {
+     let new =
+@@ -248,6 +299,9 @@ async fn sign_up(
+     };
+     let user_id = account.user.id;
+     let verify_token = accounts::create_verification_token(&mut *tx, user_id).await?;
++    if let Some(old) = session_token(&headers) {
++        accounts::delete_session(&mut *tx, &old).await?;
++    }
+     let session = accounts::create_session(&mut *tx, user_id).await?;
+     let who = actor(user_id);
+     audit::record(
+@@ -272,7 +326,7 @@ async fn sign_up(
+     )
+         .into_response();
+     resp.headers_mut()
+-        .insert(SET_COOKIE, session_cookie(&session, secure_cookies(&state)));
++        .insert(SET_COOKIE, session_cookie(&session, secure(&state)));
+     Ok(resp)
+ }
+ 
+@@ -310,10 +364,58 @@ pub struct SignInRequest {
+     pub password: String,
+ }
+ 
++/// The throttle key for a sign-in email: trimmed, lowercased and bounded,
++/// so an anonymous caller cannot bloat the table or the append-only log.
++fn email_key(email: &str) -> String {
++    let email: String = email
++        .trim()
++        .to_lowercase()
++        .chars()
++        .take(accounts::EMAIL_MAX_CHARS)
++        .collect();
++    format!("email:{email}")
++}
++
++fn ip_key(peer: Option<ConnectInfo<SocketAddr>>) -> Option<String> {
++    peer.map(|ConnectInfo(addr)| format!("ip:{}", addr.ip().to_canonical()))
++}
++
+ async fn sign_in(
+     State(state): State<AppState>,
++    peer: Option<ConnectInfo<SocketAddr>>,
++    headers: HeaderMap,
+     JsonBody(req): JsonBody<SignInRequest>,
+ ) -> Result<Response, ApiError> {
++    let email_key = email_key(&req.email);
++    let ip_key = ip_key(peer);
++    let keys: Vec<(&str, i32)> =
++        std::iter::once((email_key.as_str(), throttle::SIGN_IN_EMAIL_LIMIT))
++            .chain(ip_key.as_deref().map(|k| (k, throttle::SIGN_IN_IP_LIMIT)))
++            .collect();
++
++    // Locked: refuse before any lookup or Argon2 work, even for the right
++    // password. This attempt is not counted, so it never extends the lock.
++    let mut status = Throttle::Open;
++    for (key, _) in &keys {
++        status = status.max(throttle::check(&state.pool, key).await?);
++    }
++    if let Throttle::Locked { retry_after_secs } = status {
++        audit::record(
++            &state.pool,
++            &AuditEntry {
++                actor: "anonymous",
++                action: "auth.sign_in_failed",
++                subject: &email_key,
++                detail: json!({ "reason": "locked" }),
++            },
++        )
++        .await?;
++        let mut resp = ApiError::new(StatusCode::TOO_MANY_REQUESTS, MSG_LOCKED).into_response();
++        resp.headers_mut()
++            .insert(RETRY_AFTER, HeaderValue::from(retry_after_secs));
++        return Ok(resp);
++    }
++
+     // Oversized input fails without a lookup or Argon2 work on it.
+     let oversized = req.email.trim().len() > accounts::EMAIL_MAX_CHARS
+         || req.password.chars().count() > accounts::PASSWORD_MAX_CHARS;
+@@ -332,15 +434,6 @@ async fn sign_in(
+     let candidate = match candidate {
+         Some(c) if ok => c,
+         _ => {
+-            // Bounded, so an anonymous caller cannot bloat the append-only log.
+-            let email: String = req
+-                .email
+-                .trim()
+-                .to_lowercase()
+-                .chars()
+-                .take(accounts::EMAIL_MAX_CHARS)
+-                .collect();
+-            let subject = format!("email:{email}");
+             let reason = if oversized {
+                 "oversized_input"
+             } else if candidate.is_some() {
+@@ -354,17 +447,42 @@ async fn sign_in(
+                 &AuditEntry {
+                     actor: "anonymous",
+                     action: "auth.sign_in_failed",
+-                    subject: &subject,
++                    subject: &email_key,
+                     detail: json!({ "reason": reason }),
+                 },
+             )
+             .await?;
++            // Known and unknown emails count identically.
++            for (key, limit) in &keys {
++                let failure =
++                    throttle::record_failure(&mut *tx, key, *limit, throttle::SIGN_IN_WINDOW)
++                        .await?;
++                if let Some(until) = failure.locked_until {
++                    audit::record(
++                        &mut *tx,
++                        &AuditEntry {
++                            actor: "anonymous",
++                            action: "auth.sign_in_locked",
++                            subject: key,
++                            detail: json!({ "until": until }),
++                        },
++                    )
++                    .await?;
++                }
++            }
+             tx.commit().await?;
+             return Err(ApiError::new(StatusCode::UNAUTHORIZED, MSG_BAD_SIGN_IN));
+         }
+     };
+ 
+     let mut tx = state.pool.begin().await?;
++    // Only the email key: one person signing in must not unlock an IP that
++    // is spraying other accounts.
++    throttle::clear(&mut *tx, &email_key).await?;
++    let rotated = match session_token(&headers) {
++        Some(old) => accounts::delete_session(&mut *tx, &old).await?.is_some(),
++        None => false,
++    };
+     let session = accounts::create_session(&mut *tx, candidate.user_id).await?;
+     let who = actor(candidate.user_id);
+     audit::record(
+@@ -373,7 +491,7 @@ async fn sign_in(
+             actor: &who,
+             action: "auth.sign_in",
+             subject: &who,
+-            detail: json!({}),
++            detail: json!({ "rotated": rotated }),
+         },
+     )
+     .await?;
+@@ -384,7 +502,7 @@ async fn sign_in(
+ 
+     let mut resp = Json(account).into_response();
+     resp.headers_mut()
+-        .insert(SET_COOKIE, session_cookie(&session, secure_cookies(&state)));
++        .insert(SET_COOKIE, session_cookie(&session, secure(&state)));
+     Ok(resp)
+ }
+ 
+@@ -408,7 +526,32 @@ async fn sign_out(State(state): State<AppState>, headers: HeaderMap) -> Result<R
+     }
+     let mut resp = StatusCode::NO_CONTENT.into_response();
+     resp.headers_mut()
+-        .insert(SET_COOKIE, cleared_cookie(secure_cookies(&state)));
++        .insert(SET_COOKIE, cleared_cookie(secure(&state)));
++    Ok(resp)
++}
++
++/// End every session of the signed-in user, this one included.
++async fn sign_out_everywhere(
++    State(state): State<AppState>,
++    user: CurrentUser,
++) -> Result<Response, ApiError> {
++    let mut tx = state.pool.begin().await?;
++    let n = accounts::delete_user_sessions(&mut *tx, user.user_id).await?;
++    let who = actor(user.user_id);
++    audit::record(
++        &mut *tx,
++        &AuditEntry {
++            actor: &who,
++            action: "auth.sign_out_everywhere",
++            subject: &who,
++            detail: json!({ "sessions": n }),
++        },
++    )
++    .await?;
++    tx.commit().await?;
++    let mut resp = StatusCode::NO_CONTENT.into_response();
++    resp.headers_mut()
++        .insert(SET_COOKIE, cleared_cookie(secure(&state)));
+     Ok(resp)
+ }
+ 
+@@ -452,14 +595,59 @@ mod tests {
+             c,
+             "wipehub_session=tok; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600"
+         );
+-        assert!(session_cookie("tok", true)
+-            .to_str()
+-            .unwrap()
+-            .ends_with("; Secure"));
+-        assert!(cleared_cookie(false)
+-            .to_str()
+-            .unwrap()
+-            .contains("Max-Age=0"));
++        assert_eq!(
++            session_cookie("tok", true).to_str().unwrap(),
++            "wipehub_session=tok; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600; Secure"
++        );
++        assert_eq!(
++            cleared_cookie(false).to_str().unwrap(),
++            "wipehub_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
++        );
++        assert_eq!(
++            cookie_header("other", "v", 5, true).to_str().unwrap(),
++            "other=v; HttpOnly; SameSite=Lax; Path=/; Max-Age=5; Secure"
++        );
++    }
++
++    #[test]
++    fn secure_cookie_policy() {
++        for (base, want) in [
++            ("http://127.0.0.1:7900", false),
++            ("http://127.8.9.10", false),
++            ("http://localhost", false),
++            ("http://LOCALHOST:5174", false),
++            ("http://portal.localhost", false),
++            ("http://[::1]:7900", false),
++            ("http://[::ffff:127.0.0.1]", false),
++            ("http://hub.example.com", true),
++            ("http://10.0.0.5", true),
++            ("http://localhost.example.com", true),
++            ("http://[::2]", true),
++            ("https://localhost", true),
++            ("https://127.0.0.1", true),
++            ("https://hub.example.com", true),
++        ] {
++            let url = Url::parse(base).unwrap();
++            assert_eq!(secure_cookies(&url), want, "{base}");
++        }
++    }
++
++    #[test]
++    fn throttle_keys() {
++        assert_eq!(email_key("  Ada@Example.COM "), "email:ada@example.com");
++        let long = "a".repeat(5000);
++        assert_eq!(email_key(&long).len(), "email:".len() + 254);
++        assert_eq!(ip_key(None), None);
++        let v4: SocketAddr = "192.0.2.1:5000".parse().unwrap();
++        assert_eq!(
++            ip_key(Some(ConnectInfo(v4))).as_deref(),
++            Some("ip:192.0.2.1")
++        );
++        let mapped: SocketAddr = "[::ffff:192.0.2.1]:5000".parse().unwrap();
++        assert_eq!(
++            ip_key(Some(ConnectInfo(mapped))).as_deref(),
++            Some("ip:192.0.2.1")
++        );
+     }
+ 
+     #[test]
+@@ -478,6 +666,14 @@ mod tests {
+         h.append(COOKIE, HeaderValue::from_static("wipehub_session="));
+         assert_eq!(session_token(&h), None);
+         assert_eq!(session_token(&HeaderMap::new()), None);
++        let mut h = HeaderMap::new();
++        h.append(
++            COOKIE,
++            HeaderValue::from_static("wipehub_csrf=c; wipehub_session=s"),
++        );
++        assert_eq!(cookie_value(&h, "wipehub_csrf").as_deref(), Some("c"));
++        assert_eq!(cookie_value(&h, "wipehub_session").as_deref(), Some("s"));
++        assert_eq!(cookie_value(&h, "wipehub"), None);
+     }
+ 
+     #[test]
+diff --git a/crates/wipe-hub/src/config.rs b/crates/wipe-hub/src/config.rs
+index ab2b4de..007de6f 100644
+--- a/crates/wipe-hub/src/config.rs
++++ b/crates/wipe-hub/src/config.rs
+@@ -253,6 +253,14 @@ pub fn startup_warnings(config: &Config) -> Vec<String> {
+                 .to_string(),
+         ),
+     }
++    let base = &config.public_base_url;
++    if base.scheme() == "http" && crate::auth::secure_cookies(base) {
++        out.push(format!(
++            "--public-base-url {base} is http on a non-local host: session and CSRF cookies \
++             are marked Secure, which browsers will not keep over http, so nobody can sign in; \
++             serve the hub over https or use a localhost URL for development"
++        ));
++    }
+     if config.portal_dir.is_none() {
+         let looked = std::env::current_dir()
+             .map(|cwd| cwd.join(DEFAULT_PORTAL_DIR))
+@@ -594,6 +602,32 @@ mod tests {
+         assert!(w.contains("--portal-dir"), "{w}");
+     }
+ 
++    #[test]
++    fn http_on_a_non_local_host_warns_about_secure_cookies() {
++        let warned = |base: &str| {
++            let mut a = args();
++            a.public_base_url = base.into();
++            let c = Config::from_args(a).unwrap();
++            startup_warnings(&c)
++                .into_iter()
++                .filter(|w| w.contains("Secure"))
++                .collect::<Vec<_>>()
++        };
++        let w = warned("http://hub.example.com");
++        assert_eq!(w.len(), 1, "{w:?}");
++        assert!(w[0].contains("http://hub.example.com"), "{w:?}");
++        assert!(w[0].contains("browsers will not keep"), "{w:?}");
++        for quiet in [
++            "http://127.0.0.1:7900",
++            "http://localhost:5174",
++            "http://portal.localhost",
++            "https://hub.example.com",
++            "https://localhost",
++        ] {
++            assert!(warned(quiet).is_empty(), "{quiet}");
++        }
++    }
++
+     #[test]
+     fn portal_dir_is_in_debug() {
+         let tmp = tempfile::tempdir().unwrap();
+diff --git a/crates/wipe-hub/src/csrf.rs b/crates/wipe-hub/src/csrf.rs
+new file mode 100644
+index 0000000..4435977
+--- /dev/null
++++ b/crates/wipe-hub/src/csrf.rs
+@@ -0,0 +1,189 @@
++//! Double-submit CSRF protection (ADR-0007 §3, portal-accounts story 2).
++//!
++//! Every `/api/*` request whose method is not GET, HEAD or OPTIONS, including
++//! unknown `/api` paths, must carry an `X-CSRF-Token` header equal to the
++//! `wipehub_csrf` cookie, and the value must be a well-formed token (32
++//! OS-RNG bytes, base64url without padding: 43 characters). [`require`]
++//! answers anything else with 403 [`MSG_BAD_CSRF`] before any handler runs.
++//!
++//! One rule covers anonymous and signed-in routes alike, so sign-in and
++//! sign-up (login CSRF) are protected too. A cross-site page cannot set the
++//! custom header: the hub sends no CORS headers. Subdomain cookie-tossing is
++//! the known weakness, accepted until hosting is decided (CONTEXT §10).
++//!
++//! `GET /api/auth/csrf` hands the token to the portal; it is the only place a
++//! raw CSRF token is ever returned, and none is ever logged.
++
++use axum::extract::{Request, State};
++use axum::http::header::{CACHE_CONTROL, SET_COOKIE};
++use axum::http::{HeaderValue, Method, StatusCode};
++use axum::middleware::Next;
++use axum::response::{IntoResponse, Response};
++use axum::Json;
++use base64::engine::general_purpose::URL_SAFE_NO_PAD;
++use base64::Engine;
++use rand::rngs::OsRng;
++use rand::RngCore;
++use serde_json::json;
++
++use crate::accounts;
++use crate::auth::{self, ApiError};
++use crate::AppState;
++
++/// Name of the CSRF cookie.
++pub const CSRF_COOKIE: &str = "wipehub_csrf";
++/// Header that must echo the cookie on every mutating `/api` request.
++pub const CSRF_HEADER: &str = "x-csrf-token";
++pub const MSG_BAD_CSRF: &str = "missing or invalid CSRF token";
++
++/// A fresh token: 32 bytes from the OS RNG, base64url without padding.
++pub fn generate_token() -> String {
++    let mut bytes = [0u8; 32];
++    OsRng.fill_bytes(&mut bytes);
++    URL_SAFE_NO_PAD.encode(bytes)
++}
++
++/// Whether `t` is exactly what [`generate_token`] produces in shape.
++pub fn is_well_formed(t: &str) -> bool {
++    t.len() == 43
++        && URL_SAFE_NO_PAD
++            .decode(t)
++            .is_ok_and(|bytes| bytes.len() == 32)
++}
++
++/// Equality whose time depends only on the lengths, not the contents.
++pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
++    if a.len() != b.len() {
++        return false;
++    }
++    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
++}
++
++/// `Set-Cookie` value for the CSRF cookie; it lasts as long as a session.
++pub fn csrf_cookie(token: &str, secure: bool) -> HeaderValue {
++    auth::cookie_header(CSRF_COOKIE, token, accounts::SESSION_TTL.as_secs(), secure)
++}
++
++fn is_api_path(path: &str) -> bool {
++    path == "/api" || path.starts_with("/api/")
++}
++
++fn is_safe(method: &Method) -> bool {
++    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
++}
++
++/// Middleware: reject a mutating `/api` request without a valid token.
++pub async fn require(req: Request, next: Next) -> Response {
++    if is_safe(req.method()) || !is_api_path(req.uri().path()) {
++        return next.run(req).await;
++    }
++    let headers = req.headers();
++    let cookie = auth::cookie_value(headers, CSRF_COOKIE);
++    let mut sent = headers.get_all(CSRF_HEADER).iter();
++    // Exactly one header value; a repeated header is never "equal".
++    let header = match (sent.next(), sent.next()) {
++        (Some(v), None) => v.to_str().ok(),
++        _ => None,
++    };
++    let ok = match (cookie.as_deref(), header) {
++        (Some(c), Some(h)) => {
++            is_well_formed(c) && is_well_formed(h) && constant_time_eq(c.as_bytes(), h.as_bytes())
++        }
++        _ => false,
++    };
++    if !ok {
++        return ApiError::new(StatusCode::FORBIDDEN, MSG_BAD_CSRF).into_response();
++    }
++    next.run(req).await
++}
++
++/// `GET /api/auth/csrf`: `{"csrf_token": …}`, reusing a well-formed incoming
++/// cookie and otherwise minting and setting a new one.
++pub async fn get_token(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
++    let incoming = auth::cookie_value(&headers, CSRF_COOKIE).filter(|t| is_well_formed(t));
++    let (token, fresh) = match incoming {
++        Some(t) => (t, false),
++        None => (generate_token(), true),
++    };
++    let mut resp = Json(json!({ "csrf_token": token })).into_response();
++    let h = resp.headers_mut();
++    h.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
++    if fresh {
++        h.insert(
++            SET_COOKIE,
++            csrf_cookie(&token, auth::secure_cookies(&state.config.public_base_url)),
++        );
++    }
++    resp
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn generated_tokens_are_well_formed_and_distinct() {
++        let t = generate_token();
++        assert_eq!(t.len(), 43);
++        assert!(is_well_formed(&t));
++        assert_ne!(generate_token(), t);
++    }
++
++    #[test]
++    fn malformed_tokens() {
++        let short = URL_SAFE_NO_PAD.encode([0u8; 31]);
++        let long = URL_SAFE_NO_PAD.encode([0u8; 33]);
++        let padded = format!("{}=", generate_token());
++        let bad_char = format!("{}!", &generate_token()[..42]);
++        let std_alphabet = format!("{}+", &generate_token()[..42]);
++        for t in [
++            "",
++            "abc",
++            short.as_str(),
++            long.as_str(),
++            padded.as_str(),
++            bad_char.as_str(),
++            std_alphabet.as_str(),
++        ] {
++            assert!(!is_well_formed(t), "{t}");
++        }
++        // 43 characters whose last one carries non-zero trailing bits.
++        assert!(!is_well_formed(&format!("{}B", "A".repeat(42))));
++        assert!(is_well_formed(&"A".repeat(43)));
++    }
++
++    #[test]
++    fn compare() {
++        assert!(constant_time_eq(b"abc", b"abc"));
++        assert!(!constant_time_eq(b"abc", b"abd"));
++        assert!(!constant_time_eq(b"abc", b"ab"));
++        assert!(constant_time_eq(b"", b""));
++    }
++
++    #[test]
++    fn cookie_attributes() {
++        assert_eq!(
++            csrf_cookie("tok", false).to_str().unwrap(),
++            "wipehub_csrf=tok; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600"
++        );
++        assert_eq!(
++            csrf_cookie("tok", true).to_str().unwrap(),
++            "wipehub_csrf=tok; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600; Secure"
++        );
++    }
++
++    #[test]
++    fn scope() {
++        assert!(is_api_path("/api"));
++        assert!(is_api_path("/api/"));
++        assert!(is_api_path("/api/auth/sign-in"));
++        assert!(!is_api_path("/apis"));
++        assert!(!is_api_path("/"));
++        for m in [Method::GET, Method::HEAD, Method::OPTIONS] {
++            assert!(is_safe(&m));
++        }
++        for m in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
++            assert!(!is_safe(&m));
++        }
++    }
++}
+diff --git a/crates/wipe-hub/src/lib.rs b/crates/wipe-hub/src/lib.rs
+index decd126..65f5e76 100644
+--- a/crates/wipe-hub/src/lib.rs
++++ b/crates/wipe-hub/src/lib.rs
+@@ -13,10 +13,13 @@ pub mod accounts;
+ pub mod audit;
+ pub mod auth;
+ pub mod config;
++pub mod csrf;
+ pub mod db;
+ pub mod health;
+ pub mod mail;
++pub mod throttle;
+ 
++use std::net::SocketAddr;
+ use std::sync::Arc;
+ 
+ use axum::http::StatusCode;
+@@ -68,7 +71,10 @@ pub fn router(state: AppState) -> Router {
+         // must never get `index.html` back with a 200.
+         .route("/api", any(api_not_found))
+         .route("/api/", any(api_not_found))
+-        .route("/api/*rest", any(api_not_found));
++        .route("/api/*rest", any(api_not_found))
++        // After the catch-alls, so unknown `/api` paths are covered too: every
++        // mutating `/api` request needs the double-submit CSRF token.
++        .layer(axum::middleware::from_fn(csrf::require));
+ 
+     let site = match &state.config.portal_dir {
+         Some(dir) => {
+@@ -106,7 +112,12 @@ async fn portal_not_built() -> impl IntoResponse {
+ 
+ /// Serve on an already-bound listener (tests bind port 0).
+ pub async fn serve_on(listener: TcpListener, state: AppState) -> anyhow::Result<()> {
+-    axum::serve(listener, router(state)).await?;
++    // Peer addresses feed the per-IP sign-in throttle.
++    axum::serve(
++        listener,
++        router(state).into_make_service_with_connect_info::<SocketAddr>(),
++    )
++    .await?;
+     Ok(())
+ }
+ 
+diff --git a/crates/wipe-hub/src/throttle.rs b/crates/wipe-hub/src/throttle.rs
+new file mode 100644
+index 0000000..569984c
+--- /dev/null
++++ b/crates/wipe-hub/src/throttle.rs
+@@ -0,0 +1,187 @@
++//! Failure throttles (ADR-0007 §3): shared, restart-proof counters in the
++//! `auth_throttle` table, keyed by what is throttled (`email:<address>`,
++//! `ip:<peer address>`).
++//!
++//! - A key counts failures in a fixed window that starts at its first
++//!   failure; a failure after the window elapsed starts a new one.
++//! - The failure that reaches the limit locks the key for one window
++//!   (`locked_until = now() + window`). Callers [`check`] before doing any
++//!   work and must not [`record_failure`] while locked, so locked attempts
++//!   never extend the lock.
++//! - [`clear`] forgets a key (e.g. after a successful sign-in).
++//!
++//! Every function takes any Postgres executor, so a failure and its audit row
++//! share a transaction. Story 3 (reset and magic link) reuses this module
++//! with its own keys and limits.
++
++use std::time::Duration;
++
++/// Failed sign-ins per email address before it is locked.
++pub const SIGN_IN_EMAIL_LIMIT: i32 = 5;
++/// Failed sign-ins per client IP before it is locked.
++pub const SIGN_IN_IP_LIMIT: i32 = 20;
++/// The fixed window sign-in failures are counted in.
++pub const SIGN_IN_WINDOW: Duration = Duration::from_secs(15 * 60);
++/// How long a sign-in lock lasts: one window, since [`record_failure`] locks
++/// a key for the window it was given.
++pub const SIGN_IN_LOCKOUT: Duration = SIGN_IN_WINDOW;
++
++/// Rows whose window started longer ago than this, and whose lock (if any)
++/// has elapsed, are purged opportunistically. Every window passed to
++/// [`record_failure`] must be no longer than this.
++pub const PURGE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
++
++/// Whether a key may be attempted now.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Throttle {
++    Open,
++    /// Locked for `retry_after_secs` more whole seconds (at least 1).
++    Locked {
++        retry_after_secs: u64,
++    },
++}
++
++impl Throttle {
++    /// The longer-locked of two statuses.
++    pub fn max(self, other: Throttle) -> Throttle {
++        match (self, other) {
++            (Throttle::Open, t) | (t, Throttle::Open) => t,
++            (
++                Throttle::Locked {
++                    retry_after_secs: a,
++                },
++                Throttle::Locked {
++                    retry_after_secs: b,
++                },
++            ) => Throttle::Locked {
++                retry_after_secs: a.max(b),
++            },
++        }
++    }
++}
++
++/// What [`record_failure`] did.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Failure {
++    /// Failures counted in the current window, including this one.
++    pub failures: i32,
++    /// `Some(locked_until)` (RFC 3339, UTC) when this call engaged the lock.
++    pub locked_until: Option<String>,
++}
++
++/// Whether `key` is locked now.
++pub async fn check<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    key: &str,
++) -> Result<Throttle, sqlx::Error> {
++    let secs: Option<i64> = sqlx::query_scalar(
++        "SELECT ceil(extract(epoch FROM locked_until - now()))::bigint \
++         FROM auth_throttle WHERE key = $1 AND locked_until > now()",
++    )
++    .bind(key)
++    .fetch_optional(executor)
++    .await?;
++    Ok(match secs {
++        Some(s) => Throttle::Locked {
++            retry_after_secs: s.max(1) as u64,
++        },
++        None => Throttle::Open,
++    })
++}
++
++/// Count one failure against `key`, atomically: restart the window if it
++/// elapsed, and lock the key for `window` when this failure brings it to
++/// `limit`. Also purges stale rows (see [`PURGE_AFTER`]).
++pub async fn record_failure<'e, E: sqlx::PgExecutor<'e>>(
++    executor: E,
++    key: &str,
++    limit: i32,
++    window: Duration,
++) -> Result<Failure, sqlx::Error> {
++    debug_assert!(window <= PURGE_AFTER);
++    // One statement, so any executor works. `prior` sees the row before this
++    // statement and RETURNING sees it after, so the pair says whether this
++    // call engaged the lock. The purge skips `key`, which the upsert owns.
++    let (failures, locked_now, was_locked, until): (i32, bool, bool, Option<String>) =
++        sqlx::query_as(
++            "WITH purged AS ( \
++                 DELETE FROM auth_throttle \
++                 WHERE key <> $1 \
++                   AND window_started_at < now() - make_interval(secs => $4) \
++                   AND (locked_until IS NULL OR locked_until <= now()) \
++             ), \
++             prior AS ( \
++                 SELECT locked_until > now() AS locked FROM auth_throttle WHERE key = $1 \
++             ), \
++             upserted AS ( \
++                 INSERT INTO auth_throttle AS t (key, failures, window_started_at, locked_until) \
++                 VALUES ($1, 1, now(), \
++                         CASE WHEN 1 >= $2 THEN now() + make_interval(secs => $3) END) \
++                 ON CONFLICT (key) DO UPDATE SET \
++                     failures = CASE \
++                         WHEN t.window_started_at + make_interval(secs => $3) <= now() THEN 1 \
++                         ELSE t.failures + 1 END, \
++                     window_started_at = CASE \
++                         WHEN t.window_started_at + make_interval(secs => $3) <= now() THEN now() \
++                         ELSE t.window_started_at END, \
++                     locked_until = CASE \
++                         WHEN t.locked_until > now() THEN t.locked_until \
++                         WHEN (CASE \
++                                 WHEN t.window_started_at + make_interval(secs => $3) <= now() \
++                                 THEN 1 ELSE t.failures + 1 END) >= $2 \
++                             THEN now() + make_interval(secs => $3) \
++                         ELSE NULL END \
++                 RETURNING failures, locked_until \
++             ) \
++             SELECT u.failures, \
++                    coalesce(u.locked_until > now(), false), \
++                    coalesce((SELECT locked FROM prior), false), \
++                    to_char(u.locked_until AT TIME ZONE 'UTC', \
++                            'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
++             FROM upserted u",
++        )
++        .bind(key)
++        .bind(limit)
++        .bind(window.as_secs_f64())
++        .bind(PURGE_AFTER.as_secs_f64())
++        .fetch_one(executor)
++        .await?;
++    Ok(Failure {
++        failures,
++        locked_until: (locked_now && !was_locked).then(|| until.unwrap_or_default()),
++    })
++}
++
++/// Forget `key`'s failures and any lock.
++pub async fn clear<'e, E: sqlx::PgExecutor<'e>>(executor: E, key: &str) -> Result<(), sqlx::Error> {
++    sqlx::query("DELETE FROM auth_throttle WHERE key = $1")
++        .bind(key)
++        .execute(executor)
++        .await?;
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn max_prefers_the_longer_lock() {
++        let l = |s| Throttle::Locked {
++            retry_after_secs: s,
++        };
++        assert_eq!(Throttle::Open.max(Throttle::Open), Throttle::Open);
++        assert_eq!(Throttle::Open.max(l(3)), l(3));
++        assert_eq!(l(3).max(Throttle::Open), l(3));
++        assert_eq!(l(3).max(l(9)), l(9));
++    }
++
++    #[test]
++    fn sign_in_constants() {
++        assert_eq!(SIGN_IN_EMAIL_LIMIT, 5);
++        assert_eq!(SIGN_IN_IP_LIMIT, 20);
++        assert_eq!(SIGN_IN_WINDOW.as_secs(), 900);
++        assert_eq!(SIGN_IN_LOCKOUT, SIGN_IN_WINDOW);
++        assert!(SIGN_IN_WINDOW <= PURGE_AFTER);
++    }
++}
+diff --git a/crates/wipe-hub/tests/auth.rs b/crates/wipe-hub/tests/auth.rs
+index 01e6184..e2d3f0c 100644
+--- a/crates/wipe-hub/tests/auth.rs
++++ b/crates/wipe-hub/tests/auth.rs
+@@ -1,6 +1,9 @@
+ //! `/api/auth/*` over real HTTP against a migrated test database and
+-//! Mailpit (portal-accounts story 1). Needs `docker compose up -d`; fails,
+-//! never skips, when the compose services are down.
++//! Mailpit (portal-accounts stories 1 and 2). Needs `docker compose up -d`;
++//! fails, never skips, when the compose services are down.
++//!
++//! `Hub::post`/`post_empty` send a valid CSRF token (fetched once per hub);
++//! the CSRF tests build raw requests to send none or a bad one.
+ 
+ mod support;
+ 
+@@ -9,7 +12,7 @@ use std::time::Duration;
+ 
+ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+ use base64::Engine;
+-use reqwest::header::{COOKIE, SET_COOKIE};
++use reqwest::header::{CACHE_CONTROL, COOKIE, RETRY_AFTER, SET_COOKIE};
+ use reqwest::{Response, StatusCode};
+ use serde_json::{json, Value};
+ use sha2::{Digest, Sha256};
+@@ -25,6 +28,8 @@ struct Hub {
+     addr: SocketAddr,
+     http: reqwest::Client,
+     db: TestDb,
++    /// A token from `GET /api/auth/csrf`, sent as cookie and header.
++    csrf: String,
+ }
+ 
+ async fn closed_port() -> u16 {
+@@ -61,7 +66,42 @@ async fn spawn_hub_from(smtp_port: u16, public_base_url: &str, mail_from: &str)
+         .timeout(Duration::from_secs(30))
+         .build()
+         .unwrap();
+-    Hub { addr, http, db }
++    let csrf = fetch_csrf(&http, addr, None).await.0;
++    Hub {
++        addr,
++        http,
++        db,
++        csrf,
++    }
++}
++
++/// `GET /api/auth/csrf`: the token and the raw `wipehub_csrf` `Set-Cookie`,
++/// if one was set.
++async fn fetch_csrf(
++    http: &reqwest::Client,
++    addr: SocketAddr,
++    cookie: Option<&str>,
++) -> (String, Option<String>) {
++    let mut req = http.get(format!("http://{addr}/api/auth/csrf"));
++    if let Some(c) = cookie {
++        req = req.header(COOKIE, c);
++    }
++    let resp = req.send().await.unwrap();
++    assert_eq!(resp.status(), StatusCode::OK);
++    assert_eq!(
++        resp.headers().get(CACHE_CONTROL).unwrap().to_str().unwrap(),
++        "no-store"
++    );
++    let set = resp
++        .headers()
++        .get_all(SET_COOKIE)
++        .iter()
++        .map(|v| v.to_str().unwrap().to_string())
++        .find(|v| v.starts_with("wipehub_csrf="));
++    let body: Value = resp.json().await.unwrap();
++    let obj = body.as_object().unwrap();
++    assert_eq!(obj.len(), 1, "{body}");
++    (obj["csrf_token"].as_str().unwrap().to_string(), set)
+ }
+ 
+ async fn spawn_hub() -> Hub {
+@@ -73,20 +113,29 @@ impl Hub {
+         format!("http://{}{path}", self.addr)
+     }
+ 
++    /// A POST to `path` carrying `cookie` plus a valid CSRF cookie and header.
++    fn post_req(&self, path: &str, cookie: Option<&str>) -> reqwest::RequestBuilder {
++        let csrf = format!("wipehub_csrf={}", self.csrf);
++        let cookie = match cookie {
++            Some(c) => format!("{c}; {csrf}"),
++            None => csrf,
++        };
++        self.http
++            .post(self.url(path))
++            .header(COOKIE, cookie)
++            .header("x-csrf-token", &self.csrf)
++    }
++
+     async fn post(&self, path: &str, body: Value, cookie: Option<&str>) -> Response {
+-        let mut req = self.http.post(self.url(path)).json(&body);
+-        if let Some(c) = cookie {
+-            req = req.header(COOKIE, c);
+-        }
+-        req.send().await.unwrap()
++        self.post_req(path, cookie)
++            .json(&body)
++            .send()
++            .await
++            .unwrap()
+     }
+ 
+     async fn post_empty(&self, path: &str, cookie: Option<&str>) -> Response {
+-        let mut req = self.http.post(self.url(path));
+-        if let Some(c) = cookie {
+-            req = req.header(COOKIE, c);
+-        }
+-        req.send().await.unwrap()
++        self.post_req(path, cookie).send().await.unwrap()
+     }
+ 
+     async fn me(&self, cookie: Option<&str>) -> (StatusCode, Value) {
+@@ -276,8 +325,7 @@ async fn verification_email_uses_mail_from_and_subject() {
+ async fn non_json_body_is_415_with_a_json_error() {
+     let hub = spawn_hub().await;
+     let resp = hub
+-        .http
+-        .post(hub.url("/api/auth/sign-up"))
++        .post_req("/api/auth/sign-up", None)
+         .header("content-type", "text/plain")
+         .body("email=a@b.co")
+         .send()
+@@ -434,8 +482,7 @@ async fn invalid_sign_up_is_400_naming_the_problem_and_writes_nothing() {
+     }
+     // Malformed JSON is a JSON 400 too.
+     let resp = hub
+-        .http
+-        .post(hub.url("/api/auth/sign-up"))
++        .post_req("/api/auth/sign-up", None)
+         .header("content-type", "application/json")
+         .body("{not json")
+         .send()
+@@ -748,3 +795,494 @@ async fn unknown_auth_paths_stay_json_404() {
+         (StatusCode::NOT_FOUND, "not found".into())
+     );
+ }
++
++// ---------------------------------------------------------------------------
++// Story 2: CSRF, rotation, throttles, sign-out everywhere, cookie policy
++
++const BAD_CSRF: &str = "missing or invalid CSRF token";
++const LOCKED: &str = "too many failed sign-in attempts; try again later";
++
++impl Hub {
++    /// A request with exactly the given `Cookie` and `X-CSRF-Token` headers.
++    async fn raw(
++        &self,
++        method: reqwest::Method,
++        path: &str,
++        cookie: Option<&str>,
++        header: Option<&str>,
++        body: Option<&Value>,
++    ) -> Response {
++        let mut req = self.http.request(method, self.url(path));
++        if let Some(c) = cookie {
++            req = req.header(COOKIE, c);
++        }
++        if let Some(h) = header {
++            req = req.header("x-csrf-token", h);
++        }
++        if let Some(b) = body {
++            req = req.json(b);
++        }
++        req.send().await.unwrap()
++    }
++
++    /// `(subject, detail)` of every audit row for `action`, oldest first.
++    async fn audit_details(&self, action: &str) -> Vec<(String, Value)> {
++        sqlx::query_as("SELECT subject, detail FROM audit_log WHERE action = $1 ORDER BY id")
++            .bind(action)
++            .fetch_all(&self.db.pool)
++            .await
++            .unwrap()
++    }
++
++    async fn counts(&self) -> Vec<i64> {
++        let mut out = Vec::new();
++        for t in [
++            "audit_log",
++            "users",
++            "sessions",
++            "auth_throttle",
++            "auth_tokens",
++        ] {
++            out.push(self.count(t).await);
++        }
++        out
++    }
++
++    async fn throttle_failures(&self, key: &str) -> Option<i32> {
++        sqlx::query_scalar("SELECT failures FROM auth_throttle WHERE key = $1")
++            .bind(key)
++            .fetch_optional(&self.db.pool)
++            .await
++            .unwrap()
++    }
++}
++
++#[tokio::test]
++async fn csrf_route_mints_once_then_reuses_the_cookie() {
++    let hub = spawn_hub().await;
++    let (token, set) = fetch_csrf(&hub.http, hub.addr, None).await;
++    assert_eq!(token.len(), 43);
++    assert_eq!(URL_SAFE_NO_PAD.decode(&token).unwrap().len(), 32);
++    assert_eq!(
++        set.as_deref(),
++        Some(
++            format!("wipehub_csrf={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600")
++                .as_str()
++        )
++    );
++
++    // A well-formed cookie is reused and not set again.
++    let cookie = format!("wipehub_csrf={token}");
++    let (again, set) = fetch_csrf(&hub.http, hub.addr, Some(&cookie)).await;
++    assert_eq!(again, token);
++    assert_eq!(set, None);
++
++    // A malformed cookie gets a new token.
++    for bad in ["wipehub_csrf=abc", "wipehub_csrf=", "other=1"] {
++        let (fresh, set) = fetch_csrf(&hub.http, hub.addr, Some(bad)).await;
++        assert_ne!(fresh, token, "{bad}");
++        assert!(set.unwrap().starts_with(&format!("wipehub_csrf={fresh};")));
++    }
++    assert_eq!(hub.count("audit_log").await, 0);
++}
++
++#[tokio::test]
++async fn mutating_api_requests_without_a_valid_csrf_token_are_403_and_write_nothing() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    let (_, session) = hub.sign_up(&email).await;
++    let before = hub.counts().await;
++
++    let good = hub.csrf.clone();
++    let other = fetch_csrf(&hub.http, hub.addr, None).await.0;
++    let malformed_43 = format!("{}B", "A".repeat(42));
++    // (csrf cookie, header)
++    let variants: Vec<(Option<String>, Option<String>)> = vec![
++        (None, None),
++        (Some(good.clone()), None),
++        (None, Some(good.clone())),
++        (Some(good.clone()), Some(other.clone())),
++        (Some("abc".into()), Some("abc".into())),
++        (Some(malformed_43.clone()), Some(malformed_43.clone())),
++        (Some(format!("{good}x")), Some(format!("{good}x"))),
++    ];
++    let routes: Vec<(&str, Option<Value>)> = vec![
++        (
++            "/api/auth/sign-up",
++            Some(json!({
++                "email": unique_address(),
++                "password": PASSWORD,
++                "name": "Eve",
++                "organization_name": "Evil Ltd",
++            })),
++        ),
++        (
++            "/api/auth/sign-in",
++            Some(json!({"email": email, "password": "wrong password!!"})),
++        ),
++        ("/api/auth/sign-out", None),
++        (
++            "/api/auth/verify-email",
++            Some(json!({"token": "A".repeat(43)})),
++        ),
++        ("/api/auth/verification-email", None),
++        ("/api/auth/sign-out-everywhere", None),
++        ("/api/nope", None),
++        ("/api", None),
++        ("/api/health", None),
++    ];
++    for (path, body) in &routes {
++        for (c, h) in &variants {
++            let cookie = match c {
++                Some(t) => format!("{session}; wipehub_csrf={t}"),
++                None => session.clone(),
++            };
++            let resp = hub
++                .raw(
++                    reqwest::Method::POST,
++                    path,
++                    Some(&cookie),
++                    h.as_deref(),
++                    body.as_ref(),
++                )
++                .await;
++            assert_eq!(
++                error_of(resp).await,
++                (StatusCode::FORBIDDEN, BAD_CSRF.into()),
++                "{path} cookie={c:?} header={h:?}"
++            );
++        }
++    }
++    // Other mutating methods are covered too.
++    for method in [
++        reqwest::Method::PUT,
++        reqwest::Method::PATCH,
++        reqwest::Method::DELETE,
++    ] {
++        let resp = hub
++            .raw(method.clone(), "/api/auth/me", Some(&session), None, None)
++            .await;
++        assert_eq!(
++            error_of(resp).await,
++            (StatusCode::FORBIDDEN, BAD_CSRF.into()),
++            "{method}"
++        );
++    }
++    assert_eq!(hub.counts().await, before);
++    // The session survived every attempt, and safe methods need no token.
++    assert_eq!(hub.me(Some(&session)).await.0, StatusCode::OK);
++
++    // The same request with a valid token proceeds.
++    let resp = hub
++        .raw(
++            reqwest::Method::POST,
++            "/api/nope",
++            Some(&format!("wipehub_csrf={good}")),
++            Some(&good),
++            None,
++        )
++        .await;
++    assert_eq!(
++        error_of(resp).await,
++        (StatusCode::NOT_FOUND, "not found".into())
++    );
++}
++
++#[tokio::test]
++async fn sign_in_rotates_the_incoming_session() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    let (_, a) = hub.sign_up(&email).await;
++
++    let resp = hub
++        .post(
++            "/api/auth/sign-in",
++            json!({"email": email, "password": PASSWORD}),
++            Some(&a),
++        )
++        .await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    let b = cookie_pair(&resp);
++    assert_ne!(a, b);
++    assert_eq!(hub.me(Some(&a)).await.0, StatusCode::UNAUTHORIZED);
++    assert_eq!(hub.me(Some(&b)).await.0, StatusCode::OK);
++    assert_eq!(hub.count("sessions").await, 1);
++
++    // No cookie, a garbage cookie and an already-deleted cookie: not rotated.
++    hub.sign_in(&email, PASSWORD).await;
++    for cookie in ["wipehub_session=garbage", a.as_str()] {
++        let resp = hub
++            .post(
++                "/api/auth/sign-in",
++                json!({"email": email, "password": PASSWORD}),
++                Some(cookie),
++            )
++            .await;
++        assert_eq!(resp.status(), StatusCode::OK);
++    }
++    let rotated: Vec<Value> = hub
++        .audit_details("auth.sign_in")
++        .await
++        .into_iter()
++        .map(|(_, d)| d)
++        .collect();
++    assert_eq!(
++        rotated,
++        vec![
++            json!({"rotated": true}),
++            json!({"rotated": false}),
++            json!({"rotated": false}),
++            json!({"rotated": false}),
++        ]
++    );
++    assert_eq!(hub.me(Some(&b)).await.0, StatusCode::OK);
++}
++
++#[tokio::test]
++async fn sign_up_deletes_the_incoming_session() {
++    let hub = spawn_hub().await;
++    let (_, a) = hub.sign_up(&unique_address()).await;
++    let resp = hub
++        .post(
++            "/api/auth/sign-up",
++            json!({
++                "email": unique_address(),
++                "password": PASSWORD,
++                "name": "B",
++                "organization_name": "B Org",
++            }),
++            Some(&a),
++        )
++        .await;
++    assert_eq!(resp.status(), StatusCode::CREATED);
++    let b = cookie_pair(&resp);
++    assert_eq!(hub.me(Some(&a)).await.0, StatusCode::UNAUTHORIZED);
++    assert_eq!(hub.me(Some(&b)).await.0, StatusCode::OK);
++    assert_eq!(hub.count("sessions").await, 1);
++}
++
++async fn assert_locked(resp: Response) {
++    let retry: u64 = resp
++        .headers()
++        .get(RETRY_AFTER)
++        .expect("Retry-After")
++        .to_str()
++        .unwrap()
++        .parse()
++        .unwrap();
++    assert!((1..=900).contains(&retry), "{retry}");
++    assert!(resp.headers().get(SET_COOKIE).is_none());
++    assert_eq!(
++        error_of(resp).await,
++        (StatusCode::TOO_MANY_REQUESTS, LOCKED.into())
++    );
++}
++
++#[tokio::test]
++async fn five_wrong_passwords_lock_the_email_until_the_lock_elapses() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    hub.sign_up(&email).await;
++    let key = format!("email:{}", email.to_lowercase());
++
++    for i in 1..=5 {
++        let resp = hub.sign_in(&email.to_uppercase(), "wrong password!!").await;
++        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "attempt {i}");
++    }
++    assert_eq!(hub.throttle_failures(&key).await, Some(5));
++    // Locked: even the right password is refused, and the lock is not extended.
++    let until = || async {
++        sqlx::query_scalar::<_, String>(
++            "SELECT locked_until::text FROM auth_throttle WHERE key = $1",
++        )
++        .bind(&key)
++        .fetch_one(&hub.db.pool)
++        .await
++        .unwrap()
++    };
++    let first_until = until().await;
++    assert_locked(hub.sign_in(&email, PASSWORD).await).await;
++    assert_locked(hub.sign_in(&email, "wrong password!!").await).await;
++    assert_eq!(until().await, first_until);
++    assert_eq!(hub.throttle_failures(&key).await, Some(5));
++
++    let locked = hub.audit_details("auth.sign_in_locked").await;
++    assert_eq!(locked.len(), 1, "{locked:?}");
++    assert_eq!(locked[0].0, key);
++    assert!(locked[0].1["until"].as_str().unwrap().ends_with('Z'));
++    assert_eq!(
++        hub.audited("auth.sign_in_locked").await[0].0,
++        "anonymous".to_string()
++    );
++    let reasons: Vec<Value> = hub
++        .audit_details("auth.sign_in_failed")
++        .await
++        .into_iter()
++        .map(|(_, d)| d["reason"].clone())
++        .collect();
++    assert_eq!(reasons.len(), 7);
++    assert!(
++        reasons[..5].iter().all(|r| r == "wrong_password"),
++        "{reasons:?}"
++    );
++    assert_eq!(reasons[5..], [json!("locked"), json!("locked")]);
++    assert!(hub.audited("auth.sign_in").await.is_empty());
++    assert_eq!(hub.count("sessions").await, 1);
++
++    // Lock elapsed: the right password signs in and the email key is gone.
++    sqlx::query("UPDATE auth_throttle SET locked_until = now() - interval '1 second'")
++        .execute(&hub.db.pool)
++        .await
++        .unwrap();
++    let resp = hub.sign_in(&email, PASSWORD).await;
++    assert_eq!(resp.status(), StatusCode::OK);
++    assert_eq!(hub.throttle_failures(&key).await, None);
++    // The IP key is not cleared by a success.
++    assert_eq!(hub.throttle_failures("ip:127.0.0.1").await, Some(5));
++}
++
++#[tokio::test]
++async fn unknown_emails_lock_like_known_ones() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    for _ in 0..5 {
++        let resp = hub.sign_in(&email, PASSWORD).await;
++        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
++    }
++    assert_locked(hub.sign_in(&email, PASSWORD).await).await;
++    assert_eq!(
++        hub.audit_details("auth.sign_in_locked").await[0].0,
++        format!("email:{email}")
++    );
++}
++
++#[tokio::test]
++async fn a_success_resets_the_email_count() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    hub.sign_up(&email).await;
++    for _ in 0..4 {
++        let resp = hub.sign_in(&email, "wrong password!!").await;
++        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
++    }
++    assert_eq!(hub.sign_in(&email, PASSWORD).await.status(), StatusCode::OK);
++    for _ in 0..4 {
++        let resp = hub.sign_in(&email, "wrong password!!").await;
++        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
++    }
++    assert_eq!(
++        hub.throttle_failures(&format!("email:{}", email.to_lowercase()))
++            .await,
++        Some(4)
++    );
++    assert!(hub.audited("auth.sign_in_locked").await.is_empty());
++}
++
++#[tokio::test]
++async fn an_elapsed_window_restarts_the_count() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    let key = format!("email:{email}");
++    for _ in 0..4 {
++        hub.sign_in(&email, PASSWORD).await;
++    }
++    sqlx::query("UPDATE auth_throttle SET window_started_at = now() - interval '16 minutes'")
++        .execute(&hub.db.pool)
++        .await
++        .unwrap();
++    let resp = hub.sign_in(&email, PASSWORD).await;
++    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
++    assert_eq!(hub.throttle_failures(&key).await, Some(1));
++    assert!(hub.audited("auth.sign_in_locked").await.is_empty());
++}
++
++#[tokio::test]
++async fn twenty_failures_from_one_ip_lock_it_for_every_email() {
++    let hub = spawn_hub().await;
++    for i in 1..=20 {
++        let resp = hub.sign_in(&unique_address(), PASSWORD).await;
++        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "attempt {i}");
++    }
++    let fresh = unique_address();
++    assert_locked(hub.sign_in(&fresh, PASSWORD).await).await;
++    let locked = hub.audit_details("auth.sign_in_locked").await;
++    assert_eq!(locked.len(), 1, "{locked:?}");
++    assert_eq!(locked[0].0, "ip:127.0.0.1");
++    // The locked attempt counted against neither key.
++    assert_eq!(hub.throttle_failures(&format!("email:{fresh}")).await, None);
++    assert_eq!(hub.throttle_failures("ip:127.0.0.1").await, Some(20));
++}
++
++#[tokio::test]
++async fn sign_out_everywhere_ends_every_session_of_that_user_only() {
++    let hub = spawn_hub().await;
++    let email = unique_address();
++    let (body, first) = hub.sign_up(&email).await;
++    let second = cookie_pair(&hub.sign_in(&email, PASSWORD).await);
++    let third = cookie_pair(&hub.sign_in(&email, PASSWORD).await);
++    let (_, other) = hub.sign_up(&unique_address()).await;
++
++    let resp = hub
++        .post_empty("/api/auth/sign-out-everywhere", Some(&second))
++        .await;
++    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
++    let cleared = set_cookie(&resp);
++    assert!(cleared.starts_with("wipehub_session=;"), "{cleared}");
++    assert!(cleared.contains("Max-Age=0"), "{cleared}");
++    for c in [&first, &second, &third] {
++        assert_eq!(hub.me(Some(c)).await.0, StatusCode::UNAUTHORIZED);
++    }
++    assert_eq!(hub.me(Some(&other)).await.0, StatusCode::OK);
++    let who = format!("user:{}", body["user"]["id"].as_str().unwrap());
++    assert_eq!(
++        hub.audited("auth.sign_out_everywhere").await,
++        vec![(who.clone(), who.clone())]
++    );
++    assert_eq!(
++        hub.audit_details("auth.sign_out_everywhere").await[0].1,
++        json!({"sessions": 3})
++    );
++
++    // Not signed in (or no longer): 401, nothing audited.
++    for cookie in [None, Some(second.as_str())] {
++        let resp = hub
++            .post_empty("/api/auth/sign-out-everywhere", cookie)
++            .await;
++        assert_eq!(
++            error_of(resp).await,
++            (StatusCode::UNAUTHORIZED, "not signed in".into())
++        );
++    }
++    assert_eq!(hub.audited("auth.sign_out_everywhere").await.len(), 1);
++}
++
++#[tokio::test]
++async fn secure_cookie_policy_follows_the_public_base_url_host() {
++    for (base, secure) in [
++        ("http://127.0.0.1", false),
++        ("http://localhost", false),
++        ("http://hub.example.com", true),
++        ("https://localhost", true),
++    ] {
++        let hub = spawn_hub_with(DEFAULT_SMTP_PORT, base).await;
++        let (_, csrf_set) = fetch_csrf(&hub.http, hub.addr, None).await;
++        let resp = hub
++            .post(
++                "/api/auth/sign-up",
++                json!({
++                    "email": unique_address(),
++                    "password": PASSWORD,
++                    "name": "A",
++                    "organization_name": "O",
++                }),
++                None,
++            )
++            .await;
++        assert_eq!(resp.status(), StatusCode::CREATED, "{base}");
++        let session_set = set_cookie(&resp);
++        for c in [csrf_set.unwrap(), session_set] {
++            let has = c.split(';').map(str::trim).any(|a| a == "Secure");
++            assert_eq!(has, secure, "{base}: {c}");
++        }
++    }
++}
