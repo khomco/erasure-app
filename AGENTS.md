@@ -87,6 +87,35 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   describe; when a roadmap item ships, strike it in `docs/ROADMAP.md` and record it in
   `CONTEXT.md` §10. Docs trailing code is the repeated failure here (f7af492, a06e8ac, 7610905).
 
+## Questions left for the human
+
+First, decide it yourself when you can. If one option is clearly the safe default or recognised best practice, choose it, record the choice where the work is tracked (the story's intent contract, an ADR or `CONTEXT.md`) and carry on. Ask only about:
+- product, pricing, licensing, legal, branding or customer-visible-copy choices;
+- anything that contradicts an ADR or a `docs/ROADMAP.md` §0 invariant;
+- anything irreversible or outside the repo;
+- anything where no option is clearly safest or standard.
+
+`bmad-build-auto` runs follow the same rule through `_bmad/custom/bmad-build-auto.toml`.
+
+The rest of this section applies to every question you leave for the owner to answer: a blocked story's `## Auto Run
+Result` (including `bmad-build-auto` intent-gap halts), a `.scratch/DECISIONS.md` row, a review
+or story hand-off, and a question asked in chat. The owner answers these cold, without having
+read the code, the spec or the review. So each question must make sense on its own and include:
+
+1. **What it is about.** Name the feature, who uses it, and what they do. Say what currently
+   happens in that situation, from the user's or operator's point of view.
+2. **The problem.** Describe a concrete scenario, with who does what and what goes wrong, in
+   the product terms `CONTEXT.md` §14 defines. Code names, file paths and `snake_case`
+   identifiers may follow the plain explanation but never replace it.
+3. **The options.** For each option, say what a user or operator would see, what it costs (in
+   effort, risk or ongoing operation) and what it rules out.
+4. **A recommendation** and the reason for it.
+5. **The default.** Say what happens, or what ships, if nobody decides.
+
+Every acronym or term of art gets a one-clause gloss the first time it appears. Examples: CSRF,
+Argon2, `/64`, append-only audit log. Put the question itself last, as one sentence that can
+be answered with an option letter.
+
 ## Known pitfalls
 
 - After adding a field to a shared domain struct, grep `crates/*/tests` for literal

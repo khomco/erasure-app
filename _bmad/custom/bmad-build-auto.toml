@@ -18,6 +18,28 @@ persistent_facts = [
   "Invariant (docs/ROADMAP.md §0.2, Never block a wipe on licensing): An unlicensed, expired, quota-exhausted, revoked or clock-rolled-back station **still erases drives**; what changes is that the certificate is marked `evaluation` and the operator is told why. Erasure is a safety-adjacent operation on someone else's schedule — a licence server having a bad day must never be able to stop a drive from being sanitized. Anything in **L** or **A** that would gate erasure is out of scope by default and needs an explicit decision to enter scope.",
   "Invariant (docs/ROADMAP.md §0.3, The archive is an index, never an authority): Certificates are offline-verifiable by construction (ADR-0005; `verify-cert` needs only the vendor root). The moment a cert's validity depends on a lookup against our archive, we have rebuilt the competitor weakness named in CONTEXT §1 (\"verification of authenticity is vendor-dependent\"). **A2/A3 build a cert archive. It is a search index and a convenience.** A cert that our archive has never seen and a cert we have deleted are both still valid, and the verification page must say so.",
   "Invariant (docs/ROADMAP.md §0.1, The only `DeviceBackend` implementation is still the mock): The only thing that produces command evidence is `wipe-engine-mock`, which **synthesises** the evidence the product's entire value proposition rests on. A marketing site that says \"Wipestation sanitizes NVMe drives with NIST 800-88 Rev. 2 Purge\" cannot ship before `wipe-engine-linux` runs on real hardware, because that sentence would be false. Make no hardware-sanitization claim — in code, copy, docs or certificate text — while only the mock backend exists.",
+  # Owner instruction 2026-11-08. It supersedes step-02 rule 5 ("do not resolve an
+  # intent gap by picking a reading") and step-04's intent_gap HALT. It also
+  # supersedes step-04's "Do not infer intent unless there is exactly one possible
+  # reading".
+  """Decide by default (owner instruction, 2026-11-08). When planning or review finds an intent gap, or any question with several defensible answers, decide it yourself instead of halting, provided one option is clearly either:
+- the safe default: the one most protective of customers' data, security and the audit trail that still delivers the story; or
+- recognised best practice: OWASP, NIST, an IETF RFC, the framework's documented convention, or what an existing ADR or CONTEXT.md already implies.
+
+How to record the decision:
+- Append it to an `## Autonomous decisions` list at the end of `<intent-contract>`, in the AGENTS.md "Questions left for the human" shape: what it is about in plain product terms, the problem, the options considered, the choice, and why.
+- Change the other intent-contract rules only as far as needed to make them agree with the decision.
+- In step-02, then continue planning.
+- In step-04, route the entry as bad_spec (a loopback that counts toward `review_loop_iteration`), not intent_gap.
+
+Still HALT with `intent gap` when any of these holds:
+- no option is clearly safest or standard;
+- the choice is a product, pricing, licensing, legal, branding or customer-visible-copy decision;
+- it would contradict an ADR or a docs/ROADMAP.md §0 invariant;
+- it is irreversible or reaches outside the repo (data deletion, editing an applied migration, external services, money);
+- it materially widens the story's scope. In that case defer the work to a later story or a CONTEXT.md limitation instead of halting, when deferring is safe.
+
+Questions written at a halt follow AGENTS.md "Questions left for the human".""",
 ]
 
 on_complete = """
