@@ -36,7 +36,7 @@ Station side (one `wipestation` process per bench):
 |   • /api/sim/devices[/attach|/detach] — always routed, 404     |
 |     unless the backend simulates hot-plug                      |
 |   • /api/events (WS) — JobBroadcast + FleetEvent fan-out       |
-|   • Auto-signs Certificate on Erased|PendingDestruction;       |
+|   • Auto-signs Certificate on Erased|Destroyed (schema v3);   |
 |     certs held in RAM only                                     |
 +----------------------------------------------------------------+
           |               |               |               |
@@ -138,7 +138,7 @@ Queued ─▶ InProgress ─┬─▶ Erased
 Queued also moves straight to PendingDestruction when recorded for
 destruction, and a scanned drive's Job is created in PendingDestruction.
 Aborted is reachable from any non-terminal state, including Queued and
-PendingDestruction (an already-signed cert remains). PendingDestruction
+PendingDestruction (no certificate is signed then). PendingDestruction
 serializes as pending_destruction and still accepts pending_co_sign.
 ```
 
@@ -161,7 +161,7 @@ inner state: the runner then runs the sampled reads and appends a sibling
 event stays `Completed`, the failing Verification is recorded and the Job
 stays `InProgress`. Certificate signing is not an inner state either;
 it is done by `wipe-server` (below) when the outer Job reaches `Erased`
-or `PendingDestruction`.
+or `Destroyed`.
 
 A `Failed` ErasureEvent does **not** fail the Job — the Job stays
 `InProgress` awaiting an operator decision: abort, or record for
@@ -189,17 +189,25 @@ attempt) — which flow channel → WebSocket → frontend.
 
 ## Certificate flow
 
-1. Job reaches `JobState::Erased` **or** `JobState::PendingDestruction`.
-   (There is no `JobState::Completed` — that name belongs to the inner
-   `ErasureEventState`.)
+1. Job reaches `JobState::Erased` **or** `JobState::Destroyed` — once, so
+   a certificate is signed once. (There is no `JobState::Completed` — that
+   name belongs to the inner `ErasureEventState`.) Entering
+   `PendingDestruction` signs nothing.
 2. `wipe-server::AppState::spawn_cert_generator()` (a broadcast subscriber)
    wakes up.
-3. It calls `Certificate::from_job(...)` which flattens the job's
-   `activities` chain into a JSON-LD payload (schema v2), stamping
-   `media_status.operational = false` on the `PendingDestruction` path and
-   recording the resolved `AssetDisposition`. A Job with no erasure activity
-   (recorded from `Queued`, or created from a scanned group) is skipped and gets no certificate, so
-   assembly refuses it and no destruction run can move it to `Destroyed`.
+3. For `Erased` it calls `Certificate::from_job(...)`, which flattens the
+   job's `activities` chain into a JSON-LD payload (schema v3, no
+   `destruction` key). For `Destroyed` it reads the Job's destruction run
+   from `AppState::manifests` and calls `Certificate::from_destroyed_job(job,
+   run, ...)`: `disposition: destroyed`, `media_status` `operational: false,
+   damaged: true`, `sanitization` describing the destruction technique
+   (category `destroy` only for the five NIST techniques), and a
+   `destruction` block (`DestructionRecord`: run id, the attested
+   Destruction activity's id, technique, honest label, `nist_destroy`,
+   caution, the run's completion, `required_concurrence` and concurrence).
+   A Job never erased has no `device` / `capabilities_snapshot`, its
+   validation `media_class` is `unknown`, and its `started_at` is its
+   `created_at`; its identifiers are on the attestation.
 4. `wipe_cert::sign(cert, signing_key)` canonicalizes the JSON (BTreeMap key
    sorting at every depth, finite-number check), hashes it with SHA-256,
    signs with Ed25519, and emits a `SignedCertificate { certificate,
@@ -209,39 +217,58 @@ attempt) — which flow channel → WebSocket → frontend.
 6. **Destroy path only.** Assembling a destruction run
    (`DestructionManifest`) stamps its id on each member Job
    (`manifest_id`) and that Job's latest DestructionEvent
-   (`manifest_ref`), but never inside the signed certificate: the cert
-   generator strips the link from the copy it signs, assembly refuses a
-   Job with no certificate yet, and a Job already on a run cannot be
+   (`manifest_ref`), and signs nothing; a Job already on a run cannot be
    recorded for destruction again, so a new DestructionEvent cannot
    replace the record after assembly (aborting a linked Job is still
    allowed). Confirming the run's completion (and, when the station's
    concurrence policy requires it, a concurrence from a different signer)
-   moves every member Job to `Destroyed` in one runner call, all or
-   nothing, with a `JobStateChanged` per Job. The generator ignores
-   `Destroyed`, so no certificate changes and no co-signature is
-   appended; the supervisor co-sign route is gone. Certificates co-signed
-   before ADR-0011 keep their `CoSignatureBlock`s (station key, signer
-   and role outside the signed bytes), and `co_signatures` stays in the
-   schema so they still verify.
-   [ADR-0011](adr/0011-destruction-by-operator-attestation.md) ends with
-   one certificate signed once at `Destroyed`, carrying the attestation,
-   completion and concurrence inside the signed bytes (story 4, not yet
-   built). `co_signatures` is empty on Erased certs.
+   first builds every member's `DestructionRecord` against the run as it
+   will be stored (`check_certifiable` in `advance_run`); any failure is a
+   409 naming the Jobs and nothing changes, so no Job reaches `Destroyed`
+   uncertifiable. Then the runner moves every member Job to `Destroyed` in
+   one call, all or nothing, with a `JobStateChanged` per Job, and the
+   generator certifies each. The run is stored under the same lock held
+   while the Jobs move, so the generator reads exactly the run the
+   preflight checked. The certificate follows the response asynchronously.
+   `wipe_cert::co_sign` is gone; `CoSignatureBlock` / `co_signatures` /
+   `verify_co_signatures` stay so pre-ADR-0011 (v2) certificates still
+   verify.
 
-`wipe_cert::verify(signed, &[trusted_keys])`:
+`wipe_cert::verify(signed, &[trusted_keys])`, the one verifier (the CLI and
+the tests call it):
 - Re-canonicalizes the embedded certificate to compute the actual
   SHA-256.
 - Compares against the signature's `canonical_sha256_hex` (fails closed on
   any payload mutation).
 - Looks up a matching trusted key by `public_key_id`.
 - Verifies the Ed25519 signature.
+- Then checks content by `cert_format_version` (`wipe_cert::check`): v2 is
+  signature-only, as it always was; v3 refuses any co-signature, a
+  `destruction` block on a certificate that is not destroyed (or a
+  destroyed one without it), a record whose event link, label, flag,
+  caution, `sanitization` method or category disagrees with its technique,
+  a statement that does not re-render from its fields through
+  `wipe_common::{attestation_statement, completion_statement,
+  concurrence_statement}`, a completion not verified, and a concurrence
+  that is missing, unrequired, of the wrong kind or by the completion's
+  signer; any other version is refused as `unsupported cert_format_version
+  N`. Every field v3 added or relaxed is omitted when absent, so v2
+  certificates re-canonicalize to their signed bytes; committed fixtures
+  in `crates/wipe-cert/tests/fixtures/` (generated by the pre-v3 code) pin
+  it.
 
 This is the offline-verification path. The CLI command
 `wipestation verify-cert <cert> --public-key-b64 <station key>` exposes
 it; with `--vendor-root-b64` it also checks the ADR-0005 attestation chain
 (who the station key was licensed to), and `--require-licensed` fails an
 evaluation cert; it takes effect only together with `--vendor-root-b64`.
-It checks the primary signature only, never co-signatures. The signed
+It checks the primary signature and the content, never v2 co-signatures,
+and prints the format version, the device (or "not read from the device"
+for a drive never erased) and, for a destroyed drive, the technique and
+its label, the caution, who recorded it for destruction (name, title,
+identity assurance, time, identifiers and their source), the completion
+(time, equipment, criterion, video) and the concurrence or "none
+required". The signed
 cert lives only in the station's RAM, so it must be downloaded before the
 station restarts.
 
@@ -347,6 +374,7 @@ Replace, add, or extend:
 5. Operator RBAC inside `wipe-server` — SSO via OIDC, audit attribution.
    Destruction runs on ADR-0011's operator attestation (recording,
    completion and a startup-set concurrence policy are built; role-gated
-   policy editing waits for RBAC, and signing at `Destroyed` for story 4).
+   policy editing waits for RBAC; the certificate is signed once at
+   `Destroyed`, schema v3).
 6. `wipe-iso` — bootable image build (Alpine + signed shim + GRUB +
    the binary).

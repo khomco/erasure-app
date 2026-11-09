@@ -6,7 +6,7 @@ import type {
   JobStateLabel,
   ManifestStateLabel,
 } from "@/api/types";
-import { assemblableJobs, offeredSelection, uncertifiableJobs } from "./manifestAssembly";
+import { assemblableJobs, offeredSelection } from "./manifestAssembly";
 
 function job(
   id: string,
@@ -48,8 +48,10 @@ describe("assemblableJobs", () => {
     },
   );
 
-  it("does not offer a Job with no erasure activity", () => {
-    expect(assemblableJobs([job("a", "pending_destruction", null, false)], [])).toEqual([]);
+  it("offers a Job that was never erased: it is certified from its recorded identifiers", () => {
+    expect(
+      ids(assemblableJobs([job("a", "pending_destruction", null, false)], [])),
+    ).toEqual(["a"]);
   });
 
   it("offers a Job listed only on a rejected manifest", () => {
@@ -95,19 +97,6 @@ describe("assemblableJobs", () => {
   it("returns nothing for empty inputs", () => {
     expect(assemblableJobs([], [])).toEqual([]);
     expect(assemblableJobs([], [manifest("m1", ["a"])])).toEqual([]);
-  });
-});
-
-describe("uncertifiableJobs", () => {
-  it("lists only unassembled pending Jobs with no erasure activity", () => {
-    const jobs = [
-      job("a"),
-      job("b", "pending_destruction", null, false),
-      job("c", "pending_destruction", "m1", false),
-      job("d", "queued", null, false),
-      job("e", "pending_destruction", null, false),
-    ];
-    expect(ids(uncertifiableJobs(jobs, [manifest("m2", ["e"])]))).toEqual(["b"]);
   });
 });
 

@@ -26,7 +26,7 @@ import {
 } from "@/api/destructionRuns";
 import { useOperator } from "@/operator/context";
 import type { ConcurrencePolicy, DestructionManifest, Job } from "@/api/types";
-import { assemblableJobs, offeredSelection, uncertifiableJobs } from "./manifestAssembly";
+import { assemblableJobs, offeredSelection } from "./manifestAssembly";
 
 const POLICY_TEXT: Record<ConcurrencePolicy, string> = {
   none: "No concurrence: completing a run destroys its Jobs.",
@@ -56,10 +56,6 @@ export function ManifestsPage() {
     () => assemblableJobs(jobs.data ?? [], manifests.data ?? []),
     [jobs.data, manifests.data]
   );
-  const notOffered = useMemo(
-    () => uncertifiableJobs(jobs.data ?? [], manifests.data ?? []),
-    [jobs.data, manifests.data]
-  );
 
   return (
     <div className="space-y-5">
@@ -78,7 +74,6 @@ export function ManifestsPage() {
 
       <PendingJobsCard
         jobs={pendingJobs}
-        notOffered={notOffered}
         loading={jobs.isLoading || manifests.isLoading}
       />
 
@@ -93,11 +88,9 @@ export function ManifestsPage() {
 
 function PendingJobsCard({
   jobs,
-  notOffered,
   loading,
 }: {
   jobs: Job[];
-  notOffered: Job[];
   loading: boolean;
 }) {
   const { operator } = useOperator();
@@ -139,22 +132,11 @@ function PendingJobsCard({
       </div>
     );
   }
-  const note_ = notOffered.length > 0 && (
-    <div className="mt-2 text-xs text-amber-300">
-      {notOffered.length} Job{notOffered.length === 1 ? " was" : "s were"} recorded for
-      destruction without being erased and cannot join a run yet: there is no certificate
-      to issue for {notOffered.length === 1 ? "it" : "them"}.{" "}
-      <span className="font-mono text-slate-400">
-        {notOffered.map((j) => j.id.slice(0, 8)).join(", ")}
-      </span>
-    </div>
-  );
   if (jobs.length === 0) {
     return (
       <div className="card text-sm text-slate-400">
         No Jobs waiting for a destruction run. (Record a Job for destruction to see one
         here.)
-        {note_}
       </div>
     );
   }
@@ -185,7 +167,6 @@ function PendingJobsCard({
           </label>
         ))}
       </div>
-      {note_}
       <div className="mt-3 flex items-end gap-2">
         <div className="flex-1">
           <div className="label">Note (shredder run id, vendor pickup, …)</div>

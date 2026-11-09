@@ -7,14 +7,15 @@
 //!
 //! The runner has two levels:
 //!  * `JobRunner` — outer orchestrator. Owns the outer-Job state machine
-//!    and decides when to emit each typed activity. Cert generation +
-//!    signing happens when the Job reaches Erased; on the Destroy path the
-//!    cert is generated at PendingDestruction (when the Job has an erasure
-//!    to certify). A Job enters PendingDestruction only through
-//!    `record_for_destruction` / `record_scanned_for_destruction`, each
-//!    carrying the operator's `DestructionAttestation` (ADR-0011 §1), and
-//!    leaves it for Destroyed only through `mark_destroyed`, once its
-//!    destruction run is completed (and concurred with, when required).
+//!    and decides when to emit each typed activity. The server signs the
+//!    one certificate on the `JobStateChanged` into Erased, or into
+//!    Destroyed on the Destroy path (ADR-0011 §2); entering
+//!    PendingDestruction signs nothing. A Job enters PendingDestruction
+//!    only through `record_for_destruction` /
+//!    `record_scanned_for_destruction`, each carrying the operator's
+//!    `DestructionAttestation` (ADR-0011 §1), and leaves it for Destroyed
+//!    only through `mark_destroyed`, once its destruction run is completed
+//!    (and concurred with, when required).
 //!  * inner `run_erasure_event` — drives one ErasureEvent through its
 //!    inner state machine (Queued → Probing → … → Completed/Failed).
 //!    Today's v0.1 `run_job` logic, minus the cert/sign tail.
@@ -231,9 +232,9 @@ impl JobRunner {
                     "job {id} already terminal"
                 )));
             }
-            // Once a Job is on a DestructionManifest, the record the supervisor
-            // co-signs must not change: a new DestructionEvent would replace the
-            // certificate and would not carry the manifest reference.
+            // Once a Job is on a DestructionManifest, its record must not
+            // change: a new DestructionEvent would not carry the manifest
+            // reference the certificate signs at Destroyed.
             if let Some(mid) = job.manifest_id {
                 return Err(WipeError::InvalidState(format!(
                     "job {id} is on destruction manifest {mid}; it cannot be recorded again"
@@ -412,8 +413,8 @@ impl JobRunner {
     /// any is changed, and the call refuses (changing nothing) if any Job is
     /// missing, listed more than once, not in `PendingDestruction`, already on a
     /// manifest, or has no DestructionEvent. The link changes no Job state
-    /// and emits no broadcast — a `JobStateChanged` would re-sign the
-    /// certificate.
+    /// and emits no broadcast; the certificate signed at `Destroyed`
+    /// carries the link.
     pub fn link_to_manifest(&self, manifest_id: Uuid, job_ids: &[Uuid]) -> WipeResult<()> {
         let mut inner = self.inner.write();
         for (i, id) in job_ids.iter().enumerate() {

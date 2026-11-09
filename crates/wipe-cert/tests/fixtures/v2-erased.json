@@ -1,0 +1,337 @@
+{
+  "certificate": {
+    "@context": "https://wipestation.dev/contexts/sanitization-cert-v2",
+    "type": "SanitizationCertificate",
+    "id": "urn:uuid:b9e418ff-ecf8-49df-bd7d-18c7737e8c9e",
+    "cert_format_version": 2,
+    "issuer": {
+      "tool_name": "wipestation",
+      "tool_version": "0.1.0",
+      "public_key_id": "ed25519:tgAwbPp2cj/ew5XlOps9nw"
+    },
+    "issued_at": "2026-11-09T02:17:02.817879Z",
+    "job_id": "fbebe1de-1a2f-4c5c-9382-acda80136253",
+    "operator": {
+      "id": "op-1",
+      "display_name": "Alice",
+      "email": "alice@example.com"
+    },
+    "spec": {
+      "classification": "moderate",
+      "intent": "reuse",
+      "asset_tag": "A-1",
+      "ticket_ref": "T-1",
+      "site_label": "Lab"
+    },
+    "device": {
+      "id": "dev-nvme-0",
+      "vendor": "Samsung",
+      "model": "MZ-V9P2T0",
+      "serial": "S6ABNX0W123456",
+      "wwn": "eui.0025385811b1d567",
+      "capacity_bytes": 2000000000000,
+      "media_type": "ssd_nvme",
+      "bus": "nvme",
+      "firmware": "4B2QGXA7",
+      "removable": false,
+      "block_size": 512,
+      "path": "/dev/nvme0n1"
+    },
+    "capabilities_snapshot": {
+      "ata_security": null,
+      "nvme_sanitize": {
+        "block_erase": true,
+        "overwrite": true,
+        "crypto_erase": true,
+        "ndi_inhibited": false,
+        "nodmmas": 0,
+        "estimated_block_erase_secs": 2,
+        "estimated_crypto_erase_secs": 1,
+        "estimated_overwrite_secs": 900
+      },
+      "trim": true,
+      "crypto_erase_supported": true,
+      "sed": "provisioned",
+      "hpa_present": false,
+      "dco_present": false,
+      "frozen": false
+    },
+    "disposition": "erased",
+    "sanitization": {
+      "category": "purge",
+      "method": {
+        "kind": "nvme_sanitize_crypto_erase",
+        "ause": false,
+        "no_deallocate": false
+      },
+      "method_human": "NVMe Sanitize — Crypto Erase",
+      "standard_refs": [
+        {
+          "standard": "NIST SP 800-88 Rev. 2",
+          "section": "decision flow + IEEE 2883 deferral"
+        },
+        {
+          "standard": "IEEE 2883-2022",
+          "section": "Clear / Purge / Destruct mappings"
+        }
+      ]
+    },
+    "activities": [
+      {
+        "type": "erasure",
+        "id": "460b7c3d-6b98-4e87-97a3-baa2fb385007",
+        "device_snapshot": {
+          "id": "dev-nvme-0",
+          "vendor": "Samsung",
+          "model": "MZ-V9P2T0",
+          "serial": "S6ABNX0W123456",
+          "wwn": "eui.0025385811b1d567",
+          "capacity_bytes": 2000000000000,
+          "media_type": "ssd_nvme",
+          "bus": "nvme",
+          "firmware": "4B2QGXA7",
+          "removable": false,
+          "block_size": 512,
+          "path": "/dev/nvme0n1"
+        },
+        "capabilities_snapshot": {
+          "ata_security": null,
+          "nvme_sanitize": {
+            "block_erase": true,
+            "overwrite": true,
+            "crypto_erase": true,
+            "ndi_inhibited": false,
+            "nodmmas": 0,
+            "estimated_block_erase_secs": 2,
+            "estimated_crypto_erase_secs": 1,
+            "estimated_overwrite_secs": 900
+          },
+          "trim": true,
+          "crypto_erase_supported": true,
+          "sed": "provisioned",
+          "hpa_present": false,
+          "dco_present": false,
+          "frozen": false
+        },
+        "spec": {
+          "device_id": "dev-nvme-0",
+          "classification": "moderate",
+          "intent": "reuse",
+          "method": null,
+          "verify": true,
+          "verify_samples": 8,
+          "operator": {
+            "id": "op-1",
+            "display_name": "Alice",
+            "email": "alice@example.com"
+          },
+          "asset_tag": "A-1",
+          "site_label": "Lab",
+          "ticket_ref": "T-1"
+        },
+        "resolved_method": {
+          "kind": "nvme_sanitize_crypto_erase",
+          "ause": false,
+          "no_deallocate": false
+        },
+        "state": {
+          "state": "completed"
+        },
+        "progress": {
+          "fraction": 0.8369066,
+          "eta_seconds": 0,
+          "stage": "running:NVMe Sanitize — Crypto Erase",
+          "bytes_processed": 1673813164032,
+          "bytes_total": 2000000000000
+        },
+        "events": [
+          {
+            "at": "2026-11-09T02:17:02.296174Z",
+            "event": {
+              "kind": "state_changed",
+              "from": {
+                "state": "probing"
+              },
+              "to": {
+                "state": "confirming"
+              }
+            }
+          },
+          {
+            "at": "2026-11-09T02:17:02.29618Z",
+            "event": {
+              "kind": "state_changed",
+              "from": {
+                "state": "confirming"
+              },
+              "to": {
+                "state": "running"
+              }
+            }
+          },
+          {
+            "at": "2026-11-09T02:17:02.296208Z",
+            "event": {
+              "kind": "command_issued",
+              "interface": "nvme-admin",
+              "opcode": 132,
+              "action": 4,
+              "raw_cdb": "84000400",
+              "status": 0,
+              "duration_ms": 0,
+              "note": "issued (mock)"
+            }
+          },
+          {
+            "at": "2026-11-09T02:17:02.547383Z",
+            "event": {
+              "kind": "progress",
+              "fraction": 0.8369066,
+              "eta_seconds": 0,
+              "stage": "running:NVMe Sanitize — Crypto Erase",
+              "bytes_processed": 1673813164032,
+              "bytes_total": 2000000000000
+            }
+          },
+          {
+            "at": "2026-11-09T02:17:02.54739Z",
+            "event": {
+              "kind": "command_result",
+              "interface": "nvme-admin",
+              "opcode": 132,
+              "action": 4,
+              "raw_cdb": "84000400",
+              "status": 0,
+              "log_page": "3ed6020000000000",
+              "duration_ms": 0,
+              "note": "progress 84% (mock)"
+            }
+          },
+          {
+            "at": "2026-11-09T02:17:02.800718Z",
+            "event": {
+              "kind": "command_result",
+              "interface": "nvme-admin",
+              "opcode": 132,
+              "action": 4,
+              "raw_cdb": "84000400",
+              "status": 0,
+              "log_page": "ffff010000000000",
+              "duration_ms": 0,
+              "note": "ok (mock)"
+            }
+          },
+          {
+            "at": "2026-11-09T02:17:02.800733Z",
+            "event": {
+              "kind": "state_changed",
+              "from": {
+                "state": "running"
+              },
+              "to": {
+                "state": "completed"
+              }
+            }
+          }
+        ],
+        "created_at": "2026-11-09T02:17:02.296164Z",
+        "started_at": "2026-11-09T02:17:02.296164Z",
+        "ended_at": "2026-11-09T02:17:02.800732Z",
+        "station_id": null
+      },
+      {
+        "type": "verification",
+        "id": "a655d313-daac-4328-9f3f-38506c23571a",
+        "erasure_event_id": "460b7c3d-6b98-4e87-97a3-baa2fb385007",
+        "device_id": "dev-nvme-0",
+        "at": "2026-11-09T02:17:02.817574Z",
+        "report": {
+          "method": "sampled_entropy",
+          "sample_count": 8,
+          "bytes_sampled": 32768,
+          "samples": [
+            {
+              "offset_bytes": 1297124200627,
+              "size_bytes": 4096,
+              "sha256_hex": "918dd8089df927b0d301b7c979599039bebd1d4c83880fdf1b88a8168a82288a",
+              "entropy_bits_per_byte": 7.954259,
+              "passed": true
+            },
+            {
+              "offset_bytes": 603303602841,
+              "size_bytes": 4096,
+              "sha256_hex": "1850657b8c96aea6af9ab40c7e0bf36748a89cf5d4d499e04d24f4e2d9d6a68b",
+              "entropy_bits_per_byte": 7.9573565,
+              "passed": true
+            },
+            {
+              "offset_bytes": 1465382348851,
+              "size_bytes": 4096,
+              "sha256_hex": "3549b426ce8720b0c241271feeb2802b3ac12262bb6f0be1b0c28557d2bf2af3",
+              "entropy_bits_per_byte": 7.9498363,
+              "passed": true
+            },
+            {
+              "offset_bytes": 1397351140030,
+              "size_bytes": 4096,
+              "sha256_hex": "50953bdfd771030d97732f70e85dc8cdf1e76846eb56e04a6023d92850e7548b",
+              "entropy_bits_per_byte": 7.953419,
+              "passed": true
+            },
+            {
+              "offset_bytes": 1506869933413,
+              "size_bytes": 4096,
+              "sha256_hex": "996a4d90d15070f93957ea1cc8bba25fbe7e3187f4fb98b4ef32496f29cd59ce",
+              "entropy_bits_per_byte": 7.9587827,
+              "passed": true
+            },
+            {
+              "offset_bytes": 518744484424,
+              "size_bytes": 4096,
+              "sha256_hex": "5b37702a2d780d0136d0ba4c634f485bc2ef0bf9bb3cfaac47b9dd26beee8402",
+              "entropy_bits_per_byte": 7.9582124,
+              "passed": true
+            },
+            {
+              "offset_bytes": 1487150190978,
+              "size_bytes": 4096,
+              "sha256_hex": "2c315ffe6a3600e321a0eb8e3fa897866ee377a4450056da3b4ca15a75599760",
+              "entropy_bits_per_byte": 7.9590173,
+              "passed": true
+            },
+            {
+              "offset_bytes": 1122752961460,
+              "size_bytes": 4096,
+              "sha256_hex": "35a0e7df01b11f0a5f88ed2f6b22718c691afb62ae980167e0e36cf76f77640b",
+              "entropy_bits_per_byte": 7.951448,
+              "passed": true
+            }
+          ],
+          "all_passed": true
+        },
+        "station_id": null
+      }
+    ],
+    "started_at": "2026-11-09T02:17:02.296122Z",
+    "ended_at": "2026-11-09T02:17:02.817627Z",
+    "duration_seconds": 0,
+    "validation": {
+      "validated": false,
+      "media_class": "ssd-nvme",
+      "validation_ref": null,
+      "validation_expires": null
+    },
+    "media_status": {
+      "operational": true,
+      "damaged": false,
+      "notes": null
+    },
+    "evaluation": true
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "public_key_id": "ed25519:tgAwbPp2cj/ew5XlOps9nw",
+    "canonical_sha256_hex": "670bf5bc7f6209d2361ec81e3e6b3f1741b6b12cf88cdde810c81acbc8523a83",
+    "signature_b64": "aws1VYfm0ApG1LjM46OIulKoAnlXnQaPRX0DflWJoPok6jhiRwv5pS9zxj6qVYA4tofWKaAwZVlJJmIw61DgBA"
+  }
+}

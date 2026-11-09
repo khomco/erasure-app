@@ -1,14 +1,26 @@
 import { Link, useParams } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Download, ShieldCheck, UserCheck } from "lucide-react";
+import { ArrowLeft, Download, Flame, ShieldCheck, UserCheck } from "lucide-react";
 
-import { api, classNames, formatBytes } from "@/api/client";
+import { api, classNames } from "@/api/client";
+import {
+  concurrenceLabel,
+  deviceSummary,
+  identifierSourceLabel,
+  recordedForDestruction,
+} from "@/api/certificate";
 import {
   identityAssuranceLabel,
   techniqueName,
   techniqueStandardLabel,
 } from "@/api/destruction";
-import type { CommandEvidence, JobActivity, SignedCertificate } from "@/api/types";
+import type {
+  AttestationSigner,
+  CertDestruction,
+  CommandEvidence,
+  JobActivity,
+  SignedCertificate,
+} from "@/api/types";
 
 export function CertificatePage() {
   const { jobId } = useParams({ from: "/certs/$jobId" });
@@ -47,6 +59,8 @@ export function CertificatePage() {
   const verification = c.certificate.activities.find((a) => a.type === "verification");
   const destruction = c.certificate.activities.find((a) => a.type === "destruction");
   const commands = flattenCommands(c);
+  const device = deviceSummary(c);
+  const record = c.certificate.destruction;
 
   return (
     <div className="space-y-4">
@@ -84,17 +98,16 @@ export function CertificatePage() {
           </Field>
           <Field label="Sanitization method">
             {c.certificate.sanitization.method_human}
-            <div className="text-xs text-slate-400">
-              NIST 800-88 R2 category:{" "}
-              <span className="uppercase">{c.certificate.sanitization.category}</span>
-            </div>
+            {c.certificate.sanitization.category && (
+              <div className="text-xs text-slate-400">
+                NIST 800-88 R2 category:{" "}
+                <span className="uppercase">{c.certificate.sanitization.category}</span>
+              </div>
+            )}
           </Field>
           <Field label="Device">
-            {c.certificate.device.vendor} {c.certificate.device.model}
-            <div className="text-xs text-slate-400">
-              {c.certificate.device.serial} ·{" "}
-              {formatBytes(c.certificate.device.capacity_bytes)}
-            </div>
+            {device.title}
+            <div className="text-xs text-slate-400">{device.detail}</div>
           </Field>
           <Field label="Operator">
             {c.certificate.operator.display_name}
@@ -120,7 +133,7 @@ export function CertificatePage() {
               {c.certificate.spec.ticket_ref || ""}
             </div>
           </Field>
-          {destruction && destruction.type === "destruction" && (
+          {!record && destruction && destruction.type === "destruction" && (
             <Field label="Destruction">
               {techniqueName(destruction.method)}
               <div className="text-xs text-slate-400">
@@ -139,6 +152,8 @@ export function CertificatePage() {
           )}
         </div>
       </div>
+
+      {record && <DestructionCard record={record} cert={c} />}
 
       <div className="card">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">
@@ -228,6 +243,104 @@ export function CertificatePage() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The destruction record signed inside a v3 certificate: the technique and
+ * its honest label, then who recorded, completed and (if required) concurred,
+ * with each signer's identity assurance.
+ */
+function DestructionCard({ record, cert }: { record: CertDestruction; cert: SignedCertificate }) {
+  const recorded = recordedForDestruction(cert);
+  const completion = record.completion;
+  return (
+    <div className="card">
+      <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-slate-400">
+        <Flame className="h-4 w-4" /> Destruction
+      </h3>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Field label="Technique">
+          {techniqueName(record.technique)}
+          <div className="text-xs text-slate-400">{record.standard_label}</div>
+          {record.caution && <div className="mt-1 text-xs text-amber-300">{record.caution}</div>}
+        </Field>
+        <Field label="Destruction run">
+          <span className="font-mono text-xs">{record.manifest_id}</span>
+        </Field>
+      </div>
+      <div className="mt-4 space-y-3">
+        {recorded && (
+          <Signed
+            title="Recorded for destruction"
+            signer={recorded.signer}
+            at={recorded.at}
+            statement={recorded.statement}
+          >
+            <div>
+              Equipment {recorded.equipment_id} · {recorded.location}
+            </div>
+            <div>
+              Asset tag {recorded.identifiers.asset_tag ?? "—"} · serial{" "}
+              {recorded.identifiers.serial ?? "—"} ·{" "}
+              {identifierSourceLabel(recorded.identifiers.source)}
+            </div>
+          </Signed>
+        )}
+        <Signed
+          title="Destruction completed"
+          signer={completion.signer}
+          at={completion.completed_at}
+          statement={completion.statement}
+        >
+          <div>
+            Remnants inspected; equipment {completion.verification.equipment_id} completed
+            its cycle. Criterion: {completion.verification.criterion}
+          </div>
+          <div>Video reference: {completion.video_ref ?? "none"}</div>
+        </Signed>
+        {record.concurrence ? (
+          <Signed
+            title={`Concurrence: ${concurrenceLabel(record)}`}
+            signer={record.concurrence.signer}
+            at={record.concurrence.at}
+            statement={record.concurrence.statement}
+          />
+        ) : (
+          <div className="text-xs text-slate-400">Concurrence: {concurrenceLabel(record)}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Signed({
+  title,
+  signer,
+  at,
+  statement,
+  children,
+}: {
+  title: string;
+  signer: AttestationSigner;
+  at: string;
+  statement: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-md border border-slate-800 bg-slate-950/40 p-3 text-xs">
+      <div className="flex items-center justify-between text-sm">
+        <span className="font-semibold text-slate-200">{title}</span>
+        <span className="text-xs text-slate-500">{new Date(at).toLocaleString()}</span>
+      </div>
+      <div className="mt-1 text-slate-300">
+        {signer.full_name}, {signer.title} · {identityAssuranceLabel(signer.identity_assurance)}
+      </div>
+      <div className="mt-1 space-y-0.5 text-slate-400">{children}</div>
+      <blockquote className="mt-2 border-l-2 border-slate-700 pl-2 italic text-slate-400">
+        {statement}
+      </blockquote>
     </div>
   );
 }

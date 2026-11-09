@@ -597,18 +597,125 @@ fn cmd_verify_cert(
 
     let key_id = wipe_cert::verify(&signed, &trusted)?;
     println!("OK — certificate verified against trusted key {key_id}");
-    println!(
-        "  job_id: {}\n  device: {} ({})\n  method: {}\n  category: {:?}\n  operator: {} <{}>",
-        signed.certificate.job_id,
-        signed.certificate.device.model,
-        signed.certificate.device.serial,
-        signed.certificate.sanitization.method_human,
-        signed.certificate.sanitization.category,
-        signed.certificate.operator.display_name,
-        signed.certificate.operator.email,
-    );
+    print!("{}", describe_certificate(&signed.certificate));
 
     report_attestation(&signed, &roots, require_licensed)
+}
+
+/// The verified certificate as `verify-cert` prints it: the headline, then,
+/// for a destroyed drive, who attested what and when (ADR-0011).
+fn describe_certificate(cert: &wipe_cert::Certificate) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let device = match &cert.device {
+        Some(d) => format!("{} ({})", d.model, d.serial),
+        None => "not read from the device (never erased)".to_owned(),
+    };
+    let category = match cert.sanitization.category {
+        Some(c) => format!("{c:?}"),
+        None => "none (not NIST Destroy)".to_owned(),
+    };
+    let _ = writeln!(
+        out,
+        "  format: v{}\n  job_id: {}\n  disposition: {}\n  device: {device}\n  method: {}\n  \
+         category: {category}\n  operator: {} <{}>",
+        cert.cert_format_version,
+        cert.job_id,
+        serde_name(&cert.disposition),
+        cert.sanitization.method_human,
+        cert.operator.display_name,
+        cert.operator.email,
+    );
+    let Some(rec) = &cert.destruction else {
+        return out;
+    };
+    let _ = writeln!(out, "\n  destruction run: {}", rec.manifest_id);
+    let _ = writeln!(
+        out,
+        "    technique: {} — {}",
+        rec.technique.human_name(),
+        rec.standard_label
+    );
+    if let Some(caution) = &rec.caution {
+        let _ = writeln!(out, "    caution: {caution}");
+    }
+    let attestation = cert.activities.iter().find_map(|a| match a {
+        wipe_common::JobActivity::Destruction(e) if e.id == rec.destruction_event_id => {
+            e.attestation.as_ref()
+        }
+        _ => None,
+    });
+    if let Some(a) = attestation {
+        let ids = &a.identifiers;
+        let _ = writeln!(
+            out,
+            "    recorded for destruction: {}, {} ({}) at {}\n      equipment {}, location \
+             {}\n      identifiers: asset tag {}, serial {} (source: {})\n      statement: {}",
+            a.signer.full_name,
+            a.signer.title,
+            assurance(&a.signer.identity_assurance),
+            rfc3339(a.at),
+            a.equipment_id,
+            a.location,
+            ids.asset_tag.as_deref().unwrap_or("none"),
+            ids.serial.as_deref().unwrap_or("none"),
+            serde_name(&ids.source),
+            a.statement,
+        );
+    }
+    let c = &rec.completion;
+    let _ = writeln!(
+        out,
+        "    completed: {} by {}, {} ({})\n      verification: remnants inspected, equipment {} \
+         completed its cycle; criterion: {}\n      video: {}\n      statement: {}",
+        rfc3339(c.completed_at),
+        c.signer.full_name,
+        c.signer.title,
+        assurance(&c.signer.identity_assurance),
+        c.verification.equipment_id,
+        c.verification.criterion,
+        c.video_ref.as_deref().unwrap_or("none"),
+        c.statement,
+    );
+    match &rec.concurrence {
+        Some(k) => {
+            let _ = writeln!(
+                out,
+                "    concurrence: {} by {}, {} ({}) at {}\n      statement: {}",
+                serde_name(&k.kind),
+                k.signer.full_name,
+                k.signer.title,
+                assurance(&k.signer.identity_assurance),
+                rfc3339(k.at),
+                k.statement,
+            );
+        }
+        None => {
+            let _ = writeln!(out, "    concurrence: none required");
+        }
+    }
+    out
+}
+
+fn assurance(a: &wipe_common::IdentityAssurance) -> String {
+    match a {
+        wipe_common::IdentityAssurance::SelfAsserted => "self-asserted".to_owned(),
+        wipe_common::IdentityAssurance::Verified { issuer, subject } => {
+            format!("verified by {issuer}, subject {subject}")
+        }
+    }
+}
+
+fn serde_name<T: serde::Serialize>(v: &T) -> String {
+    serde_json::to_value(v)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn rfc3339(at: time::OffsetDateTime) -> String {
+    at.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| at.to_string())
 }
 
 /// Report the ADR-0005 attestation chain.
@@ -970,6 +1077,93 @@ mod tests {
             assert_eq!(parse_feature(name).unwrap(), f, "{name}");
         }
         assert!(parse_feature("no_such_feature").is_err());
+    }
+
+    const STATION_KEY_B64: &str = "GX9rI+FshTLGq8g4+s1ep4m+DHaykgM0A5v6iz02jWE";
+    const SUPERVISOR_KEY_B64: &str = "RQigeqlBcH8+stuUyIl6gLLBGXR2tt4hOsJz332GxP8";
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../wipe-cert/tests/fixtures")
+            .join(name)
+    }
+
+    fn verify_fixture(path: PathBuf) -> Result<()> {
+        cmd_verify_cert(path, vec![STATION_KEY_B64.into()], Vec::new(), false)
+    }
+
+    #[test]
+    fn verify_cert_accepts_the_v2_and_v3_fixtures() {
+        verify_fixture(fixture("v2-erased.json")).unwrap();
+        verify_fixture(fixture("v2-destroyed-cosigned.json")).unwrap();
+        verify_fixture(fixture("v3-destroyed.json")).unwrap();
+        // The supervisor key alone does not verify the station's signature.
+        let err = cmd_verify_cert(
+            fixture("v2-erased.json"),
+            vec![SUPERVISOR_KEY_B64.into()],
+            Vec::new(),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no trusted key"), "{err}");
+    }
+
+    #[test]
+    fn verify_cert_describes_a_destroyed_drive() {
+        let raw = fs::read(fixture("v3-destroyed.json")).unwrap();
+        let signed: SignedCertificate = serde_json::from_slice(&raw).unwrap();
+        let out = describe_certificate(&signed.certificate);
+        let rec = signed.certificate.destruction.as_ref().unwrap();
+        for needle in [
+            "format: v3",
+            "disposition: destroyed",
+            "device: not read from the device",
+            "technique: Shred — NIST SP 800-88 Destroy",
+            wipe_common::SHRED_PULVERIZE_CAUTION,
+            "recorded for destruction: Ana Ruiz, Bench lead (self-asserted)",
+            "(source: scanned)",
+            "criterion: particles no larger than 2 mm",
+            "concurrence: none required",
+        ] {
+            assert!(out.contains(needle), "missing {needle:?} in:\n{out}");
+        }
+        assert!(out.contains(&rfc3339(rec.completion.completed_at)), "{out}");
+        let v2 = fs::read(fixture("v2-erased.json")).unwrap();
+        let v2: SignedCertificate = serde_json::from_slice(&v2).unwrap();
+        let out = describe_certificate(&v2.certificate);
+        assert!(
+            out.contains("format: v2") && out.contains("device: MZ-V9P2T0"),
+            "{out}"
+        );
+        assert!(!out.contains("destruction run"));
+    }
+
+    #[test]
+    fn verify_cert_describes_a_witnessed_run() {
+        verify_fixture(fixture("v3-destroyed-witness.json")).unwrap();
+        let raw = fs::read(fixture("v3-destroyed-witness.json")).unwrap();
+        let signed: SignedCertificate = serde_json::from_slice(&raw).unwrap();
+        let out = describe_certificate(&signed.certificate);
+        assert!(
+            out.contains("concurrence: witness by Bo Chen, Site supervisor (self-asserted)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn verify_cert_refuses_a_re_signed_tampered_v3_certificate() {
+        let raw = fs::read(fixture("v3-destroyed.json")).unwrap();
+        let signed: SignedCertificate = serde_json::from_slice(&raw).unwrap();
+        let mut cert = signed.certificate;
+        cert.destruction.as_mut().unwrap().completion.statement =
+            "Destruction was completed. Trust me.".into();
+        let forged = wipe_cert::sign(cert, &SigningKey::from_seed([42; 32])).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("wipestation-forged-{}.json", std::process::id()));
+        fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
+        let err = verify_fixture(path.clone()).unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert!(err.to_string().contains("completion statement"), "{err}");
     }
 
     fn serve_policy(args: &[&str]) -> Result<wipe_common::ConcurrencePolicy, clap::Error> {

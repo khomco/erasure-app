@@ -22,7 +22,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 
 ## Running and verifying
 
-- `cargo test --workspace` — 791 tests, ~30s. Needs `docker compose up -d` first (root
+- `cargo test --workspace` — 814 tests, ~30s. Needs `docker compose up -d` first (root
   `compose.yaml`: Postgres on `127.0.0.1:55432`, Mailpit SMTP `:1025`, UI/API `:8025`):
   `wipe-hub`'s compose-backed tests fail, never skip, when they are down.
 - Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and
@@ -51,7 +51,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   deleting Mailpit messages.
 - Never pipe `cargo test` through `grep`/`awk` to summarize: compile errors are discarded and
   a broken build prints as a clean run (68844bf).
-- Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 251 tests, under a second.
+- Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 256 tests, under a second.
 - Portal (ADR-0006 §1): `pnpm install` at the root, then `pnpm --filter portal build`,
   `pnpm --filter portal typecheck`, `pnpm --filter portal test` (dev server on :5174, proxying
   `/api` to the hub on :7900). `wipe-hub serve` serves `apps/portal/dist` under the working
@@ -85,10 +85,16 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   mutating methods (`issue`, `unfreeze`, `cancel`, `verify`); handlers get read-only
   `enumerate`/`capabilities`. Bypassing the runner skips evidence capture.
 - Certificates are produced only as a side effect of a `JobBroadcast::JobStateChanged` into
-  `Erased`/`PendingDestruction` (moving to `Erased`/`Destroyed` under ADR-0011) (`crates/wipe-server/src/app.rs:199`) — mutating `Job::state`
-  without emitting that broadcast yields a silently uncertified job.
+  `Erased`/`Destroyed` (ADR-0011; `crates/wipe-server/src/app.rs:216`); entering
+  `PendingDestruction` signs nothing — mutating `Job::state` without emitting that broadcast
+  yields a silently uncertified job. A `Destroyed` Job is certified from its run in
+  `AppState::manifests`; `advance_run` builds every member's `DestructionRecord` before
+  `mark_destroyed`, so never move Jobs to `Destroyed` around it.
 - A `Certificate` is immutable once signed: `verify` re-canonicalizes against the stored hash,
-  so co-signing must sign the same bytes.
+  then checks v3 content. Nothing is appended after signing (`co_sign` is gone; v3 refuses
+  co-signatures), and every field added to a type inside the signed payload must be
+  `#[serde(default, skip_serializing_if = …)]` so `crates/wipe-cert/tests/fixtures/v2-*.json`
+  still verify. Never edit those fixtures.
 - All bay-topology writes go through `AppState::save_bay_topology`, never
   `*self.bay_topology.write()` — it is the only place the ADR-0003 revision check and
   persistence happen. The topology store holds configuration only; evidence never goes there.

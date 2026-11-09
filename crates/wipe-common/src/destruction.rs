@@ -359,6 +359,19 @@ impl Concurrence {
     }
 }
 
+/// Whether two destruction records were signed by the same person: the same
+/// operator id, or the same full name ignoring case and whitespace. A
+/// concurrence must come from someone other than the completion's signer.
+pub fn same_signer(a: &AttestationSigner, b: &AttestationSigner) -> bool {
+    let norm = |s: &str| {
+        s.split_whitespace()
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    a.operator.id == b.operator.id || norm(&a.full_name) == norm(&b.full_name)
+}
+
 fn required(field: &'static str, value: &str) -> Result<String, DestructionRecordError> {
     optional(Some(value)).ok_or(DestructionRecordError::Blank(field))
 }
@@ -669,6 +682,23 @@ mod tests {
             s,
         );
         assert_eq!(r, Err(DestructionRecordError::Blank("full_name")));
+    }
+
+    #[test]
+    fn same_signer_matches_operator_id_or_normalized_name() {
+        let other_op = OperatorRef {
+            id: "op-2".into(),
+            display_name: "Bo".into(),
+            email: "bo@example.com".into(),
+        };
+        let a = signer();
+        let same_id = AttestationSigner::self_asserted(operator(), "Someone Else", "QA").unwrap();
+        let same_name =
+            AttestationSigner::self_asserted(other_op.clone(), "  ana   RUIZ ", "QA").unwrap();
+        let different = AttestationSigner::self_asserted(other_op, "Bo Chen", "QA").unwrap();
+        assert!(same_signer(&a, &same_id));
+        assert!(same_signer(&a, &same_name));
+        assert!(!same_signer(&a, &different));
     }
 
     #[test]

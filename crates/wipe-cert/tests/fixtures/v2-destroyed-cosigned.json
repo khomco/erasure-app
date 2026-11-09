@@ -1,0 +1,303 @@
+{
+  "certificate": {
+    "@context": "https://wipestation.dev/contexts/sanitization-cert-v2",
+    "type": "SanitizationCertificate",
+    "id": "urn:uuid:81b6d61e-a65e-4d10-ae9a-8609142ce0cd",
+    "cert_format_version": 2,
+    "issuer": {
+      "tool_name": "wipestation",
+      "tool_version": "0.1.0",
+      "public_key_id": "ed25519:tgAwbPp2cj/ew5XlOps9nw"
+    },
+    "issued_at": "2026-11-09T02:17:03.345543Z",
+    "job_id": "89fc52fe-5f79-4da7-a75c-6446e30e006b",
+    "operator": {
+      "id": "op-1",
+      "display_name": "Alice",
+      "email": "alice@example.com"
+    },
+    "spec": {
+      "classification": "moderate",
+      "intent": "reuse",
+      "asset_tag": "A-2",
+      "ticket_ref": "T-1",
+      "site_label": "Lab"
+    },
+    "device": {
+      "id": "dev-sata-0",
+      "vendor": "Crucial",
+      "model": "MX500 1TB",
+      "serial": "203440FAILSIM",
+      "wwn": null,
+      "capacity_bytes": 1000000000000,
+      "media_type": "ssd_sata",
+      "bus": "sata",
+      "firmware": "M3CR046",
+      "removable": false,
+      "block_size": 512,
+      "path": "/dev/sda"
+    },
+    "capabilities_snapshot": {
+      "ata_security": {
+        "supported": true,
+        "enhanced_supported": true,
+        "estimated_minutes": 2,
+        "enhanced_estimated_minutes": 2,
+        "frozen": false
+      },
+      "nvme_sanitize": null,
+      "trim": true,
+      "crypto_erase_supported": false,
+      "sed": "none",
+      "hpa_present": false,
+      "dco_present": false,
+      "frozen": false
+    },
+    "disposition": "destroyed",
+    "sanitization": {
+      "category": "purge",
+      "method": {
+        "kind": "ata_secure_erase",
+        "enhanced": true
+      },
+      "method_human": "ATA Secure Erase (Enhanced)",
+      "standard_refs": [
+        {
+          "standard": "NIST SP 800-88 Rev. 2",
+          "section": "decision flow + IEEE 2883 deferral"
+        },
+        {
+          "standard": "IEEE 2883-2022",
+          "section": "Clear / Purge / Destruct mappings"
+        }
+      ]
+    },
+    "activities": [
+      {
+        "type": "erasure",
+        "id": "d9edf7b2-ce72-43b5-8b22-dffcfc7bea26",
+        "device_snapshot": {
+          "id": "dev-sata-0",
+          "vendor": "Crucial",
+          "model": "MX500 1TB",
+          "serial": "203440FAILSIM",
+          "wwn": null,
+          "capacity_bytes": 1000000000000,
+          "media_type": "ssd_sata",
+          "bus": "sata",
+          "firmware": "M3CR046",
+          "removable": false,
+          "block_size": 512,
+          "path": "/dev/sda"
+        },
+        "capabilities_snapshot": {
+          "ata_security": {
+            "supported": true,
+            "enhanced_supported": true,
+            "estimated_minutes": 2,
+            "enhanced_estimated_minutes": 2,
+            "frozen": false
+          },
+          "nvme_sanitize": null,
+          "trim": true,
+          "crypto_erase_supported": false,
+          "sed": "none",
+          "hpa_present": false,
+          "dco_present": false,
+          "frozen": false
+        },
+        "spec": {
+          "device_id": "dev-sata-0",
+          "classification": "moderate",
+          "intent": "reuse",
+          "method": null,
+          "verify": true,
+          "verify_samples": 8,
+          "operator": {
+            "id": "op-1",
+            "display_name": "Alice",
+            "email": "alice@example.com"
+          },
+          "asset_tag": "A-2",
+          "site_label": "Lab",
+          "ticket_ref": "T-1"
+        },
+        "resolved_method": {
+          "kind": "ata_secure_erase",
+          "enhanced": true
+        },
+        "state": {
+          "state": "failed"
+        },
+        "progress": {
+          "fraction": 0.504648,
+          "eta_seconds": 0,
+          "stage": "running:ATA Secure Erase (Enhanced)",
+          "bytes_processed": 504647974912,
+          "bytes_total": 1000000000000
+        },
+        "events": [
+          {
+            "at": "2026-11-09T02:17:02.822519Z",
+            "event": {
+              "kind": "state_changed",
+              "from": {
+                "state": "probing"
+              },
+              "to": {
+                "state": "confirming"
+              }
+            }
+          },
+          {
+            "at": "2026-11-09T02:17:02.822523Z",
+            "event": {
+              "kind": "state_changed",
+              "from": {
+                "state": "confirming"
+              },
+              "to": {
+                "state": "running"
+              }
+            }
+          },
+          {
+            "at": "2026-11-09T02:17:02.822539Z",
+            "event": {
+              "kind": "command_issued",
+              "interface": "ata-passthrough",
+              "opcode": 244,
+              "action": null,
+              "raw_cdb": "f400",
+              "status": 0,
+              "duration_ms": 0,
+              "note": "issued (mock)"
+            }
+          },
+          {
+            "at": "2026-11-09T02:17:03.074875Z",
+            "event": {
+              "kind": "progress",
+              "fraction": 0.504648,
+              "eta_seconds": 0,
+              "stage": "running:ATA Secure Erase (Enhanced)",
+              "bytes_processed": 504647974912,
+              "bytes_total": 1000000000000
+            }
+          },
+          {
+            "at": "2026-11-09T02:17:03.074879Z",
+            "event": {
+              "kind": "command_result",
+              "interface": "ata-passthrough",
+              "opcode": 244,
+              "action": null,
+              "raw_cdb": "f400",
+              "status": 0,
+              "log_page": "3081020000000000",
+              "duration_ms": 0,
+              "note": "progress 50% (mock)"
+            }
+          },
+          {
+            "at": "2026-11-09T02:17:03.327328Z",
+            "event": {
+              "kind": "command_result",
+              "interface": "ata-passthrough",
+              "opcode": 244,
+              "action": null,
+              "raw_cdb": "f400",
+              "status": 0,
+              "log_page": "ffff010000000000",
+              "duration_ms": 0,
+              "note": "device returned error (mock)"
+            }
+          }
+        ],
+        "created_at": "2026-11-09T02:17:02.822504Z",
+        "started_at": "2026-11-09T02:17:02.822506Z",
+        "ended_at": "2026-11-09T02:17:03.32734Z",
+        "station_id": null
+      },
+      {
+        "type": "destruction",
+        "id": "84188375-92e5-4dff-a355-7a9b99506be0",
+        "device_id": "dev-sata-0",
+        "at": "2026-11-09T02:17:03.345398Z",
+        "method": "shred",
+        "operator": {
+          "id": "op-1",
+          "display_name": "Alice",
+          "email": "alice@example.com"
+        },
+        "supervisor": null,
+        "manifest_ref": null,
+        "photo_refs": [],
+        "notes": null,
+        "station_id": null,
+        "attestation": {
+          "at": "2026-11-09T02:17:03.345398Z",
+          "equipment_id": "SHR-2",
+          "location": "Bay 3",
+          "identifiers": {
+            "asset_tag": "A-2",
+            "serial": "203440FAILSIM",
+            "source": "device"
+          },
+          "signer": {
+            "operator": {
+              "id": "op-1",
+              "display_name": "Alice",
+              "email": "alice@example.com"
+            },
+            "full_name": "Alice Example",
+            "title": "Bench technician",
+            "identity_assurance": {
+              "level": "self_asserted"
+            }
+          },
+          "statement": "I, Alice Example, Bench technician, recorded the storage device(s) listed above for destruction by Shred using SHR-2 at Bay 3. I attest that the identifiers shown were captured from the devices themselves and that these devices are being placed into the destruction process now. I attest that the information provided on this statement is accurate to the best of my knowledge."
+        }
+      }
+    ],
+    "started_at": "2026-11-09T02:17:02.822433Z",
+    "ended_at": "2026-11-09T02:17:03.345482Z",
+    "duration_seconds": 0,
+    "validation": {
+      "validated": false,
+      "media_class": "ssd-sata",
+      "validation_ref": null,
+      "validation_expires": null
+    },
+    "media_status": {
+      "operational": false,
+      "damaged": false,
+      "notes": null
+    },
+    "evaluation": true
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "public_key_id": "ed25519:tgAwbPp2cj/ew5XlOps9nw",
+    "canonical_sha256_hex": "c7c528b15f942207daf0dd3827eb438ab74d2cea1caa0012e50fdc5071d804a5",
+    "signature_b64": "ohBT8SYPDbvjWKEzsjUhWdNpgRNta45VnaiFqktqXHjLs6MMesZjpqiCpvQKbPnzK5oa4bW14e2rJYfc4rNnDg"
+  },
+  "co_signatures": [
+    {
+      "signature": {
+        "algorithm": "ed25519",
+        "public_key_id": "ed25519:JvPPxOR/cDZmchQTzgfFDw",
+        "canonical_sha256_hex": "c7c528b15f942207daf0dd3827eb438ab74d2cea1caa0012e50fdc5071d804a5",
+        "signature_b64": "i/9PEvhZpq4A69WM6Zzgd8DDK0qwQVSyuWzQm/Vpe7axGxoAOAp+UAE3oJMjiVut90BjkC77PVOYDrjELkHCCA"
+      },
+      "role": "supervisor",
+      "manifest_ref": "869cc593-36a9-40a2-ba47-8ac1da83ac5a",
+      "signer": {
+        "id": "sup-1",
+        "display_name": "Sandra Supervisor",
+        "email": "sandra@example.com"
+      },
+      "signed_at": "2026-11-09T02:17:03.35053Z"
+    }
+  ]
+}

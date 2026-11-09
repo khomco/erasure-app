@@ -268,5 +268,8 @@ fn a_certificate_carries_its_disposition_and_category_alongside_the_chain() {
     let job = finished_job();
     let signed = sign(build_cert(&job, &instance, true), &instance).unwrap();
     assert_eq!(signed.certificate.disposition, AssetDisposition::Erased);
-    assert_eq!(signed.certificate.sanitization.category, Category::Purge);
+    assert_eq!(
+        signed.certificate.sanitization.category,
+        Some(Category::Purge)
+    );
 }

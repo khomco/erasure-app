@@ -595,37 +595,13 @@ pub async fn get_manifest(
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("manifest {id} not found")))
 }
 
-/// Jobs in `ids` with no stored certificate. A Job never reaches
-/// `Destroyed` uncertified (c779361), so assembly refuses these and
-/// completion re-checks them. Story 4 replaces this when it certifies at
-/// `Destroyed`: change it here, once.
-fn uncertified(state: &AppState, ids: &[Uuid]) -> Vec<Uuid> {
-    let certs = state.certs.read();
-    ids.iter()
-        .filter(|id| !certs.contains_key(id))
-        .copied()
-        .collect()
-}
-
-fn uncertified_err(ids: &[Uuid]) -> ApiError {
-    let names: Vec<String> = ids.iter().map(Uuid::to_string).collect();
-    ApiError(
-        StatusCode::CONFLICT,
-        format!(
-            "job(s) {} have no certificate yet: a drive erased moments ago may still be \
-             being certified, so retry; a drive recorded for destruction before any erasure \
-             cannot be certified as destroyed yet",
-            names.join(", ")
-        ),
-    )
-}
-
 /// Assemble a destruction run from N PendingDestruction Jobs. Every Job in
-/// `job_ids` must currently be in `PendingDestruction`, have a certificate
-/// and be on no other run. The run records the concurrence the station's
-/// policy requires now (`required_concurrence`). On success each Job's
-/// `manifest_id` and its latest DestructionEvent's `manifest_ref` carry the
-/// run's id; the stored certificates are untouched.
+/// `job_ids` must currently be in `PendingDestruction` and be on no other
+/// run; a drive that was never erased may join (ADR-0011 §2). The run
+/// records the concurrence the station's policy requires now
+/// (`required_concurrence`). On success each Job's `manifest_id` and its
+/// latest DestructionEvent's `manifest_ref` carry the run's id; nothing is
+/// certified until the run destroys its Jobs.
 pub async fn create_manifest(
     State(state): State<AppState>,
     Json(req): Json<CreateManifestRequest>,
@@ -671,11 +647,6 @@ pub async fn create_manifest(
                 format!("job {jid} is not pending destruction"),
             ));
         }
-    }
-    // A run containing a Job with no certificate could never complete.
-    let missing = uncertified(&state, &req.job_ids);
-    if !missing.is_empty() {
-        return Err(uncertified_err(&missing));
     }
     let manifest = DestructionManifest::new(
         req.assembled_by,
@@ -775,8 +746,8 @@ fn now_to_the_second() -> time::OffsetDateTime {
         .expect("0 is a valid nanosecond")
 }
 
-/// Every member Job must still be `PendingDestruction` and certified before
-/// the run is completed or concurred with. Refusals name the Jobs.
+/// Every member Job must still be `PendingDestruction` before the run is
+/// completed or concurred with. Refusals name the Jobs.
 fn check_members(state: &AppState, ids: &[Uuid]) -> Result<(), ApiError> {
     let mut problems = Vec::new();
     for jid in ids {
@@ -791,17 +762,43 @@ fn check_members(state: &AppState, ids: &[Uuid]) -> Result<(), ApiError> {
     if !problems.is_empty() {
         return Err(ApiError(StatusCode::CONFLICT, problems.join("; ")));
     }
-    let missing = uncertified(state, ids);
-    if !missing.is_empty() {
-        return Err(uncertified_err(&missing));
-    }
     Ok(())
+}
+
+/// No Job reaches `Destroyed` uncertifiable (c779361, ADR-0011 §2): before
+/// any member moves, build every member's destruction record against `run`
+/// exactly as it will be stored, which is what the cert generator signs.
+/// Refusals are 409 naming the Jobs.
+fn check_certifiable(state: &AppState, run: &DestructionManifest) -> Result<(), ApiError> {
+    let problems: Vec<String> = run
+        .job_ids
+        .iter()
+        .filter_map(|jid| match state.runner.get(*jid) {
+            None => Some(format!("job {jid} not found")),
+            Some(job) => wipe_cert::DestructionRecord::build(&job, run)
+                .err()
+                .map(|e| format!("{e}")),
+        })
+        .collect();
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(ApiError(
+        StatusCode::CONFLICT,
+        format!(
+            "cannot certify every drive on destruction run {}, so nothing changed: {}",
+            run.id,
+            problems.join("; ")
+        ),
+    ))
 }
 
 /// Apply `transition` to a copy of run `id` and commit it only if the
 /// transition, the member checks and (when the run is now done) the
-/// runner's all-or-nothing move to `Destroyed` all succeed. The manifests
-/// lock is held throughout, so two requests cannot both pass validation.
+/// certifiability preflight and the runner's all-or-nothing move to
+/// `Destroyed` all succeed. The manifests lock is held throughout, so two
+/// requests cannot both pass validation, and the cert generator (which reads
+/// the run on each Job's `Destroyed`) sees the run stored here.
 fn advance_run(
     state: &AppState,
     id: Uuid,
@@ -815,6 +812,7 @@ fn advance_run(
     transition(&mut next)?;
     check_members(state, &next.job_ids)?;
     if next.destroys_jobs() {
+        check_certifiable(state, &next)?;
         state
             .runner
             .mark_destroyed(&next.job_ids)
@@ -825,8 +823,9 @@ fn advance_run(
 }
 
 /// Confirm a destruction run's completion (ADR-0011 §1, second step). With
-/// no concurrence required every member Job becomes `Destroyed` at once;
-/// otherwise the run awaits its concurrence. Changes no certificate.
+/// no concurrence required every member Job becomes `Destroyed` at once and
+/// is certified then, asynchronously (the response may precede the
+/// certificate by moments); otherwise the run awaits its concurrence.
 pub async fn complete_manifest(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -870,7 +869,8 @@ pub async fn complete_manifest(
 
 /// Concur with a completed destruction run. The kind is the run's
 /// `required_concurrence`, never the client's; the signer must differ from
-/// the completion's. Every member Job then becomes `Destroyed`.
+/// the completion's. Every member Job then becomes `Destroyed` and is
+/// certified.
 pub async fn concur_manifest(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,

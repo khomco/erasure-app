@@ -1,11 +1,11 @@
 //! Detached Ed25519 signatures over canonical cert JSON.
 //!
-//! The primary signature is the station/operator signature attached at
-//! cert generation. `co_signatures` carry additional attestations —
-//! today, supervisor co-sign on Destroy certs (per ADR-0001 batched
-//! manifest co-sign). Each co-signer signs the same canonical Certificate
-//! bytes with their own key; the `manifest_ref` field records which
-//! `DestructionManifest` the co-sign was rolled into.
+//! The primary signature is the station signature attached at cert
+//! generation. `co_signatures` exist only so v2 certificates keep
+//! verifying: before ADR-0011 a supervisor co-signed the same canonical
+//! bytes of a destroyed drive's certificate. Nothing produces them any
+//! more; a v3 certificate carries any concurrence inside the signed bytes
+//! and `verify` refuses one with a co-signature.
 
 use base64::{engine::general_purpose::STANDARD_NO_PAD as B64, Engine as _};
 use ed25519_dalek::{
@@ -65,9 +65,8 @@ impl VerifyingKey {
 pub struct SignedCertificate {
     pub certificate: Certificate,
     pub signature: SignatureBlock,
-    /// Additional attestations on the same cert payload. Empty for Erased
-    /// certs; for Destroyed certs, contains at least one Supervisor co-sig
-    /// attached when the linked `DestructionManifest` is signed.
+    /// Pre-ADR-0011 supervisor co-signatures over the same payload, kept so
+    /// v2 certificates round-trip and verify. Always empty on v3.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub co_signatures: Vec<CoSignatureBlock>,
     /// Vendor attestation chain (ADR-0005). `None` is a valid, fully
@@ -94,8 +93,7 @@ pub struct CoSignatureBlock {
     pub signature: SignatureBlock,
     pub role: CoSignerRole,
     /// The DestructionManifest this co-signature was attached as part of,
-    /// when applicable. Always set for `Supervisor` co-sigs on Destroyed
-    /// certs.
+    /// when applicable (v2 only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_ref: Option<Uuid>,
     pub signer: OperatorRef,
@@ -106,7 +104,8 @@ pub struct CoSignatureBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoSignerRole {
-    /// Supervisor co-sign required for Destroyed certs (ADR-0001).
+    /// Supervisor co-sign on v2 destroyed certs (ADR-0001, amended by
+    /// ADR-0011).
     Supervisor,
     /// Auditor attestation. Future use.
     Auditor,
@@ -143,43 +142,18 @@ pub fn attach_attestation(signed: &mut SignedCertificate, attestation: serde_jso
     signed.attestation = Some(attestation);
 }
 
-/// Attach a co-signature to an already-signed certificate. Used for
-/// supervisor co-sign on Destroyed certs.
+/// Verify a signed certificate against a list of trusted public keys.
+/// Returns `Ok(matched-key-id)` on success. The one verifier: the CLI and
+/// the tests call it.
 ///
-/// The co-signer signs the same canonical Certificate bytes the primary
-/// signer used, so a verifier with the co-signer's public key can
-/// independently confirm "this party attested to this exact cert."
-pub fn co_sign(
-    signed: &mut SignedCertificate,
-    key: &SigningKey,
-    role: CoSignerRole,
-    signer: OperatorRef,
-    manifest_ref: Option<Uuid>,
-) -> CertResult<()> {
-    let bytes = canonical_bytes(&signed.certificate)?;
-    let sig: Ed25519Signature = key.0.sign(&bytes);
-    let digest = Sha256::digest(&bytes);
-    signed.co_signatures.push(CoSignatureBlock {
-        signature: SignatureBlock {
-            algorithm: "ed25519".into(),
-            public_key_id: key.public_key_id(),
-            canonical_sha256_hex: hex::encode(digest),
-            signature_b64: B64.encode(sig.to_bytes()),
-        },
-        role,
-        manifest_ref,
-        signer,
-        signed_at: time::OffsetDateTime::now_utc(),
-    });
-    Ok(())
-}
-
-/// Verify a signed certificate's primary signature against a list of
-/// trusted public keys. Returns `Ok(matched-key-id)` on success.
-///
-/// Co-signatures are verified separately via `verify_co_signatures`.
+/// First the primary signature, then the content, by `cert_format_version`:
+/// v2 is signature-only, as it always was; v3 also refuses self-contradicting
+/// content (see [`crate::check`]); any other version is refused by name.
+/// v2 co-signatures are verified separately via `verify_co_signatures`.
 pub fn verify(signed: &SignedCertificate, trusted: &[VerifyingKey]) -> CertResult<String> {
-    verify_one(&signed.certificate, &signed.signature, trusted)
+    let key_id = verify_one(&signed.certificate, &signed.signature, trusted)?;
+    crate::check::check_contents(signed)?;
+    Ok(key_id)
 }
 
 /// Verify every co-signature against a list of trusted public keys.

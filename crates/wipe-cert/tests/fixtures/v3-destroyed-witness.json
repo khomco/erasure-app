@@ -1,0 +1,158 @@
+{
+  "certificate": {
+    "@context": "https://wipestation.dev/contexts/sanitization-cert-v3",
+    "type": "SanitizationCertificate",
+    "id": "urn:uuid:9b128136-1d92-4c6a-8cdb-098bfb46db2b",
+    "cert_format_version": 3,
+    "issuer": {
+      "tool_name": "wipestation",
+      "tool_version": "0.1.0",
+      "public_key_id": "ed25519:tgAwbPp2cj/ew5XlOps9nw"
+    },
+    "issued_at": "2026-11-09T02:52:32.456503Z",
+    "job_id": "9f00fa24-3a24-48fc-8ef9-1a86967db3fa",
+    "operator": {
+      "id": "op-1",
+      "display_name": "Ana",
+      "email": "op-1@example.com"
+    },
+    "spec": {
+      "classification": "low",
+      "intent": "destroy",
+      "asset_tag": "AT-DEAD-89cd9d21ede2424a9197c40bebb9f420-0",
+      "ticket_ref": null,
+      "site_label": "Lab"
+    },
+    "disposition": "destroyed",
+    "sanitization": {
+      "category": "destroy",
+      "method": {
+        "kind": "destroy",
+        "method": "melt"
+      },
+      "method_human": "Physical destruction — Melt",
+      "standard_refs": [
+        {
+          "standard": "NIST SP 800-88 Rev. 2",
+          "section": "§3.1.3 Destroy techniques"
+        },
+        {
+          "standard": "NIST SP 800-88 Rev. 2",
+          "section": "§4.6 certificate of sanitization"
+        }
+      ]
+    },
+    "destruction": {
+      "manifest_id": "8626287b-21a6-42df-aac3-5168345a2133",
+      "destruction_event_id": "252799d0-3750-4879-beb3-3cbffba6cdb3",
+      "technique": "melt",
+      "standard_label": "NIST SP 800-88 Destroy",
+      "nist_destroy": true,
+      "completion": {
+        "completed_at": "2026-11-09T02:52:32Z",
+        "verification": {
+          "remnants_inspected": true,
+          "equipment_cycle_completed": true,
+          "equipment_id": "SHR-2",
+          "criterion": "particles no larger than 2 mm"
+        },
+        "video_ref": "CAM-4",
+        "signer": {
+          "operator": {
+            "id": "op-1",
+            "display_name": "Ana",
+            "email": "op-1@example.com"
+          },
+          "full_name": "Ana Ruiz",
+          "title": "Bench lead",
+          "identity_assurance": {
+            "level": "self_asserted"
+          }
+        },
+        "statement": "Destruction of the device(s) listed above was completed on 2026-11-09T02:52:32Z. Verification: the remnants were inspected and the equipment SHR-2 completed its cycle; the result meets particles no larger than 2 mm. Video reference: CAM-4."
+      },
+      "required_concurrence": "witness",
+      "concurrence": {
+        "kind": "witness",
+        "manifest_id": "8626287b-21a6-42df-aac3-5168345a2133",
+        "at": "2026-11-09T02:52:32.45645Z",
+        "signer": {
+          "operator": {
+            "id": "op-2",
+            "display_name": "Bo",
+            "email": "op-2@example.com"
+          },
+          "full_name": "Bo Chen",
+          "title": "Site supervisor",
+          "identity_assurance": {
+            "level": "self_asserted"
+          }
+        },
+        "statement": "I, Bo Chen, Site supervisor, witnessed the destruction for manifest 8626287b-21a6-42df-aac3-5168345a2133 and concur that the devices listed were destroyed as stated."
+      }
+    },
+    "activities": [
+      {
+        "type": "destruction",
+        "id": "252799d0-3750-4879-beb3-3cbffba6cdb3",
+        "device_id": "scanned:DEAD-89cd9d21ede2424a9197c40bebb9f420-0",
+        "at": "2026-11-09T02:52:32.456366Z",
+        "method": "melt",
+        "operator": {
+          "id": "op-1",
+          "display_name": "Ana",
+          "email": "op-1@example.com"
+        },
+        "supervisor": null,
+        "manifest_ref": "8626287b-21a6-42df-aac3-5168345a2133",
+        "photo_refs": [],
+        "notes": null,
+        "station_id": null,
+        "attestation": {
+          "at": "2026-11-09T02:52:32.456366Z",
+          "equipment_id": "SHR-2",
+          "location": "Bay 3",
+          "identifiers": {
+            "asset_tag": "AT-DEAD-89cd9d21ede2424a9197c40bebb9f420-0",
+            "serial": "DEAD-89cd9d21ede2424a9197c40bebb9f420-0",
+            "source": "scanned"
+          },
+          "signer": {
+            "operator": {
+              "id": "op-1",
+              "display_name": "Ana",
+              "email": "op-1@example.com"
+            },
+            "full_name": "Ana Ruiz",
+            "title": "Bench lead",
+            "identity_assurance": {
+              "level": "self_asserted"
+            }
+          },
+          "statement": "I, Ana Ruiz, Bench lead, recorded the storage device(s) listed above for destruction by Melt using SHR-2 at Bay 3. I attest that the identifiers shown were captured from the devices themselves and that these devices are being placed into the destruction process now. I attest that the information provided on this statement is accurate to the best of my knowledge."
+        }
+      }
+    ],
+    "started_at": "2026-11-09T02:52:32.456407Z",
+    "ended_at": "2026-11-09T02:52:32.456461Z",
+    "duration_seconds": 0,
+    "validation": {
+      "validated": false,
+      "media_class": "unknown",
+      "validation_ref": null,
+      "validation_expires": null
+    },
+    "media_status": {
+      "operational": false,
+      "damaged": true,
+      "notes": null
+    },
+    "evaluation": true
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "public_key_id": "ed25519:tgAwbPp2cj/ew5XlOps9nw",
+    "canonical_sha256_hex": "ce4ea7f8766077a9f9f77a7b8442e552fbe722b13e2ccc77bb05000dd37289a5",
+    "signature_b64": "ZT6Kr07UIynvTU5QGP7d7m5s8SQSYc9DbYGUrraWEGgvOf2SGo3CFVycl+yMiR8e9ztYza/g2gyjmZM0cGLuDQ"
+  }
+}

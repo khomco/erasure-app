@@ -73,10 +73,8 @@ function JobBody({
     job.state.state === "destroyed" ||
     job.state.state === "quarantined" ||
     job.state.state === "aborted";
-  const showCert =
-    job.state.state === "erased" ||
-    job.state.state === "destroyed" ||
-    job.state.state === "pending_destruction";
+  // Certified once, at Erased or Destroyed; nothing at pending destruction.
+  const showCert = job.state.state === "erased" || job.state.state === "destroyed";
 
   return (
     <div className="space-y-4">

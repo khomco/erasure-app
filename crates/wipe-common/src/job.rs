@@ -162,11 +162,9 @@ pub struct VerificationEvent {
     pub station_id: Option<StationId>,
 }
 
-/// Physical destruction chain-of-custody record. Populated when an Asset
-/// can no longer be erased and must be physically destroyed.
-///
-/// v0.2 ships the schema + Tier-1 local-sync supervisor co-sign. The
-/// full async DocuSign-style supervisor flow (Tier-2 cloud) is deferred.
+/// Physical destruction chain-of-custody record: the operator recorded the
+/// Asset for destruction (ADR-0011 §1). The certificate signed when the Job
+/// reaches `Destroyed` names this event from its `destruction` block.
 /// Photo references are optional URIs; the full chain-of-custody UX
 /// (photo capture, evidence handling) is v0.3 #12.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,13 +176,11 @@ pub struct DestructionEvent {
     pub method: crate::DestructMethod,
     /// Operator who physically processed the destruction.
     pub operator: OperatorRef,
-    /// Optional supervisor identity if co-signed in-line (Tier 1 local
-    /// flow). For batched manifest co-sign, the supervisor is recorded
-    /// on the DestructionManifest and the cert carries a supervisor
-    /// signature via `manifest_ref`.
+    /// Pre-ADR-0011 in-line supervisor; nothing sets it now. Kept so v2
+    /// certificates round-trip.
     pub supervisor: Option<OperatorRef>,
-    /// Manifest this DestructionEvent was rolled into for batched co-sign,
-    /// when applicable.
+    /// The destruction run (DestructionManifest) this event was assembled
+    /// onto; signed into the certificate at `Destroyed`.
     pub manifest_ref: Option<Uuid>,
     /// Optional photo/video evidence URIs. Schema-only in v0.2.
     #[serde(default)]
@@ -484,9 +480,7 @@ impl DestructionManifest {
             .as_ref()
             .expect("an AwaitingConcurrence run has a completion")
             .signer;
-        if completer.operator.id == concurrence.signer.operator.id
-            || same_name(&completer.full_name, &concurrence.signer.full_name)
-        {
+        if crate::same_signer(completer, &concurrence.signer) {
             return Err(ManifestTransitionError::SameSigner);
         }
         self.state = ManifestState::Completed;
@@ -506,16 +500,6 @@ impl DestructionManifest {
     pub fn destroys_jobs(&self) -> bool {
         self.state == ManifestState::Completed
     }
-}
-
-fn same_name(a: &str, b: &str) -> bool {
-    let norm = |s: &str| {
-        s.split_whitespace()
-            .map(str::to_lowercase)
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    norm(a) == norm(b)
 }
 
 #[cfg(test)]

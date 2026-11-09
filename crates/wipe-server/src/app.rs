@@ -206,11 +206,13 @@ impl AppState {
         Ok(topology)
     }
 
-    /// Watches the job runner's broadcast channel. On `Erased`, generates +
-    /// signs a Certificate. On `PendingDestruction` we generate the cert and
-    /// hold it; completing the destruction run (and any required
-    /// concurrence) later moves the Job to `Destroyed` without touching the
-    /// cert (see `handlers::complete_manifest`). No co-signature is appended.
+    /// Watches the job runner's broadcast channel and signs a Certificate,
+    /// once, when a Job reaches `Erased` or `Destroyed` (ADR-0011 §2).
+    /// Entering `PendingDestruction` signs nothing. A destroyed Job's
+    /// certificate carries its destruction run's completion and any
+    /// concurrence; the run is read from `manifests`, where `advance_run`
+    /// stores it under the same lock it holds while the Jobs move, so the
+    /// stored run is the one the preflight built every record against.
     fn spawn_cert_generator(&self) {
         let mut rx = self.runner.subscribe();
         let state = self.clone();
@@ -222,7 +224,7 @@ impl AppState {
                 };
                 let needs_cert = matches!(
                     new_state,
-                    wipe_common::JobState::Erased | wipe_common::JobState::PendingDestruction
+                    wipe_common::JobState::Erased | wipe_common::JobState::Destroyed
                 );
                 if !needs_cert {
                     continue;
@@ -230,10 +232,11 @@ impl AppState {
                 let Some(job) = state.runner.get(job_id) else {
                     continue;
                 };
-                let Some(device) = job.latest_erasure().map(|e| e.device_snapshot.clone()) else {
+                let device = job.latest_erasure().map(|e| e.device_snapshot.clone());
+                if device.is_none() && new_state == wipe_common::JobState::Erased {
                     tracing::warn!(%job_id, "no erasure activity; skipping cert generation");
                     continue;
-                };
+                }
                 let issuer = wipe_cert::CertIssuer {
                     tool_name: "wipestation".into(),
                     tool_version: state.tool_version.clone(),
@@ -241,50 +244,60 @@ impl AppState {
                 };
                 let validation = wipe_cert::ValidationBlock {
                     validated: false,
-                    media_class: device.media_type.class_label().into(),
+                    media_class: device
+                        .as_ref()
+                        .map(|d| d.media_type.class_label())
+                        .unwrap_or("unknown")
+                        .into(),
                     validation_ref: None,
                     validation_expires: None,
                 };
+                let destroyed = new_state == wipe_common::JobState::Destroyed;
                 let media_status = wipe_cert::MediaStatus {
-                    operational: !matches!(new_state, wipe_common::JobState::PendingDestruction),
-                    damaged: false,
+                    operational: !destroyed,
+                    damaged: destroyed,
                     notes: None,
                 };
-                // For PendingDestruction we temporarily synthesize a Destroyed
-                // disposition on the cert so the document is meaningful;
-                // completing the destruction run finalises the Job to Destroyed.
-                let mut job_for_cert = job.clone();
-                if new_state == wipe_common::JobState::PendingDestruction {
-                    job_for_cert.state = wipe_common::JobState::Destroyed;
-                    if job_for_cert.ended_at.is_none() {
-                        job_for_cert.ended_at = Some(time::OffsetDateTime::now_utc());
-                    }
-                }
-                // A DestructionEvent's `manifest_ref` is stamped on the live
-                // Job at assembly and never belongs in the signed bytes. The
-                // generator runs after the record request has returned, so a
-                // manifest assembled in that gap would otherwise be signed in;
-                // clear it so the certificate does not depend on request timing.
-                for activity in &mut job_for_cert.activities {
-                    if let wipe_common::JobActivity::Destruction(ev) = activity {
-                        ev.manifest_ref = None;
-                    }
-                }
                 // ADR-0005: licensing decides how the cert is *marked*, never
                 // whether the erasure happened. An unlicensed, expired or
                 // quota-exhausted station still signs — the cert just says so.
                 let decision = state
                     .license()
                     .signing_decision(time::OffsetDateTime::now_utc());
-                let Some(cert) = wipe_cert::Certificate::from_job(
-                    &job_for_cert,
-                    issuer,
-                    validation,
-                    media_status,
-                    decision.evaluation,
-                ) else {
-                    tracing::warn!(%job_id, "Certificate::from_job returned None");
-                    continue;
+                let cert = if destroyed {
+                    let run = job
+                        .manifest_id
+                        .and_then(|mid| state.manifests.read().get(&mid).cloned());
+                    let Some(run) = run else {
+                        tracing::error!(%job_id, "destroyed job has no destruction run; no cert");
+                        continue;
+                    };
+                    match wipe_cert::Certificate::from_destroyed_job(
+                        &job,
+                        &run,
+                        issuer,
+                        validation,
+                        media_status,
+                        decision.evaluation,
+                    ) {
+                        Ok(cert) => cert,
+                        Err(e) => {
+                            tracing::error!(?e, %job_id, "destroyed job is uncertifiable");
+                            continue;
+                        }
+                    }
+                } else {
+                    let Some(cert) = wipe_cert::Certificate::from_job(
+                        &job,
+                        issuer,
+                        validation,
+                        media_status,
+                        decision.evaluation,
+                    ) else {
+                        tracing::warn!(%job_id, "Certificate::from_job returned None");
+                        continue;
+                    };
+                    cert
                 };
                 match wipe_cert::sign(cert, &state.signing_key) {
                     Ok(mut signed) => {
@@ -296,7 +309,8 @@ impl AppState {
                                 "certificate marked evaluation (no valid licence)"
                             );
                         }
-                        if !decision.evaluation {
+                        // Only drives that were erased count, as at baseline.
+                        if !decision.evaluation && job.latest_erasure().is_some() {
                             state.license().record_erasure();
                         }
                         info!(%job_id, ?new_state, evaluation = decision.evaluation,

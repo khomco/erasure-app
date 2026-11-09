@@ -1,0 +1,142 @@
+{
+  "certificate": {
+    "@context": "https://wipestation.dev/contexts/sanitization-cert-v3",
+    "type": "SanitizationCertificate",
+    "id": "urn:uuid:66dd0325-c80a-44d4-a469-131960476610",
+    "cert_format_version": 3,
+    "issuer": {
+      "tool_name": "wipestation",
+      "tool_version": "0.1.0",
+      "public_key_id": "ed25519:tgAwbPp2cj/ew5XlOps9nw"
+    },
+    "issued_at": "2026-11-09T02:52:32.452725Z",
+    "job_id": "da42c05a-cbbc-4b5c-86fc-3ab48028e23c",
+    "operator": {
+      "id": "op-1",
+      "display_name": "Ana",
+      "email": "op-1@example.com"
+    },
+    "spec": {
+      "classification": "moderate",
+      "intent": "destroy",
+      "asset_tag": "AT-DEAD-ae31fd7001dc40b59326190e5b139f38-0",
+      "ticket_ref": null,
+      "site_label": "Lab"
+    },
+    "disposition": "destroyed",
+    "sanitization": {
+      "category": "destroy",
+      "method": {
+        "kind": "destroy",
+        "method": "shred"
+      },
+      "method_human": "Physical destruction — Shred",
+      "standard_refs": [
+        {
+          "standard": "NIST SP 800-88 Rev. 2",
+          "section": "§3.1.3 Destroy techniques"
+        },
+        {
+          "standard": "NIST SP 800-88 Rev. 2",
+          "section": "§4.6 certificate of sanitization"
+        }
+      ]
+    },
+    "destruction": {
+      "manifest_id": "8f7313da-5023-48b4-9495-14d48ad068e0",
+      "destruction_event_id": "46d523b4-af66-4e0e-8135-da4318472771",
+      "technique": "shred",
+      "standard_label": "NIST SP 800-88 Destroy",
+      "nist_destroy": true,
+      "caution": "NIST SP 800-88 Rev. 2: shred and pulverize should be avoided for anything but the lowest security categories.",
+      "completion": {
+        "completed_at": "2026-11-09T02:52:32Z",
+        "verification": {
+          "remnants_inspected": true,
+          "equipment_cycle_completed": true,
+          "equipment_id": "SHR-2",
+          "criterion": "particles no larger than 2 mm"
+        },
+        "video_ref": "CAM-4",
+        "signer": {
+          "operator": {
+            "id": "op-1",
+            "display_name": "Ana",
+            "email": "op-1@example.com"
+          },
+          "full_name": "Ana Ruiz",
+          "title": "Bench lead",
+          "identity_assurance": {
+            "level": "self_asserted"
+          }
+        },
+        "statement": "Destruction of the device(s) listed above was completed on 2026-11-09T02:52:32Z. Verification: the remnants were inspected and the equipment SHR-2 completed its cycle; the result meets particles no larger than 2 mm. Video reference: CAM-4."
+      },
+      "required_concurrence": null,
+      "concurrence": null
+    },
+    "activities": [
+      {
+        "type": "destruction",
+        "id": "46d523b4-af66-4e0e-8135-da4318472771",
+        "device_id": "scanned:DEAD-ae31fd7001dc40b59326190e5b139f38-0",
+        "at": "2026-11-09T02:52:32.452084Z",
+        "method": "shred",
+        "operator": {
+          "id": "op-1",
+          "display_name": "Ana",
+          "email": "op-1@example.com"
+        },
+        "supervisor": null,
+        "manifest_ref": "8f7313da-5023-48b4-9495-14d48ad068e0",
+        "photo_refs": [],
+        "notes": null,
+        "station_id": null,
+        "attestation": {
+          "at": "2026-11-09T02:52:32.452084Z",
+          "equipment_id": "SHR-2",
+          "location": "Bay 3",
+          "identifiers": {
+            "asset_tag": "AT-DEAD-ae31fd7001dc40b59326190e5b139f38-0",
+            "serial": "DEAD-ae31fd7001dc40b59326190e5b139f38-0",
+            "source": "scanned"
+          },
+          "signer": {
+            "operator": {
+              "id": "op-1",
+              "display_name": "Ana",
+              "email": "op-1@example.com"
+            },
+            "full_name": "Ana Ruiz",
+            "title": "Bench lead",
+            "identity_assurance": {
+              "level": "self_asserted"
+            }
+          },
+          "statement": "I, Ana Ruiz, Bench lead, recorded the storage device(s) listed above for destruction by Shred using SHR-2 at Bay 3. I attest that the identifiers shown were captured from the devices themselves and that these devices are being placed into the destruction process now. I attest that the information provided on this statement is accurate to the best of my knowledge."
+        }
+      }
+    ],
+    "started_at": "2026-11-09T02:52:32.452303Z",
+    "ended_at": "2026-11-09T02:52:32.452489Z",
+    "duration_seconds": 0,
+    "validation": {
+      "validated": false,
+      "media_class": "unknown",
+      "validation_ref": null,
+      "validation_expires": null
+    },
+    "media_status": {
+      "operational": false,
+      "damaged": true,
+      "notes": null
+    },
+    "evaluation": true
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "public_key_id": "ed25519:tgAwbPp2cj/ew5XlOps9nw",
+    "canonical_sha256_hex": "019ed0e4b9fbadd4c8f9fb7db0998fcec40ce410ca88ce84a0ab54fc410f91d7",
+    "signature_b64": "1aeeny8OmkBwVg9KD6EH9v2C+EBcen0OKOi0zGjFpUEB0AsCHBh5vpxQewIp9dOXK/0aGT/+MS5mb0JLyltDCA"
+  }
+}

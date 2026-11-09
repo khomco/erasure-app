@@ -139,7 +139,8 @@ async fn full_http_flow_completes_with_signed_cert() {
         "alice@example.com"
     );
     assert_eq!(signed["certificate"]["disposition"], "erased");
-    assert_eq!(signed["certificate"]["cert_format_version"], 2);
+    assert_eq!(signed["certificate"]["cert_format_version"], 3);
+    assert!(signed["certificate"].get("destruction").is_none());
     assert_eq!(signed["signature"]["algorithm"], "ed25519");
     // Activity chain should be carried on the cert.
     let activities = signed["certificate"]["activities"].as_array().unwrap();
@@ -319,7 +320,7 @@ async fn a_job_cannot_be_on_two_manifests() {
     let base = spawn_server().await;
     let client = reqwest::Client::new();
     let op = http_op();
-    let job_id = http_certified_pending_job(&client, &base, "dev-nvme-0").await;
+    let job_id = http_pending_job(&client, &base, "dev-nvme-0").await;
 
     let first = client
         .post(format!("{base}/api/manifests"))
@@ -441,391 +442,108 @@ async fn a_refused_manifest_links_no_job() {
 }
 
 /// Once a Job is on a destruction run, the record the run's completion
-/// covers is fixed: recording it again is refused, appends no
-/// DestructionEvent and leaves the stored certificate in place.
+/// covers is fixed: recording it again is refused and appends no
+/// DestructionEvent.
 #[tokio::test]
 async fn re_recording_a_job_on_a_manifest_is_refused() {
     let base = spawn_server().await;
     let client = reqwest::Client::new();
-    let op = json!({ "id": "op-1", "display_name": "Alice", "email": "alice@example.com" });
+    let job_id = http_pending_job(&client, &base, "dev-nvme-0").await;
+    let run = http_assemble(&client, &base, std::slice::from_ref(&job_id)).await;
+    let manifest_id = run["id"].as_str().unwrap();
 
-    let created: serde_json::Value = client
-        .post(format!("{base}/api/jobs"))
-        .json(&json!({
-            "device_id": "dev-nvme-0",
-            "classification": "high",
-            "intent": "destroy",
-            "operator": op,
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let job_id = created["job_id"].as_str().unwrap().to_string();
-    client
-        .post(format!("{base}/api/jobs/{job_id}/start"))
-        .send()
-        .await
-        .unwrap();
-    // The certificate needs an erasure activity to snapshot the device.
-    let mut has_erasure = false;
-    for _ in 0..100 {
-        let job: serde_json::Value = client
-            .get(format!("{base}/api/jobs/{job_id}"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        if job["activities"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|x| x["type"] == "erasure"))
-        {
-            has_erasure = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(has_erasure, "job never gained an erasure activity");
-
-    let resp = client
-        .post(format!("{base}/api/jobs/{job_id}/record-for-destruction"))
-        .json(&attested("disintegrate", op.clone()))
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success());
-
-    let mut cert: Option<serde_json::Value> = None;
-    for _ in 0..100 {
-        let resp = client
-            .get(format!("{base}/api/jobs/{job_id}/certificate"))
-            .send()
-            .await
-            .unwrap();
-        if resp.status().is_success() {
-            cert = Some(resp.json().await.unwrap());
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let cert = cert.expect("certificate generated at pending_destruction");
-
-    let resp = client
-        .post(format!("{base}/api/manifests"))
-        .json(&json!({ "assembled_by": op, "job_ids": [job_id] }))
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success());
-    let before: serde_json::Value = client
-        .get(format!("{base}/api/jobs/{job_id}"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-
-    let resp = client
-        .post(format!("{base}/api/jobs/{job_id}/record-for-destruction"))
-        .json(&attested("shred", op.clone()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        409,
-        "re-recording a linked job must be a conflict"
-    );
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let manifest_id = before["manifest_id"].as_str().unwrap();
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/record-for-destruction"),
+        Some(attested("disintegrate", http_op())),
+    )
+    .await;
+    assert_eq!(status, 409, "re-recording a linked job must be a conflict");
     let message = body["error"].as_str().unwrap_or_default();
     assert!(
         message.contains("destruction manifest") && message.contains(manifest_id),
         "refusal should name the destruction manifest, got {body}"
     );
-
-    // Give a (wrongly emitted) state change time to re-sign before checking.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let after: serde_json::Value = client
-        .get(format!("{base}/api/jobs/{job_id}"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    // Count destruction activities only: the erasure is still running in
-    // the background and may append its own activities meanwhile.
-    let destructions = |job: &serde_json::Value| {
-        job["activities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|a| a["type"] == "destruction")
-            .count()
-    };
-    assert_eq!(destructions(&after), 1);
-    assert_eq!(destructions(&before), 1);
-    assert_eq!(latest_destruction(&after)["method"], "disintegrate");
-    let cert_after: serde_json::Value = client
-        .get(format!("{base}/api/jobs/{job_id}/certificate"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(cert_after["signature"], cert["signature"]);
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(count_activities(&job, "destruction"), 1);
+    assert_eq!(latest_destruction(&job)["method"], "shred");
+    assert_eq!(latest_destruction(&job)["manifest_ref"], manifest_id);
 }
 
-/// Wire shape of the manifest link over HTTP: the certificate's destruction
-/// activity has `manifest_ref` null while the live Job carries it. Assembly
-/// waits for the certificate (a run never holds an uncertified Job), so
-/// over HTTP the certificate is always signed first; the generator's strip
-/// is proven by `certificate_signed_after_linking_still_omits_the_manifest`.
+/// Recording for destruction, and assembling a run, sign nothing
+/// (ADR-0011 §2): the certificate waits for `Destroyed`.
 #[tokio::test]
-async fn a_manifest_assembled_before_the_certificate_is_signed_stays_out_of_it() {
+async fn recording_for_destruction_signs_no_certificate() {
     let base = spawn_server().await;
     let client = reqwest::Client::new();
-    let op = json!({ "id": "op-1", "display_name": "Alice", "email": "alice@example.com" });
-
-    let created: serde_json::Value = client
-        .post(format!("{base}/api/jobs"))
-        .json(&json!({
-            "device_id": "dev-nvme-0",
-            "classification": "high",
-            "intent": "destroy",
-            "operator": op,
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let job_id = created["job_id"].as_str().unwrap().to_string();
-    client
-        .post(format!("{base}/api/jobs/{job_id}/start"))
-        .send()
-        .await
-        .unwrap();
-    // The certificate needs an erasure activity to snapshot the device.
-    let mut has_erasure = false;
-    for _ in 0..100 {
-        let job: serde_json::Value = client
-            .get(format!("{base}/api/jobs/{job_id}"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        if job["activities"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|x| x["type"] == "erasure"))
-        {
-            has_erasure = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+    let erased_first = http_pending_job(&client, &base, "dev-nvme-0").await;
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/destruction/records"),
+        Some(group_body(json!([{ "serial": "DEAD-1" }]))),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let scanned = body["job_ids"][0].as_str().unwrap().to_owned();
+    let ids = [erased_first, scanned];
+    // Give a (wrongly triggered) generator time to sign.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    for id in &ids {
+        let (status, _) = http_get(&client, format!("{base}/api/jobs/{id}/certificate")).await;
+        assert_eq!(status, 404, "job {id} was certified at pending_destruction");
     }
-    assert!(has_erasure, "job never gained an erasure activity");
-
-    let resp = client
-        .post(format!("{base}/api/jobs/{job_id}/record-for-destruction"))
-        .json(&attested("shred", op.clone()))
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success());
-    // Assemble at once. Until the certificate is signed, assembly refuses
-    // the Job (409 naming it), so the run is retried until it is accepted.
-    let mut manifest_id = None;
-    for _ in 0..100 {
-        let (status, body) = http_post(
-            &client,
-            format!("{base}/api/manifests"),
-            Some(json!({ "assembled_by": op, "job_ids": [job_id] })),
-        )
-        .await;
-        if status == 200 {
-            manifest_id = Some(body["id"].as_str().unwrap().to_string());
-            break;
-        }
-        assert_eq!(status, 409, "{body}");
-        let message = body["error"].as_str().unwrap();
-        assert!(
-            message.contains(&job_id) && message.contains("no certificate"),
-            "{body}"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+    http_assemble(&client, &base, &ids).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    for id in &ids {
+        let (status, _) = http_get(&client, format!("{base}/api/jobs/{id}/certificate")).await;
+        assert_eq!(status, 404, "job {id} was certified at assembly");
     }
-    let manifest_id = manifest_id.expect("manifest stored once the certificate exists");
-
-    let mut cert: Option<serde_json::Value> = None;
-    for _ in 0..100 {
-        let resp = client
-            .get(format!("{base}/api/jobs/{job_id}/certificate"))
-            .send()
-            .await
-            .unwrap();
-        if resp.status().is_success() {
-            cert = Some(resp.json().await.unwrap());
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let cert = cert.expect("certificate generated at pending_destruction");
-    let signed_destructions: Vec<&serde_json::Value> = cert["certificate"]["activities"]
-        .as_array()
-        .expect("certificate has activities")
-        .iter()
-        .filter(|a| a["type"] == "destruction")
-        .collect();
-    assert_eq!(signed_destructions.len(), 1);
-    assert!(
-        signed_destructions[0]["manifest_ref"].is_null(),
-        "signed certificate carries the manifest link: {}",
-        signed_destructions[0]
-    );
-
-    let job: serde_json::Value = client
-        .get(format!("{base}/api/jobs/{job_id}"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(job["manifest_id"], manifest_id.as_str());
-    assert_eq!(
-        latest_destruction(&job)["manifest_ref"],
-        manifest_id.as_str()
-    );
 }
 
-/// Deterministic companion to the test above: over HTTP the certificate
-/// generator usually wins the race, so this drives `AppState` directly and
-/// links the Job before the generator task can run at all (the
-/// single-threaded test runtime does not poll it until we yield).
+/// The destroyed certificate signs the run link: its Destruction activity's
+/// `manifest_ref` and its `destruction.manifest_id` both name the run.
 #[tokio::test]
-async fn certificate_signed_after_linking_still_omits_the_manifest() {
-    use wipe_common::{
-        AttestationSigner, Classification, DestructMethod, DestructionAttestation,
-        DestructionEvent, DeviceId, IdentifierSource, Intent, JobSpec, OperatorRef,
-        RecordedIdentifiers,
-    };
+async fn a_destroyed_certificate_signs_the_run_link() {
+    let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;
+    let client = reqwest::Client::new();
+    let job_id = http_pending_job(&client, &base, "dev-nvme-0").await;
+    let run = http_assemble(&client, &base, std::slice::from_ref(&job_id)).await;
+    let run_id = run["id"].as_str().unwrap();
+    let (status, done) = http_post(
+        &client,
+        format!("{base}/api/manifests/{run_id}/completion"),
+        Some(completion_body()),
+    )
+    .await;
+    assert_eq!(status, 200, "{done}");
 
-    let backend = Arc::new(MockBackend::with_catalog(
-        wipe_engine_mock::default_devices_public(),
-        MockTiming::fast(),
-    ));
-    let state = AppState::new(backend, None, Arc::new(SigningKey::generate()));
-    let op = OperatorRef {
-        id: "op-1".into(),
-        display_name: "Alice".into(),
-        email: "alice@example.com".into(),
-    };
-    let device = DeviceId("dev-nvme-0".into());
-    let job_id = state
-        .runner
-        .create_job(JobSpec {
-            device_id: device.clone(),
-            classification: Classification::High,
-            intent: Intent::Destroy,
-            operator: op.clone(),
-            asset_tag: None,
-            site_label: None,
-            ticket_ref: None,
-            work_order_ref: None,
-            customer_ref: None,
-            contract_ref: None,
-            sanitization_profile_ref: None,
-        })
-        .await
-        .unwrap();
-    state.runner.start(job_id).unwrap();
-    // The certificate needs an erasure activity to snapshot the device.
-    let mut has_erasure = false;
-    for _ in 0..100 {
-        if state.runner.get(job_id).unwrap().latest_erasure().is_some() {
-            has_erasure = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    assert!(has_erasure, "job never gained an erasure activity");
-
-    // No await between these two calls: the generator sees the linked Job.
-    state
-        .runner
-        .record_for_destruction(
-            job_id,
-            DestructionEvent {
-                id: uuid::Uuid::new_v4(),
-                device_id: device,
-                at: time::OffsetDateTime::now_utc(),
-                method: DestructMethod::Shred,
-                operator: op.clone(),
-                supervisor: None,
-                manifest_ref: None,
-                photo_refs: Vec::new(),
-                notes: None,
-                station_id: None,
-                attestation: Some(
-                    DestructionAttestation::new(
-                        DestructMethod::Shred,
-                        time::OffsetDateTime::now_utc(),
-                        "SHR-2",
-                        "Bay 3",
-                        RecordedIdentifiers {
-                            asset_tag: None,
-                            serial: Some("S6ABNX0W123456".into()),
-                            source: IdentifierSource::Device,
-                        },
-                        AttestationSigner::self_asserted(op.clone(), "Alice", "Bench lead")
-                            .unwrap(),
-                    )
-                    .unwrap(),
-                ),
-            },
-        )
-        .unwrap();
-    let manifest_id = uuid::Uuid::new_v4();
-    state
-        .runner
-        .link_to_manifest(manifest_id, &[job_id])
-        .unwrap();
-
-    let mut cert = None;
-    for _ in 0..100 {
-        if let Some(c) = state.certs.read().get(&job_id).cloned() {
-            cert = Some(c);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    let cert = serde_json::to_value(cert.expect("certificate generated")).unwrap();
-    let destruction = cert["certificate"]["activities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["type"] == "destruction")
-        .cloned()
-        .expect("signed certificate has the destruction activity");
-    assert!(
-        destruction["manifest_ref"].is_null(),
-        "signed certificate carries the manifest link: {destruction}"
-    );
+    let signed = http_wait_for_certificate(&client, &base, &job_id).await;
+    let cert = &signed["certificate"];
+    assert_eq!(cert["cert_format_version"], 3);
+    assert_eq!(cert["disposition"], "destroyed");
+    assert_eq!(latest_destruction(cert)["manifest_ref"], run_id);
+    assert_eq!(cert["destruction"]["manifest_id"], run_id);
     assert_eq!(
-        state.runner.get(job_id).unwrap().manifest_id,
-        Some(manifest_id)
+        cert["destruction"]["destruction_event_id"],
+        latest_destruction(cert)["id"]
     );
+    assert_eq!(cert["destruction"]["concurrence"], json!(null));
+    assert_eq!(cert["destruction"]["completion"], done["completion"]);
+    assert_eq!(
+        cert["sanitization"]["method"],
+        json!({ "kind": "destroy", "method": "shred" })
+    );
+    assert_eq!(cert["sanitization"]["category"], "destroy");
+    assert_eq!(
+        cert["media_status"],
+        json!({ "operational": false, "damaged": true, "notes": null })
+    );
+    assert!(
+        cert["device"].is_object(),
+        "an erased-first drive keeps its device"
+    );
+    let parsed: wipe_cert::SignedCertificate = serde_json::from_value(signed).unwrap();
+    wipe_cert::verify(&parsed, &[http_public_key(&client, &base).await]).unwrap();
 }
 
 // --- runner refusals map to 404 / 409 (CAP-3) --------------------------------
@@ -1525,7 +1243,7 @@ async fn a_scanned_groups_statement_is_the_previewed_one() {
 // --- Destruction runs: completion and concurrence (destruction-attestation story 3)
 
 /// A server started with `policy`, plus its state so a test can reach in
-/// (e.g. to remove a certificate the way an older run could lack one).
+/// (e.g. to store a run the assembly route would never build).
 async fn spawn_server_with(policy: wipe_common::ConcurrencePolicy) -> (String, AppState) {
     let backend = Arc::new(MockBackend::with_catalog(
         wipe_engine_mock::default_devices_public(),
@@ -1548,9 +1266,8 @@ async fn http_get(client: &reqwest::Client, url: String) -> (u16, serde_json::Va
     (status, resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 
-/// A Job with an erasure activity, recorded for destruction, whose
-/// certificate has been signed: the only kind a run accepts until story 4.
-async fn http_certified_pending_job(client: &reqwest::Client, base: &str, device: &str) -> String {
+/// A Job with an erasure activity, recorded for destruction (by Shred).
+async fn http_pending_job(client: &reqwest::Client, base: &str, device: &str) -> String {
     let job_id = http_create_job(client, base, device).await;
     let (status, _) = http_post(client, format!("{base}/api/jobs/{job_id}/start"), None).await;
     assert_eq!(status, 200);
@@ -1570,14 +1287,34 @@ async fn http_certified_pending_job(client: &reqwest::Client, base: &str, device
     )
     .await;
     assert_eq!(status, 200, "{body}");
+    job_id
+}
+
+/// The Job's certificate, once the generator has signed it.
+async fn http_wait_for_certificate(
+    client: &reqwest::Client,
+    base: &str,
+    job_id: &str,
+) -> serde_json::Value {
     for _ in 0..200 {
-        let (status, _) = http_get(client, format!("{base}/api/jobs/{job_id}/certificate")).await;
+        let (status, body) =
+            http_get(client, format!("{base}/api/jobs/{job_id}/certificate")).await;
         if status == 200 {
-            return job_id;
+            return body;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("no certificate for job {job_id} at pending_destruction");
+    panic!("no certificate for job {job_id}");
+}
+
+async fn http_public_key(client: &reqwest::Client, base: &str) -> VerifyingKey {
+    let (_, pk) = http_get(client, format!("{base}/api/public_key")).await;
+    let bytes: [u8; 32] = B64
+        .decode(pk["public_key_b64"].as_str().unwrap().as_bytes())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    VerifyingKey::from_bytes(&bytes).unwrap()
 }
 
 async fn http_assemble(
@@ -1634,29 +1371,16 @@ async fn http_get_run(client: &reqwest::Client, base: &str, id: &str) -> serde_j
 }
 
 #[tokio::test]
-async fn completing_a_run_with_no_concurrence_destroys_every_job_and_keeps_its_certificate() {
+async fn completing_a_run_with_no_concurrence_destroys_every_job_and_certifies_each_once() {
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;
     let client = reqwest::Client::new();
     let (_, policy) = http_get(&client, format!("{base}/api/destruction/policy")).await;
     assert_eq!(policy, json!({ "concurrence_policy": "none" }));
-    let (_, pk) = http_get(&client, format!("{base}/api/public_key")).await;
-    let vk_bytes: [u8; 32] = B64
-        .decode(pk["public_key_b64"].as_str().unwrap().as_bytes())
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let vk = http_public_key(&client, &base).await;
 
     let mut ids = Vec::new();
     for device in ["dev-nvme-0", "dev-nvme-1", "dev-hdd-0"] {
-        ids.push(http_certified_pending_job(&client, &base, device).await);
-    }
-    let mut before = Vec::new();
-    for id in &ids {
-        before.push(
-            http_get(&client, format!("{base}/api/jobs/{id}/certificate"))
-                .await
-                .1,
-        );
+        ids.push(http_pending_job(&client, &base, device).await);
     }
     let run = http_assemble(&client, &base, &ids).await;
     assert_eq!(run["state"], "pending");
@@ -1698,14 +1422,23 @@ async fn completing_a_run_with_no_concurrence_destroys_every_job_and_keeps_its_c
     assert_eq!(run["concurrence"], json!(null));
     assert_eq!(job_states(&client, &base, &ids).await, ["destroyed"; 3]);
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    for (id, before) in ids.iter().zip(before) {
-        let (_, after) = http_get(&client, format!("{base}/api/jobs/{id}/certificate")).await;
-        assert_eq!(after, before, "completion must not touch the certificate");
-        assert_eq!(after["co_signatures"].as_array().map_or(0, Vec::len), 0);
-        let parsed: wipe_cert::SignedCertificate = serde_json::from_value(after).unwrap();
-        wipe_cert::verify(&parsed, &[VerifyingKey::from_bytes(&vk_bytes).unwrap()])
-            .expect("certificate still verifies offline");
+    for id in &ids {
+        let signed = http_wait_for_certificate(&client, &base, id).await;
+        let cert = &signed["certificate"];
+        assert_eq!(cert["job_id"], id.as_str());
+        assert_eq!(cert["cert_format_version"], 3);
+        assert_eq!(cert["evaluation"], true);
+        assert_eq!(cert["disposition"], "destroyed");
+        assert_eq!(cert["destruction"]["completion"], run["completion"]);
+        assert_eq!(cert["destruction"]["manifest_id"], run_id);
+        assert_eq!(signed["co_signatures"].as_array().map_or(0, Vec::len), 0);
+        let parsed: wipe_cert::SignedCertificate = serde_json::from_value(signed.clone()).unwrap();
+        wipe_cert::verify(&parsed, std::slice::from_ref(&vk))
+            .expect("certificate verifies offline with the completion inside");
+        // Signed once: a later read returns the same signature.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (_, again) = http_get(&client, format!("{base}/api/jobs/{id}/certificate")).await;
+        assert_eq!(again["signature"], signed["signature"]);
     }
 
     // A Destroyed Job cannot be aborted.
@@ -1721,8 +1454,8 @@ async fn with_a_witness_policy_the_run_awaits_a_witness_before_any_job_is_destro
     let (_, policy) = http_get(&client, format!("{base}/api/destruction/policy")).await;
     assert_eq!(policy, json!({ "concurrence_policy": "witness" }));
     let ids = vec![
-        http_certified_pending_job(&client, &base, "dev-nvme-0").await,
-        http_certified_pending_job(&client, &base, "dev-nvme-1").await,
+        http_pending_job(&client, &base, "dev-nvme-0").await,
+        http_pending_job(&client, &base, "dev-nvme-1").await,
     ];
     let run = http_assemble(&client, &base, &ids).await;
     assert_eq!(run["required_concurrence"], "witness");
@@ -1740,6 +1473,11 @@ async fn with_a_witness_policy_the_run_awaits_a_witness_before_any_job_is_destro
         job_states(&client, &base, &ids).await,
         ["pending_destruction"; 2]
     );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    for id in &ids {
+        let (status, _) = http_get(&client, format!("{base}/api/jobs/{id}/certificate")).await;
+        assert_eq!(status, 404, "no certificate before the concurrence");
+    }
 
     let (status, preview) = http_post(
         &client,
@@ -1764,13 +1502,23 @@ async fn with_a_witness_policy_the_run_awaits_a_witness_before_any_job_is_destro
         .contains("witnessed the destruction"));
     assert_eq!(run["concurrence"]["manifest_id"], run_id);
     assert_eq!(job_states(&client, &base, &ids).await, ["destroyed"; 2]);
+    let vk = http_public_key(&client, &base).await;
+    for id in &ids {
+        let signed = http_wait_for_certificate(&client, &base, id).await;
+        let rec = &signed["certificate"]["destruction"];
+        assert_eq!(rec["required_concurrence"], "witness");
+        assert_eq!(rec["concurrence"]["kind"], "witness");
+        assert_eq!(rec["concurrence"], run["concurrence"]);
+        let parsed: wipe_cert::SignedCertificate = serde_json::from_value(signed).unwrap();
+        wipe_cert::verify(&parsed, std::slice::from_ref(&vk)).unwrap();
+    }
 }
 
 #[tokio::test]
 async fn with_a_review_policy_the_concurrence_is_recorded_as_a_review() {
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::Review).await;
     let client = reqwest::Client::new();
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run = http_assemble(&client, &base, &ids).await;
     assert_eq!(run["required_concurrence"], "review");
     let run_id = run["id"].as_str().unwrap();
@@ -1798,7 +1546,7 @@ async fn with_a_review_policy_the_concurrence_is_recorded_as_a_review() {
 async fn the_completion_signer_cannot_concur_and_nothing_changes() {
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::Review).await;
     let client = reqwest::Client::new();
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run_id = http_assemble(&client, &base, &ids).await["id"]
         .as_str()
         .unwrap()
@@ -1837,7 +1585,7 @@ async fn a_concurrence_not_needed_too_early_or_twice_is_409() {
     // Not needed: the run was assembled under policy `none`.
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;
     let client = reqwest::Client::new();
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run_id = http_assemble(&client, &base, &ids).await["id"]
         .as_str()
         .unwrap()
@@ -1871,7 +1619,7 @@ async fn a_concurrence_not_needed_too_early_or_twice_is_409() {
 
     // Too early, then twice: policy `review`.
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::Review).await;
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run_id = http_assemble(&client, &base, &ids).await["id"]
         .as_str()
         .unwrap()
@@ -1915,7 +1663,7 @@ async fn a_concurrence_not_needed_too_early_or_twice_is_409() {
 async fn completing_a_run_twice_or_once_it_awaits_concurrence_is_409() {
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;
     let client = reqwest::Client::new();
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run_id = http_assemble(&client, &base, &ids).await["id"]
         .as_str()
         .unwrap()
@@ -1929,7 +1677,7 @@ async fn completing_a_run_twice_or_once_it_awaits_concurrence_is_409() {
     assert_eq!(http_get_run(&client, &base, &run_id).await, done);
 
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::Witness).await;
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run_id = http_assemble(&client, &base, &ids).await["id"]
         .as_str()
         .unwrap()
@@ -1951,7 +1699,7 @@ async fn completing_a_run_twice_or_once_it_awaits_concurrence_is_409() {
 async fn an_unverified_or_unattested_completion_is_422_and_changes_nothing() {
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;
     let client = reqwest::Client::new();
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run_id = http_assemble(&client, &base, &ids).await["id"]
         .as_str()
         .unwrap()
@@ -1996,7 +1744,7 @@ async fn the_completion_time_defaults_to_now_and_is_range_checked() {
     use time::format_description::well_known::Rfc3339;
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;
     let client = reqwest::Client::new();
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run = http_assemble(&client, &base, &ids).await;
     let run_id = run["id"].as_str().unwrap().to_owned();
     let created_at =
@@ -2080,7 +1828,7 @@ async fn an_unknown_run_is_404_on_completion_concurrence_and_previews() {
 async fn the_statement_previews_refuse_blank_fields() {
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::Review).await;
     let client = reqwest::Client::new();
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run_id = http_assemble(&client, &base, &ids).await["id"]
         .as_str()
         .unwrap()
@@ -2120,113 +1868,160 @@ async fn the_statement_previews_refuse_blank_fields() {
     assert!(resp["error"].as_str().unwrap().contains("title"), "{resp}");
 }
 
+/// CAP-4's success signal: drives that were never erased (three scanned dead
+/// drives, and a queued Job recorded from its device) assemble onto a run,
+/// complete, and each gets one certificate that verifies, carrying the
+/// recorded identifiers instead of a device snapshot.
 #[tokio::test]
-async fn assembling_a_job_with_no_certificate_is_409_naming_it() {
-    let base = spawn_server().await;
+async fn never_erased_jobs_assemble_complete_and_get_verifying_certificates() {
+    let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;
     let client = reqwest::Client::new();
-    let certified = http_certified_pending_job(&client, &base, "dev-nvme-1").await;
-    // Recorded while Queued: no erasure activity, so no certificate.
-    let bare = http_create_job(&client, &base, "dev-nvme-0").await;
     let (status, body) = http_post(
         &client,
-        format!("{base}/api/jobs/{bare}/record-for-destruction"),
-        Some(attested("disintegrate", http_op())),
+        format!("{base}/api/destruction/records"),
+        Some(group_body(json!([
+            { "asset_tag": "A-1", "serial": "DEAD-1" },
+            { "serial": "DEAD-2" },
+            { "asset_tag": "A-3" },
+        ]))),
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
+    let mut ids: Vec<String> = body["job_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    let queued = http_create_job(&client, &base, "dev-nvme-1").await;
     let (status, body) = http_post(
         &client,
-        format!("{base}/api/manifests"),
-        Some(json!({ "assembled_by": http_op(), "job_ids": [certified, bare] })),
+        format!("{base}/api/jobs/{queued}/record-for-destruction"),
+        Some(attested("crush", http_op())),
     )
     .await;
-    assert_eq!(status, 409, "{body}");
-    let message = body["error"].as_str().unwrap();
-    assert!(
-        message.contains(&bare) && message.contains("no certificate"),
-        "{body}"
-    );
-    assert!(!message.contains(&certified), "{body}");
-    for id in [&certified, &bare] {
-        assert!(http_get_job(&client, &base, id).await["manifest_id"].is_null());
-    }
-    let (_, runs) = http_get(&client, format!("{base}/api/manifests")).await;
-    assert!(runs.as_array().unwrap().is_empty());
-}
+    assert_eq!(status, 200, "{body}");
+    ids.push(queued);
 
-/// A run assembled before the assembly guard (or one whose certificate was
-/// removed) must still never destroy an uncertified Job: completion and
-/// concurrence refuse it, naming the Job, and change nothing.
-#[tokio::test]
-async fn a_run_member_without_a_certificate_blocks_completion_and_concurrence() {
-    let (base, state) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;
-    let client = reqwest::Client::new();
-    let ids = vec![
-        http_certified_pending_job(&client, &base, "dev-nvme-0").await,
-        http_certified_pending_job(&client, &base, "dev-nvme-1").await,
-    ];
-    let run_id = http_assemble(&client, &base, &ids).await["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let lost: uuid::Uuid = ids[1].parse().unwrap();
-    state.certs.write().remove(&lost);
-    let before = http_get_run(&client, &base, &run_id).await;
-    let (status, body) = http_post(
+    let run = http_assemble(&client, &base, &ids).await;
+    let run_id = run["id"].as_str().unwrap();
+    let (status, done) = http_post(
         &client,
         format!("{base}/api/manifests/{run_id}/completion"),
         Some(completion_body()),
     )
     .await;
-    assert_eq!(status, 409, "{body}");
-    assert!(body["error"].as_str().unwrap().contains(&ids[1]), "{body}");
-    assert_eq!(http_get_run(&client, &base, &run_id).await, before);
-    assert_eq!(
-        job_states(&client, &base, &ids).await,
-        ["pending_destruction"; 2]
-    );
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(job_states(&client, &base, &ids).await, ["destroyed"; 4]);
 
-    let (base, state) = spawn_server_with(wipe_common::ConcurrencePolicy::Witness).await;
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
-    let run_id = http_assemble(&client, &base, &ids).await["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let url = format!("{base}/api/manifests/{run_id}");
-    let (status, _) = http_post(
-        &client,
-        format!("{url}/completion"),
-        Some(completion_body()),
-    )
-    .await;
-    assert_eq!(status, 200);
-    state
-        .certs
-        .write()
-        .remove(&ids[0].parse::<uuid::Uuid>().unwrap());
-    let before = http_get_run(&client, &base, &run_id).await;
-    let (status, body) = http_post(
-        &client,
-        format!("{url}/concurrence"),
-        Some(concurrence_body(second_op(), "Ben Witness")),
-    )
-    .await;
-    assert_eq!(status, 409, "{body}");
-    assert!(body["error"].as_str().unwrap().contains(&ids[0]), "{body}");
-    assert_eq!(http_get_run(&client, &base, &run_id).await, before);
-    assert_eq!(
-        job_states(&client, &base, &ids).await,
-        ["pending_destruction"]
-    );
+    let vk = http_public_key(&client, &base).await;
+    for (i, id) in ids.iter().enumerate() {
+        let signed = http_wait_for_certificate(&client, &base, id).await;
+        let cert = &signed["certificate"];
+        assert!(cert.get("device").is_none(), "{cert}");
+        assert_eq!(cert["evaluation"], true);
+        assert!(cert.get("capabilities_snapshot").is_none());
+        assert_eq!(cert["validation"]["media_class"], "unknown");
+        let source = &latest_destruction(cert)["attestation"]["identifiers"]["source"];
+        let rec = &cert["destruction"];
+        if i < 3 {
+            assert_eq!(source, "scanned");
+            assert_eq!(rec["standard_label"], "NIST SP 800-88 Destroy");
+            assert_eq!(rec["caution"], wipe_common::SHRED_PULVERIZE_CAUTION);
+        } else {
+            assert_eq!(source, "device");
+            assert_eq!(rec["standard_label"], "physical damage — not NIST Destroy");
+            assert!(cert["sanitization"].get("category").is_none());
+        }
+        assert_eq!(
+            cert["started_at"],
+            http_get_job(&client, &base, id).await["created_at"]
+        );
+        let parsed: wipe_cert::SignedCertificate = serde_json::from_value(signed.clone()).unwrap();
+        wipe_cert::verify(&parsed, std::slice::from_ref(&vk)).unwrap();
+    }
+}
+
+/// A run whose member cannot be certified (here, a run stored without
+/// linking its Job, which the assembly route never does) must never destroy
+/// it: completion and concurrence refuse with 409 naming the Job, and
+/// change nothing.
+#[tokio::test]
+async fn an_uncertifiable_member_blocks_completion_and_concurrence() {
+    for (policy, required) in [
+        (wipe_common::ConcurrencePolicy::None, None),
+        (
+            wipe_common::ConcurrencePolicy::Witness,
+            Some(wipe_common::ConcurrenceKind::Witness),
+        ),
+    ] {
+        let (base, state) = spawn_server_with(policy).await;
+        let client = reqwest::Client::new();
+        let linked = http_pending_job(&client, &base, "dev-nvme-0").await;
+        let unlinked = http_pending_job(&client, &base, "dev-nvme-1").await;
+        let ids = vec![linked.clone(), unlinked.clone()];
+        let run_id = http_assemble(&client, &base, std::slice::from_ref(&linked)).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // Add the unlinked Job to the stored run behind the route's back.
+        {
+            let mut runs = state.manifests.write();
+            let run = runs.get_mut(&run_id.parse().unwrap()).unwrap();
+            run.job_ids.push(unlinked.parse().unwrap());
+            assert_eq!(run.required_concurrence, required);
+        }
+        let url = format!("{base}/api/manifests/{run_id}");
+        let before = http_get_run(&client, &base, &run_id).await;
+        let (status, body) = if required.is_none() {
+            http_post(
+                &client,
+                format!("{url}/completion"),
+                Some(completion_body()),
+            )
+            .await
+        } else {
+            let (status, _) = http_post(
+                &client,
+                format!("{url}/completion"),
+                Some(completion_body()),
+            )
+            .await;
+            assert_eq!(status, 200, "completion alone destroys nothing");
+            let before = http_get_run(&client, &base, &run_id).await;
+            let refused = http_post(
+                &client,
+                format!("{url}/concurrence"),
+                Some(concurrence_body(second_op(), "Ben Witness")),
+            )
+            .await;
+            assert_eq!(http_get_run(&client, &base, &run_id).await, before);
+            refused
+        };
+        assert_eq!(status, 409, "{body}");
+        let message = body["error"].as_str().unwrap();
+        assert!(message.contains(&unlinked), "{body}");
+        assert!(!message.contains(&linked), "{body}");
+        if required.is_none() {
+            assert_eq!(http_get_run(&client, &base, &run_id).await, before);
+        }
+        assert_eq!(
+            job_states(&client, &base, &ids).await,
+            ["pending_destruction"; 2]
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for id in &ids {
+            let (status, _) = http_get(&client, format!("{base}/api/jobs/{id}/certificate")).await;
+            assert_eq!(status, 404);
+        }
+    }
 }
 
 #[tokio::test]
 async fn the_removed_cosign_route_is_a_json_404() {
     let base = spawn_server().await;
     let client = reqwest::Client::new();
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run_id = http_assemble(&client, &base, &ids).await["id"]
         .as_str()
         .unwrap()
@@ -2256,7 +2051,7 @@ async fn the_removed_cosign_route_is_a_json_404() {
 async fn previews_are_409_when_the_run_is_not_in_the_state_their_action_accepts() {
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::Review).await;
     let client = reqwest::Client::new();
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run_id = http_assemble(&client, &base, &ids).await["id"]
         .as_str()
         .unwrap()
@@ -2321,7 +2116,7 @@ async fn a_completion_time_with_an_offset_is_stored_as_the_statement_prints_it()
     use time::format_description::well_known::Rfc3339;
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;
     let client = reqwest::Client::new();
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run_id = http_assemble(&client, &base, &ids).await["id"]
         .as_str()
         .unwrap()
@@ -2360,8 +2155,8 @@ async fn a_run_member_no_longer_pending_destruction_blocks_completion() {
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;
     let client = reqwest::Client::new();
     let ids = vec![
-        http_certified_pending_job(&client, &base, "dev-nvme-0").await,
-        http_certified_pending_job(&client, &base, "dev-nvme-1").await,
+        http_pending_job(&client, &base, "dev-nvme-0").await,
+        http_pending_job(&client, &base, "dev-nvme-1").await,
     ];
     let run_id = http_assemble(&client, &base, &ids).await["id"]
         .as_str()
@@ -2395,7 +2190,7 @@ async fn the_default_concurrence_policy_is_none() {
     let (status, policy) = http_get(&client, format!("{base}/api/destruction/policy")).await;
     assert_eq!(status, 200);
     assert_eq!(policy, json!({ "concurrence_policy": "none" }));
-    let ids = vec![http_certified_pending_job(&client, &base, "dev-nvme-0").await];
+    let ids = vec![http_pending_job(&client, &base, "dev-nvme-0").await];
     let run = http_assemble(&client, &base, &ids).await;
     assert_eq!(run["required_concurrence"], json!(null));
 }

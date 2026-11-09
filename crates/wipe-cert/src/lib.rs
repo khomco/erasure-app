@@ -11,6 +11,7 @@
 //!    status, validation reference, all surfaced as first-class fields.
 
 pub mod canonical;
+pub mod check;
 pub mod schema;
 pub mod sign;
 

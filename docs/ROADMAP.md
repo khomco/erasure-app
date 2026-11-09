@@ -246,7 +246,10 @@ and the drift-gate contract).
 - W4.3 Cert-format compatibility page — publishes whatever stance the CONTEXT
   §12 cert-versioning question resolves to. An auditor's value proposition is
   that an old certificate stays verifiable; that promise belongs on the site in
-  writing.
+  writing. *The mechanism shipped 2026-11-08 with schema v3 (destruction-attestation
+  story 4): `verify` dispatches on `cert_format_version`, and committed v2
+  fixtures prove v2 certificates still verify. Publishing it as a commitment is
+  still open.*
 
 ---
 
@@ -399,8 +402,10 @@ build.** Three frontends, one engine.
   operator email that NIST R2 requires and that nothing currently proves. Needs
   real authentication and the four roles (`loader`, `operator`, `supervisor`,
   `auditor`). ADR-0011 replaced the supervisor co-sign with an optional
-  concurrence on a destruction run (`DestructionManifest`); the concurrence
-  policy is set at station startup until roles can gate editing it.
+  concurrence on a destruction run (`DestructionManifest`), signed inside the
+  destroyed drive's v3 certificate; the concurrence policy is set at station
+  startup until roles can gate editing it, and every signer's identity is
+  self-asserted until SSO (`verified`) exists.
   **Unresolved and blocking (CONTEXT §12): how does an operator authenticate at
   a PXE station with no display and no local key?**
 - **O-R2 Batch work.** Operators process drives in trays, not one at a time.

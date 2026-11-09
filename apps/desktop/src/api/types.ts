@@ -395,6 +395,23 @@ export interface CoSignatureBlock {
   signed_at: string;
 }
 
+/**
+ * How a drive was destroyed, signed inside a v3 `destroyed` certificate
+ * (mirrors `wipe_cert::DestructionRecord`). The "recorded for destruction"
+ * attestation is on the Destruction activity `destruction_event_id` names.
+ */
+export interface CertDestruction {
+  manifest_id: string;
+  destruction_event_id: string;
+  technique: DestructMethod;
+  standard_label: string;
+  nist_destroy: boolean;
+  caution?: string;
+  completion: DestructionCompletion;
+  required_concurrence: ConcurrenceKind | null;
+  concurrence: Concurrence | null;
+}
+
 export interface SignedCertificate {
   certificate: {
     "@context": string;
@@ -415,15 +432,19 @@ export interface SignedCertificate {
       work_order_ref?: string | null;
       contract_ref?: string | null;
     };
-    device: Device;
-    capabilities_snapshot: Capabilities;
+    /** Absent (v3) for a drive that was never erased: nothing was read from it. */
+    device?: Device;
+    capabilities_snapshot?: Capabilities;
     disposition: AssetDisposition;
     sanitization: {
-      category: Category;
+      /** Absent only for destruction that is not NIST Destroy (v3). */
+      category?: Category;
       method: Method;
       method_human: string;
       standard_refs: Array<{ standard: string; section: string }>;
     };
+    /** Set on a v3 `destroyed` certificate and only there. */
+    destruction?: CertDestruction;
     activities: JobActivity[];
     started_at: string;
     ended_at: string;
@@ -443,6 +464,7 @@ export interface SignedCertificate {
     canonical_sha256_hex: string;
     signature_b64: string;
   };
+  /** Pre-v3 supervisor co-signatures; never on a v3 certificate. */
   co_signatures?: CoSignatureBlock[];
 }
 

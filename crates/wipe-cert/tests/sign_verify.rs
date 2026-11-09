@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use wipe_cert::{
-    co_sign, sign, verify, verify_co_signatures, CertIssuer, Certificate, CoSignerRole,
-    MediaStatus, SignedCertificate, SigningKey, ValidationBlock, VerifyingKey,
+    sign, verify, CertIssuer, Certificate, MediaStatus, SignedCertificate, SigningKey,
+    ValidationBlock, VerifyingKey,
 };
 use wipe_common::{Classification, DeviceId, Intent, Job, JobSpec, JobState, OperatorRef};
 use wipe_engine::JobRunner;
@@ -136,7 +136,8 @@ async fn cert_carries_activity_chain_with_erasure_and_verification() {
     let key = SigningKey::generate();
     let job = finished_job().await;
     let cert = build_cert(&job, &key);
-    assert_eq!(cert.cert_format_version, 2);
+    assert_eq!(cert.cert_format_version, 3);
+    assert!(cert.destruction.is_none());
     assert_eq!(cert.disposition, wipe_common::AssetDisposition::Erased);
     let has_erasure = cert
         .activities
@@ -150,45 +151,6 @@ async fn cert_carries_activity_chain_with_erasure_and_verification() {
     assert!(has_verification, "cert.activities should include a Verification");
     // The convenience flat-command-list still works for renderers.
     assert!(!cert.command_evidence().is_empty());
-}
-
-#[tokio::test]
-async fn co_sign_adds_supervisor_signature_that_verifies_independently() {
-    let station_key = SigningKey::generate();
-    let supervisor_key = SigningKey::generate();
-    let job = finished_job().await;
-    let cert = build_cert(&job, &station_key);
-    let mut signed = sign(cert, &station_key).unwrap();
-
-    // Primary signature verifies.
-    verify(&signed, &[station_key.verifying_key()]).unwrap();
-
-    // Supervisor co-signs (separate key in this test; production v0.2
-    // baseline uses the same station key until operator-auth lands).
-    let manifest = uuid::Uuid::new_v4();
-    co_sign(
-        &mut signed,
-        &supervisor_key,
-        CoSignerRole::Supervisor,
-        OperatorRef {
-            id: "sup-1".into(),
-            display_name: "Sandra Supervisor".into(),
-            email: "sandra@example.com".into(),
-        },
-        Some(manifest),
-    )
-    .unwrap();
-
-    assert_eq!(signed.co_signatures.len(), 1);
-    assert_eq!(signed.co_signatures[0].role, CoSignerRole::Supervisor);
-    assert_eq!(signed.co_signatures[0].manifest_ref, Some(manifest));
-
-    // Co-signature verifies against the supervisor's public key.
-    let ids = verify_co_signatures(&signed, &[supervisor_key.verifying_key()]).unwrap();
-    assert_eq!(ids, vec![supervisor_key.verifying_key().public_key_id()]);
-
-    // Primary still verifies with station key alone.
-    verify(&signed, &[station_key.verifying_key()]).unwrap();
 }
 
 #[tokio::test]
