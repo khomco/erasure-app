@@ -436,6 +436,7 @@ pub fn router(state: AppState) -> Router {
             post(handlers::preview_concurrence_statement),
         )
         .route("/api/destruction/policy", get(handlers::destruction_policy))
+        .route("/api/license", get(handlers::license))
         .route("/api/sim/devices/attach", post(handlers::sim_attach))
         .route("/api/sim/devices/detach", post(handlers::sim_detach))
         .route("/api/sim/devices", get(handlers::sim_detached))

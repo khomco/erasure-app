@@ -969,6 +969,12 @@ pub async fn destruction_policy(State(state): State<AppState>) -> Json<serde_jso
     Json(json!({ "concurrence_policy": state.concurrence_policy }))
 }
 
+/// The station's licence state. Read-only: it never moves the clock
+/// watermark, saves lease state or records usage, so a client may poll it.
+pub async fn license(State(state): State<AppState>) -> Json<crate::licensing::LicenseView> {
+    Json(state.license().view(time::OffsetDateTime::now_utc()))
+}
+
 // ---- Error type ---------------------------------------------------------
 
 pub struct ApiError(pub StatusCode, pub String);

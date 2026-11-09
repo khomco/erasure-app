@@ -12,7 +12,7 @@ pub mod store;
 pub mod ws;
 
 pub use app::*;
-pub use licensing::{LicenseContext, SigningDecision};
+pub use licensing::{LicenseContext, LicenseCustomer, LicenseView, SigningDecision};
 pub use store::{
     detect_lease_store, lease_state_path, EphemeralLeaseStore, LeasePersistence, LeaseStore,
     LocalFileLeaseStore, StoreStatus, StoreTier, TopologyStore,

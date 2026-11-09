@@ -28,10 +28,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
+use serde::Serialize;
 use time::OffsetDateTime;
 
 use wipe_license::{
-    evaluate, machine_fingerprint, AttestationChain, Entitlements, LeaseState, LeaseStatus,
+    evaluate, machine_fingerprint, AttestationChain, Entitlements, LapsePolicy, LeaseState,
+    LeaseStatus,
 };
 
 use crate::store::{EphemeralLeaseStore, LeasePersistence, LeaseStore, StoreError};
@@ -307,6 +309,41 @@ impl LicenseContext {
         self.with_fault(status)
     }
 
+    /// The licence state for an operator, as `GET /api/license` returns it.
+    ///
+    /// The verdict at `now` against the stored lease state and the last
+    /// recorded lease fault (a load fault, or the last save's error, which
+    /// stays until a save succeeds), reported as `LeaseStateUnavailable`.
+    /// It cannot predict whether the next save succeeds, so the next signing
+    /// decision, which saves first, may differ. A pure read: it neither folds
+    /// `now` into the watermark nor saves, so polling it never writes to disk
+    /// (GET is safe, RFC 9110 §9.2.1).
+    /// Rollback detection is unchanged: the verdict is computed against the
+    /// stored watermark, and signing decisions keep observing the clock.
+    pub fn view(&self, now: OffsetDateTime) -> LicenseView {
+        let state = self.lease.read().clone();
+        let status = self.with_fault(evaluate(
+            self.entitlements(),
+            &state,
+            &self.fingerprint,
+            now,
+        ));
+        let operator_message = status.operator_message();
+        let body = self.chain.as_ref().map(|c| &c.license.body);
+        LicenseView {
+            status,
+            operator_message,
+            customer: body.map(|b| LicenseCustomer {
+                id: b.entitlements.customer_id.clone(),
+                name: b.entitlements.customer_name.clone(),
+            }),
+            not_after: body.map(|b| b.entitlements.not_after),
+            instance_public_key_id: body.map(|b| b.instance_public_key_id.clone()),
+            lapse_policy: body.map(|b| b.lapse_policy),
+            fingerprint: self.fingerprint.clone(),
+        }
+    }
+
     /// A licensed station whose lease state cannot be trusted reports that
     /// first: every other verdict was computed from it.
     fn with_fault(&self, status: LeaseStatus) -> LeaseStatus {
@@ -342,6 +379,36 @@ impl LicenseContext {
             status,
         }
     }
+}
+
+/// The station's licence state for an operator (`GET /api/license`).
+///
+/// Every licence field is `null` on an unlicensed station. `status` stays
+/// nested rather than flattened, so the `LeaseStatus` tag cannot collide with
+/// a view field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LicenseView {
+    pub status: LeaseStatus,
+    /// `status.operator_message()`, so every client words it the same way.
+    pub operator_message: String,
+    pub customer: Option<LicenseCustomer>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub not_after: Option<OffsetDateTime>,
+    /// The instance key id the licence entitles. The station's own signing
+    /// key id is at `GET /api/public_key`.
+    pub instance_public_key_id: Option<String>,
+    /// What happens when the licence lapses (ADR-0012).
+    pub lapse_policy: Option<LapsePolicy>,
+    /// This station's fingerprint, a hash of its station id (`--station-id`,
+    /// default `standalone`); not derived from hardware.
+    pub fingerprint: String,
+}
+
+/// Who a licence is issued to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LicenseCustomer {
+    pub id: String,
+    pub name: String,
 }
 
 pub struct SigningDecision {

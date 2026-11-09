@@ -2262,3 +2262,301 @@ async fn the_default_concurrence_policy_is_none() {
     let run = http_assemble(&client, &base, &ids).await;
     assert_eq!(run["required_concurrence"], json!(null));
 }
+
+// --- GET /api/license (licence-visibility story 1) ---------------------------
+
+async fn spawn_server_with_license(license: Arc<wipe_server::LicenseContext>) -> String {
+    let backend = Arc::new(MockBackend::with_catalog(
+        wipe_engine_mock::default_devices_public(),
+        MockTiming::fast(),
+    ));
+    let state =
+        AppState::new(backend, None, Arc::new(SigningKey::generate())).with_license(license);
+    let app = router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+fn license_chain(
+    not_after: time::OffsetDateTime,
+    policy: wipe_license::LapsePolicy,
+) -> wipe_license::AttestationChain {
+    let now = time::OffsetDateTime::now_utc();
+    let ent = wipe_license::Entitlements {
+        customer_id: "cust-42".into(),
+        customer_name: "Acme Recycling".into(),
+        quota: wipe_license::Quota::Unlimited,
+        scope: wipe_license::Scope::Site {
+            site_id: "s".into(),
+        },
+        not_before: now - time::Duration::days(60),
+        not_after,
+        features: vec![],
+        allowed_methods: wipe_license::AllowedMethods::All,
+        machine_binding: None,
+    };
+    let cert = wipe_license::VendorRoot::generate()
+        .issue_with_lapse_policy("lic-1", "ed25519:instance-key", ent, now, policy)
+        .unwrap();
+    wipe_license::AttestationChain::new(cert)
+}
+
+fn licensed_ctx(
+    not_after: time::OffsetDateTime,
+    policy: wipe_license::LapsePolicy,
+) -> Arc<wipe_server::LicenseContext> {
+    Arc::new(wipe_server::LicenseContext::licensed(
+        "station-1",
+        license_chain(not_after, policy),
+        wipe_license::LeaseState::new(time::OffsetDateTime::now_utc()),
+    ))
+}
+
+async fn get_license(base: &str) -> serde_json::Value {
+    let (status, body) = http_get(&reqwest::Client::new(), format!("{base}/api/license")).await;
+    assert_eq!(status, 200, "{body}");
+    body
+}
+
+fn license_tmpdir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "wipestation-license-route-{name}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn license_route_on_an_unlicensed_station() {
+    let base = spawn_server().await;
+    let view = get_license(&base).await;
+    let mut keys: Vec<&str> = view
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "customer",
+            "fingerprint",
+            "instance_public_key_id",
+            "lapse_policy",
+            "not_after",
+            "operator_message",
+            "status"
+        ]
+    );
+    assert_eq!(view["status"], json!({ "status": "unlicensed" }));
+    assert_eq!(
+        view["operator_message"],
+        wipe_license::LeaseStatus::Unlicensed.operator_message()
+    );
+    for key in [
+        "customer",
+        "not_after",
+        "instance_public_key_id",
+        "lapse_policy",
+    ] {
+        assert_eq!(view[key], json!(null), "{key}");
+    }
+    assert_eq!(
+        view["fingerprint"],
+        wipe_license::machine_fingerprint("standalone")
+    );
+}
+
+#[tokio::test]
+async fn license_route_on_a_valid_licence() {
+    let not_after = time::OffsetDateTime::now_utc() + time::Duration::days(30);
+    let ctx = licensed_ctx(not_after, wipe_license::LapsePolicy::Evaluation);
+    let base = spawn_server_with_license(ctx).await;
+    let view = get_license(&base).await;
+    assert_eq!(view["status"]["status"], "valid");
+    assert!(
+        view["status"]["days_remaining"].as_i64().unwrap() >= 29,
+        "{view}"
+    );
+    assert!(view["status"].get("remaining_erasures").is_none(), "{view}");
+    assert_eq!(
+        view["customer"],
+        json!({ "id": "cust-42", "name": "Acme Recycling" })
+    );
+    let parsed = time::OffsetDateTime::parse(
+        view["not_after"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    assert_eq!(parsed, not_after);
+    assert_eq!(view["instance_public_key_id"], "ed25519:instance-key");
+    assert_eq!(view["lapse_policy"], "evaluation");
+    assert_eq!(
+        view["fingerprint"],
+        wipe_license::machine_fingerprint("station-1")
+    );
+    assert!(view["operator_message"]
+        .as_str()
+        .unwrap()
+        .starts_with("Licensed - unlimited"));
+}
+
+#[tokio::test]
+async fn license_route_reports_a_stop_lapse_policy() {
+    let ctx = licensed_ctx(
+        time::OffsetDateTime::now_utc() + time::Duration::days(30),
+        wipe_license::LapsePolicy::Stop,
+    );
+    let base = spawn_server_with_license(ctx).await;
+    assert_eq!(get_license(&base).await["lapse_policy"], "stop");
+}
+
+#[tokio::test]
+async fn license_route_on_an_expired_licence() {
+    let not_after = time::OffsetDateTime::now_utc() - time::Duration::days(3);
+    let ctx = licensed_ctx(not_after, wipe_license::LapsePolicy::Evaluation);
+    let base = spawn_server_with_license(ctx).await;
+    let view = get_license(&base).await;
+    assert_eq!(view["status"]["status"], "expired");
+    assert!(view["status"]["not_after"].is_string(), "{view}");
+    assert!(view["not_after"].is_string(), "{view}");
+    assert!(
+        view["operator_message"]
+            .as_str()
+            .unwrap()
+            .contains(&not_after.date().to_string()),
+        "{view}"
+    );
+}
+
+#[tokio::test]
+async fn license_route_reports_unreadable_lease_state() {
+    let dir = license_tmpdir("corrupt");
+    let path = dir.join("lease-state.json");
+    std::fs::write(&path, b"not json").unwrap();
+    let ctx = Arc::new(wipe_server::LicenseContext::open(
+        "station-1",
+        Some(license_chain(
+            time::OffsetDateTime::now_utc() + time::Duration::days(30),
+            wipe_license::LapsePolicy::Evaluation,
+        )),
+        Arc::new(wipe_server::LocalFileLeaseStore::new(path.clone())),
+        time::OffsetDateTime::now_utc(),
+    ));
+    let base = spawn_server_with_license(ctx).await;
+    let view = get_license(&base).await;
+    assert_eq!(view["status"]["status"], "lease_state_unavailable");
+    assert!(
+        view["status"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains(&path.display().to_string()),
+        "{view}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"not json");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn license_route_never_writes_lease_state_or_moves_the_watermark() {
+    let dir = license_tmpdir("no-write");
+    let path = dir.join("lease-state.json");
+    let start = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+    let ctx = Arc::new(wipe_server::LicenseContext::open(
+        "station-1",
+        Some(license_chain(
+            time::OffsetDateTime::now_utc() + time::Duration::days(30),
+            wipe_license::LapsePolicy::Evaluation,
+        )),
+        Arc::new(wipe_server::LocalFileLeaseStore::new(path.clone())),
+        start,
+    ));
+    let base = spawn_server_with_license(ctx.clone()).await;
+
+    // No file yet: reads must not create one.
+    get_license(&base).await;
+    get_license(&base).await;
+    assert!(!path.exists(), "GET /api/license created the lease file");
+    assert_eq!(ctx.lease_state().time_watermark, start);
+
+    // A file a signing decision wrote: reads must leave it byte-identical.
+    let decision = ctx.signing_decision(start);
+    assert!(!decision.evaluation);
+    let saved = std::fs::read(&path).unwrap();
+    let before = ctx.lease_state();
+    for _ in 0..3 {
+        assert_eq!(get_license(&base).await["status"]["status"], "valid");
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), saved);
+    assert_eq!(ctx.lease_state(), before);
+    assert_eq!(ctx.lease_state().time_watermark, start);
+    assert_eq!(ctx.lease_state().erasures_used, 0);
+
+    // And the next signing decision is the one it would have been anyway.
+    assert!(
+        !ctx.signing_decision(time::OffsetDateTime::now_utc())
+            .evaluation
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A lease store whose saves always fail.
+struct FailingSaveStore;
+
+impl wipe_server::LeaseStore for FailingSaveStore {
+    fn tier(&self) -> wipe_server::StoreTier {
+        wipe_server::StoreTier::LocalFile
+    }
+    fn location(&self) -> String {
+        "failing-save".into()
+    }
+    fn detail(&self) -> String {
+        "failing-save".into()
+    }
+    fn load(&self) -> Result<Option<wipe_license::LeaseState>, wipe_server::store::StoreError> {
+        Ok(None)
+    }
+    fn save(
+        &self,
+        _state: &wipe_license::LeaseState,
+    ) -> Result<(), wipe_server::store::StoreError> {
+        Err(wipe_server::store::StoreError::Unavailable)
+    }
+}
+
+#[tokio::test]
+async fn license_route_reports_a_failed_lease_save() {
+    let ctx = Arc::new(wipe_server::LicenseContext::open(
+        "station-1",
+        Some(license_chain(
+            time::OffsetDateTime::now_utc() + time::Duration::days(30),
+            wipe_license::LapsePolicy::Evaluation,
+        )),
+        Arc::new(FailingSaveStore),
+        time::OffsetDateTime::now_utc(),
+    ));
+    assert!(
+        ctx.signing_decision(time::OffsetDateTime::now_utc())
+            .evaluation
+    );
+    let base = spawn_server_with_license(ctx).await;
+    let view = get_license(&base).await;
+    assert_eq!(
+        view["status"]["status"], "lease_state_unavailable",
+        "{view}"
+    );
+    assert!(
+        view["status"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("failing-save"),
+        "{view}"
+    );
+}

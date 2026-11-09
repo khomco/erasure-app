@@ -7,6 +7,7 @@ import type {
   EnclosureCatalog,
   Job,
   JobSpec,
+  LicenseInfo,
   OperatorRef,
   PublicKeyResponse,
   BayTopology,
@@ -235,6 +236,7 @@ export const api = {
     }),
   destructionPolicy: () =>
     jsonFetch<{ concurrence_policy: ConcurrencePolicy }>("/api/destruction/policy"),
+  license: () => jsonFetch<LicenseInfo>("/api/license"),
 };
 
 export function formatBytes(n: number): string {

@@ -322,6 +322,36 @@ export type ConcurrenceKind = "review" | "witness";
 
 export type ConcurrencePolicy = "none" | "review" | "witness";
 
+/** What a station does once its licence lapses (ADR-0012). */
+export type LapsePolicy = "evaluation" | "stop";
+
+/** Mirror of `wipe_license::LeaseStatus`, tagged on `status`. Times are RFC 3339. */
+export type LeaseStatus =
+  | { status: "valid"; remaining_erasures?: number; days_remaining: number }
+  | { status: "expired"; not_after: string }
+  | { status: "not_yet_valid"; not_before: string }
+  | { status: "quota_exhausted"; used: number; allowed: number }
+  | { status: "wrong_machine"; expected: string; actual: string }
+  | { status: "clock_rollback"; watermark: string; observed: string }
+  | { status: "unlicensed" }
+  | { status: "lease_state_unavailable"; detail: string };
+
+export interface LicenseCustomer {
+  id: string;
+  name: string;
+}
+
+/** `GET /api/license`. Licence fields are null on an unlicensed station. */
+export interface LicenseInfo {
+  status: LeaseStatus;
+  operator_message: string;
+  customer: LicenseCustomer | null;
+  not_after: string | null;
+  instance_public_key_id: string | null;
+  lapse_policy: LapsePolicy | null;
+  fingerprint: string;
+}
+
 export interface Concurrence {
   kind: ConcurrenceKind;
   manifest_id: string;

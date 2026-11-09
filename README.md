@@ -373,6 +373,7 @@ their primary signature only.
 | `POST /api/manifests/:id/concurrence/statement` | Render the concurrence statement for the run's required kind → `{statement}` |
 | `POST /api/manifests/:id/concurrence` | Concur (attested, a different signer) → `completed`, Jobs `Destroyed` |
 | `GET /api/destruction/policy` | The station's concurrence policy → `{concurrence_policy}` |
+| `GET /api/license` | The station's licence state, read-only (never moves the clock watermark or saves lease state) → `{status, operator_message, customer, not_after, instance_public_key_id, lapse_policy, fingerprint}`; licence fields are `null` when unlicensed |
 
 ## Design highlights
 
@@ -485,7 +486,9 @@ positions are enumeration order, not physical bays.
   real, and lease state (watermark, quota count) survives a restart in
   `lease-state.json` (RAM-only where the config directory is not writable,
   as the start-up output says), but allowed-method and feature checks are
-  not wired in, and no API route or UI shows the licence or lease.
+  not wired in. `GET /api/license` reports the licence verdict, customer,
+  expiry, licence instance key id, lapse policy and fingerprint; no UI shows it yet, and nothing
+  surfaces the lease counts over the API.
   Licensing never blocks an erasure (ADR-0005).
 - RBAC, SAML/OIDC on the station, customer cert portal.
 - PDF/A-3 cert rendering (JSON-LD only for now; PDF wraps the JSON later).
