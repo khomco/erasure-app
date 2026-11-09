@@ -60,6 +60,11 @@ pub struct AppState {
     /// exactly the bug that shipped the first time round: the station logged
     /// "Licensed" and then emitted evaluation certificates.
     pub license: Arc<RwLock<Arc<crate::licensing::LicenseContext>>>,
+    /// The vendor root keys this station trusts (`--vendor-root-b64`,
+    /// ADR-0005 §1). A licence installed at runtime must verify against one
+    /// of these; a request can never add one (ADR-0008 §4). Empty, the
+    /// default, means runtime install is refused.
+    pub vendor_roots: Arc<Vec<wipe_cert::VerifyingKey>>,
     /// Whether destruction runs need a review or a witness before their Jobs
     /// reach `Destroyed` (ADR-0011 §3). Set at startup and read-only over the
     /// API: with no sign-in or roles, a setting editable from the bench could
@@ -112,6 +117,7 @@ impl AppState {
                 ),
             ))),
             concurrence_policy: wipe_common::ConcurrencePolicy::None,
+            vendor_roots: Arc::new(Vec::new()),
         };
         state.spawn_cert_generator();
         state
@@ -163,6 +169,57 @@ impl AppState {
     pub fn with_license(self, license: Arc<crate::licensing::LicenseContext>) -> Self {
         *self.license.write() = license;
         self
+    }
+
+    /// Trust these vendor roots for a licence installed at runtime
+    /// (`POST /api/license`). Without any, runtime install is refused.
+    pub fn with_vendor_roots(mut self, roots: Vec<wipe_cert::VerifyingKey>) -> Self {
+        self.vendor_roots = Arc::new(roots);
+        self
+    }
+
+    /// Install a licence while the station runs (`POST /api/license`).
+    ///
+    /// `raw` is the licence file's JSON. It must pass the start-up checks
+    /// (`wipe_license::check_installable`) against [`vendor_roots`] and this
+    /// station's signing key id. On success the new context, which keeps the
+    /// running lease ([`LicenseContext::with_chain`]), replaces the old one in
+    /// the shared cell, so the certificate generator signs with it from its
+    /// next decision; the result is what `GET /api/license` now reports. On
+    /// any error nothing changes. The licence is held in memory only: a
+    /// restart goes back to the `--license` licence, or to evaluation.
+    ///
+    /// [`vendor_roots`]: Self::vendor_roots
+    /// [`LicenseContext::with_chain`]: crate::licensing::LicenseContext::with_chain
+    pub fn install_license(
+        &self,
+        raw: &str,
+    ) -> Result<crate::licensing::LicenseView, LicenseInstallError> {
+        if self.vendor_roots.is_empty() {
+            return Err(LicenseInstallError::NoVendorRoot);
+        }
+        let licence = wipe_license::parse_license(raw).map_err(|e| match e {
+            wipe_license::LicenseError::Encoding(why) => LicenseInstallError::Unparseable(why),
+            other => LicenseInstallError::Unparseable(other.to_string()),
+        })?;
+        wipe_license::check_installable(
+            &licence,
+            &self.signing_key.public_key_id(),
+            &self.vendor_roots,
+        )
+        .map_err(LicenseInstallError::NotInstallable)?;
+        let license_id = licence.body.license_id.clone();
+        let chain = wipe_license::AttestationChain::new(licence);
+        let installed = {
+            // Under the cell's write lock, so two installs cannot both build
+            // from the same old context. In RAM only: no lease save here.
+            let mut cell = self.license.write();
+            let installed = Arc::new(cell.with_chain(chain));
+            *cell = installed.clone();
+            installed
+        };
+        info!(%license_id, "licence installed at runtime");
+        Ok(installed.view(time::OffsetDateTime::now_utc()))
     }
 
     /// Set the station's concurrence policy (default `none`). Runs
@@ -367,6 +424,34 @@ impl AppState {
     }
 }
 
+/// Why `POST /api/license` installed nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LicenseInstallError {
+    /// The station was started with no `--vendor-root-b64`, so it has
+    /// nothing to verify a licence against.
+    NoVendorRoot,
+    /// The body is not a licence file; the text starts `not a licence file: `.
+    Unparseable(String),
+    /// The licence did not verify, or was issued to another station's key.
+    NotInstallable(wipe_license::InstallProblem),
+}
+
+impl std::fmt::Display for LicenseInstallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoVendorRoot => write!(
+                f,
+                "no vendor root is configured on this station, so it cannot verify a licence. \
+                 Restart it with --vendor-root-b64 to install licences at runtime."
+            ),
+            Self::Unparseable(why) => write!(f, "{why}"),
+            Self::NotInstallable(problem) => write!(f, "{problem}"),
+        }
+    }
+}
+
+impl std::error::Error for LicenseInstallError {}
+
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/api/health", get(handlers::health))
@@ -436,7 +521,10 @@ pub fn router(state: AppState) -> Router {
             post(handlers::preview_concurrence_statement),
         )
         .route("/api/destruction/policy", get(handlers::destruction_policy))
-        .route("/api/license", get(handlers::license))
+        .route(
+            "/api/license",
+            get(handlers::license).post(handlers::install_license),
+        )
         .route("/api/sim/devices/attach", post(handlers::sim_attach))
         .route("/api/sim/devices/detach", post(handlers::sim_detach))
         .route("/api/sim/devices", get(handlers::sim_detached))

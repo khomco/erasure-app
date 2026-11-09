@@ -573,8 +573,10 @@ distribution and expiry behaviour).
 - L1.3 Activation UX in the operator portal (file-based, offline).
   *Hub side shipped 2026-11-08: the customer portal's Stations page issues the
   licence file and shows the `wipestation serve --license … --vendor-root-b64 …`
-  line (licence-delivery story 1). Installing it is still a start-up flag; the
-  bench UI has no activation screen.*
+  line (licence-delivery story 1). Station side: `POST /api/license` installs it
+  without a restart, checked against the `--vendor-root-b64` roots, held in memory
+  until restart (licence-visibility story 4). The bench UI still has no activation
+  screen, and a licence installed at runtime is not persisted.*
 - ~~L1.4 Licence status surface at the bench (O-R9 / O3.5).~~ Shipped 2026-11-08: a persistent banner above every bench page (licence-visibility story 3).
 - L1.5 Expiry warnings and the drop-to-evaluation transition (L-R5).
   *Expiry warnings shipped 2026-11-08 (licence-visibility story 3); the `stop` refusal at lapse is licence-visibility story 5.*

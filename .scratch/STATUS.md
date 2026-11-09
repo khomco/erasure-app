@@ -36,7 +36,7 @@ in `DECISIONS.md` · **HW** needs real hardware · **→x** waits for item x.
 | **W** website + docs | no | marketing site + lead capture (`marketing-site`, `lead-capture`); drift tests | docs pages after the site exists; W3.4 on HW |
 | **A** control plane | no | the commercial hub: accounts, offerings, Stripe, licence delivery, downloads (ADR-0007); station enrollment from the bench and licence fetch (ADR-0008, `station-enrollment`) | fleet console, usage reporting and revocation distribution on D6; production keys on D5 |
 | **O** operator portal | partly (single-select bay map, per-card attention states) | O1.4 batch start, O2.1 exception inbox, O3.3 scanner input (`bench-throughput-inbox`); O3.5 licence status (`licence-visibility`) | O1.1–O1.3 on D2; O2.2 on D10; O4 on D11 |
-| **L** licensing tiers | partly (chain, entitlements, offline lease) | lease persistence, FileCounter, free-tier count (`licensing-as-built`); bench status + expiry warning (`licence-visibility`) | L2 on D4; L3 on D5/D6; the opt-in lapse policy (ADR-0012): the hub signs it into licences since `licence-delivery` story 4 (2026-11-08); station enforcement is queued as `licence-visibility` story 5 |
+| **L** licensing tiers | partly (chain, entitlements, offline lease) | lease persistence, FileCounter, free-tier count (`licensing-as-built`); bench status + expiry warning + runtime licence install (`POST /api/license`) (`licence-visibility`) | L2 on D4; L3 on D5/D6; the opt-in lapse policy (ADR-0012): the hub signs it into licences since `licence-delivery` story 4 (2026-11-08); station enforcement is queued as `licence-visibility` story 5 |
 
 ## Engine (CONTEXT §11 v0.2)
 

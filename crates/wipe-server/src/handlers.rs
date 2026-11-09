@@ -975,6 +975,30 @@ pub async fn license(State(state): State<AppState>) -> Json<crate::licensing::Li
     Json(state.license().view(time::OffsetDateTime::now_utc()))
 }
 
+/// Install a licence while the station runs. The body is the licence file's
+/// JSON, taken as raw bytes so a body that is not UTF-8 or not JSON gets the
+/// same reasoned 422 as one that is not a licence. 409 when the station trusts no vendor root;
+/// 422 when the licence cannot be parsed, does not verify, or names another
+/// station's key. On any error the installed licence is unchanged.
+pub async fn install_license(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<Json<crate::licensing::LicenseView>, ApiError> {
+    let body = std::str::from_utf8(&body).map_err(|e| {
+        ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("not a licence file: the body is not UTF-8 text: {e}"),
+        )
+    })?;
+    state.install_license(body).map(Json).map_err(|e| {
+        let code = match e {
+            crate::app::LicenseInstallError::NoVendorRoot => StatusCode::CONFLICT,
+            _ => StatusCode::UNPROCESSABLE_ENTITY,
+        };
+        ApiError(code, e.to_string())
+    })
+}
+
 // ---- Error type ---------------------------------------------------------
 
 pub struct ApiError(pub StatusCode, pub String);

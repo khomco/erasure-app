@@ -22,8 +22,20 @@ use crate::{LicenseError, LicenseResult};
 pub fn load_license(path: &Path) -> LicenseResult<LicenseCertificate> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| LicenseError::Encoding(format!("reading {}: {e}", path.display())))?;
-    serde_json::from_str(&raw)
-        .map_err(|e| LicenseError::Encoding(format!("parsing {}: {e}", path.display())))
+    parse_license(&raw).map_err(|e| match e {
+        LicenseError::Encoding(why) => LicenseError::Encoding(format!("{}: {why}", path.display())),
+        other => other,
+    })
+}
+
+/// Parse a licence file's JSON, as read from disk or received over the API.
+///
+/// Like [`load_license`], parsing is not trusting: the caller still has to
+/// run [`check_installable`]. The error is an `Encoding` error whose text
+/// starts `not a licence file: `.
+pub fn parse_license(raw: &str) -> LicenseResult<LicenseCertificate> {
+    serde_json::from_str(raw)
+        .map_err(|e| LicenseError::Encoding(format!("not a licence file: {e}")))
 }
 
 pub fn save_license(path: &Path, license: &LicenseCertificate) -> LicenseResult<()> {

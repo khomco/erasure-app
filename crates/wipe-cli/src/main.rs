@@ -86,6 +86,9 @@ enum Cmd {
         license: Option<PathBuf>,
         /// Published vendor root public key(s), base64. Required with
         /// --license: a licence is only meaningful if we check who signed it.
+        /// Also the only roots a licence installed while the station runs
+        /// (`POST /api/license`) is checked against; without one, runtime
+        /// install is refused. A request can never add a root.
         #[arg(long)]
         vendor_root_b64: Vec<String>,
         /// Whether destruction runs need a second signer before their Jobs
@@ -497,19 +500,23 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     }
 
     // ADR-0005: a licence only decides how certificates are *marked*. A
-    // station with none still erases and still signs.
+    // station with none still erases and still signs. The roots are decoded
+    // whether or not --license is given: they are also what a licence
+    // installed at runtime must verify against (ADR-0008 §4).
+    let vendor_roots = decode_keys("vendor-root-b64", vendor_root_b64)?;
     let license_ctx = build_license_context(
         license_path,
-        vendor_root_b64,
+        &vendor_roots,
         &signing_key.public_key_id(),
         &resolved_station_id,
         lease_store,
     )?;
     println!("{}", lease_store_line(&license_ctx.lease_persistence()));
     println!("{}", lease_counts_line(&license_ctx.lease_state()));
+    println!("{}", runtime_install_line(vendor_roots.len()));
 
-    let mut state = AppState::with_static_dir(backend.clone(), fleet, signing_key, resolved_dist)
-        .with_license(Arc::new(license_ctx))
+    let state = AppState::with_static_dir(backend.clone(), fleet, signing_key, resolved_dist);
+    let mut state = apply_licensing(state, license_ctx, vendor_roots)
         .with_topology_store(store)
         .with_concurrence_policy(concurrence_policy)
         // The mock can fake hot-plug, which is what identify mode is driven
@@ -894,6 +901,31 @@ fn lease_counts_line(lease: &wipe_license::LeaseState) -> String {
     )
 }
 
+/// Give the station its start-up licence context and the vendor roots a
+/// licence installed at runtime (`POST /api/license`) is checked against.
+fn apply_licensing(
+    state: AppState,
+    license_ctx: wipe_server::LicenseContext,
+    vendor_roots: Vec<VerifyingKey>,
+) -> AppState {
+    state
+        .with_license(Arc::new(license_ctx))
+        .with_vendor_roots(vendor_roots)
+}
+
+/// Whether `POST /api/license` can install a licence on this station.
+fn runtime_install_line(roots: usize) -> String {
+    if roots == 0 {
+        "runtime licence install: disabled — no --vendor-root-b64, so POST /api/license is refused"
+            .to_string()
+    } else {
+        format!(
+            "runtime licence install: enabled (POST /api/license, checked against {roots} vendor \
+             root(s)); an installed licence lasts until restart"
+        )
+    }
+}
+
 /// Build the station's licensing state from `--license` / `--vendor-root-b64`.
 ///
 /// A licence that fails to verify, or that names another station's key, is a
@@ -902,7 +934,7 @@ fn lease_counts_line(lease: &wipe_license::LeaseState) -> String {
 /// *no* licence at all is a different, supported thing — free tier.
 fn build_license_context(
     license_path: Option<PathBuf>,
-    vendor_root_b64: Vec<String>,
+    roots: &[VerifyingKey],
     station_key_id: &str,
     station_id: &str,
     lease_store: Arc<dyn wipe_server::LeaseStore>,
@@ -918,14 +950,13 @@ fn build_license_context(
         ));
     };
 
-    if vendor_root_b64.is_empty() {
+    if roots.is_empty() {
         return Err(anyhow!(
             "--license needs --vendor-root-b64: an unverified licence proves nothing"
         ));
     }
-    let roots = decode_keys("vendor-root-b64", vendor_root_b64)?;
     let license = wipe_license::load_license(&path).map_err(|e| anyhow!("{e}"))?;
-    wipe_license::check_installable(&license, station_key_id, &roots)
+    wipe_license::check_installable(&license, station_key_id, roots)
         .map_err(|p| anyhow!("cannot install {}: {p}", path.display()))?;
 
     let ent = &license.body.entitlements;
@@ -1100,6 +1131,55 @@ mod tests {
     use super::*;
     use wipe_license::Feature;
 
+    /// `serve` hands its `--vendor-root-b64` roots to the station even with
+    /// no `--license`, so a licence can be installed at runtime.
+    #[tokio::test]
+    async fn serve_without_a_licence_still_trusts_its_vendor_roots_for_runtime_install() {
+        let root = wipe_license::VendorRoot::generate();
+        let station = |roots: Vec<VerifyingKey>| {
+            let backend = Arc::new(MockBackend::with_catalog(
+                wipe_engine_mock::default_devices_public(),
+                MockTiming::fast(),
+            ));
+            let state = AppState::new(backend, None, Arc::new(SigningKey::generate()));
+            let store: Arc<dyn wipe_server::LeaseStore> =
+                Arc::new(wipe_server::EphemeralLeaseStore::new("test".into()));
+            let ctx =
+                build_license_context(None, &roots, "ed25519:test", "station-1", store).unwrap();
+            apply_licensing(state, ctx, roots)
+        };
+        let licence_for = |state: &AppState| {
+            let now = time::OffsetDateTime::now_utc();
+            let ent = wipe_license::Entitlements {
+                customer_id: "c".into(),
+                customer_name: "C".into(),
+                quota: wipe_license::Quota::Unlimited,
+                scope: wipe_license::Scope::Site {
+                    site_id: "s".into(),
+                },
+                not_before: now - time::Duration::days(1),
+                not_after: now + time::Duration::days(30),
+                features: vec![],
+                allowed_methods: wipe_license::AllowedMethods::All,
+                machine_binding: None,
+            };
+            let licence = root
+                .issue("lic-rt", state.signing_key.public_key_id(), ent, now)
+                .unwrap();
+            serde_json::to_string(&licence).unwrap()
+        };
+
+        let roots = decode_keys("vendor-root-b64", vec![root.verifying_key().to_base64()]).unwrap();
+        let state = station(roots);
+        assert!(state.install_license(&licence_for(&state)).is_ok());
+
+        let state = station(Vec::new());
+        assert_eq!(
+            state.install_license(&licence_for(&state)),
+            Err(wipe_server::LicenseInstallError::NoVendorRoot)
+        );
+    }
+
     /// Exhaustive: a new `Feature` variant fails to compile here until it is
     /// listed, and then fails the test until `parse_feature` accepts it.
     fn all_features() -> Vec<Feature> {
@@ -1165,8 +1245,7 @@ mod tests {
         let dir = lease_tmpdir("unlicensed");
         let path = dir.join("lease-state.json");
         let store = Arc::new(wipe_server::LocalFileLeaseStore::new(path.clone()));
-        let ctx =
-            build_license_context(None, Vec::new(), "ed25519:test", "station-1", store).unwrap();
+        let ctx = build_license_context(None, &[], "ed25519:test", "station-1", store).unwrap();
         assert_eq!(
             ctx.lease_persistence().tier,
             wipe_server::StoreTier::LocalFile
@@ -1191,8 +1270,7 @@ mod tests {
         seeded.evaluation_erasures = 3;
         let store = Arc::new(wipe_server::LocalFileLeaseStore::new(path));
         wipe_server::LeaseStore::save(store.as_ref(), &seeded).unwrap();
-        let ctx =
-            build_license_context(None, Vec::new(), "ed25519:test", "station-1", store).unwrap();
+        let ctx = build_license_context(None, &[], "ed25519:test", "station-1", store).unwrap();
         assert_eq!(
             lease_counts_line(&ctx.lease_state()),
             "lease counts: no licensed erasures (no licence seen), 3 evaluation erasure(s) on \
@@ -1211,8 +1289,7 @@ mod tests {
         let store = Arc::new(wipe_server::LocalFileLeaseStore::new(path));
         wipe_server::LeaseStore::save(store.as_ref(), &seeded).unwrap();
         // Unlicensed start: the stored count is kept, and named by its licence.
-        let ctx =
-            build_license_context(None, Vec::new(), "ed25519:test", "station-1", store).unwrap();
+        let ctx = build_license_context(None, &[], "ed25519:test", "station-1", store).unwrap();
         assert_eq!(
             lease_counts_line(&ctx.lease_state()),
             "lease counts: 5 licensed erasure(s) under licence lic-old, 2 evaluation \
@@ -1251,7 +1328,7 @@ mod tests {
 
         let ctx = build_license_context(
             Some(license_path),
-            vec![root.verifying_key().to_base64()],
+            &[root.verifying_key()],
             "ed25519:test",
             "station-1",
             store,
@@ -1280,8 +1357,7 @@ mod tests {
         let (_, lease) = serve_stores(&store_cfg_in(&dir), false);
         set(0o700).unwrap();
         assert_eq!(lease.tier(), wipe_server::StoreTier::Ephemeral);
-        let ctx =
-            build_license_context(None, Vec::new(), "ed25519:test", "station-1", lease).unwrap();
+        let ctx = build_license_context(None, &[], "ed25519:test", "station-1", lease).unwrap();
         let line = lease_store_line(&ctx.lease_persistence());
         assert!(
             line.contains("quota count and clock-rollback protection reset on reboot"),
@@ -1294,8 +1370,7 @@ mod tests {
         let store = Arc::new(wipe_server::EphemeralLeaseStore::new(
             "This station cannot write /ro.".into(),
         ));
-        let ctx =
-            build_license_context(None, Vec::new(), "ed25519:test", "station-1", store).unwrap();
+        let ctx = build_license_context(None, &[], "ed25519:test", "station-1", store).unwrap();
         let line = lease_store_line(&ctx.lease_persistence());
         assert!(line.starts_with("lease store: Ephemeral at "), "{line}");
         assert!(

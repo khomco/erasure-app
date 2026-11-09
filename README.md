@@ -374,6 +374,7 @@ their primary signature only.
 | `POST /api/manifests/:id/concurrence` | Concur (attested, a different signer) → `completed`, Jobs `Destroyed` |
 | `GET /api/destruction/policy` | The station's concurrence policy → `{concurrence_policy}` |
 | `GET /api/license` | The station's licence state, read-only (never moves the clock watermark or saves lease state) → `{status, operator_message, customer, not_after, instance_public_key_id, lapse_policy, fingerprint}`; licence fields are `null` when unlicensed |
+| `POST /api/license` | Install a licence while the station runs; the body is the licence file's JSON. Checked as at start-up (it must verify against a `--vendor-root-b64` root and name this station's signing key) and answered with the same view as `GET /api/license`; the running lease (watermark, counts) is kept. 409 when the station was started with no vendor root, 422 when the licence does not parse, verify or name this station's key (`{"error": …}`; nothing changes). Held in memory until restart |
 
 ## Design highlights
 
@@ -477,8 +478,8 @@ positions are enumeration order, not physical bays.
 - Licence lapse policy on the station: the hub writes the ADR-0012 policy
   into licences, but no station code reads it, so `stop` is not enforced.
 - Station ↔ hub connection: `wipe-hub` exists and issues licences, but no
-  station talks to it. Licences reach a station as a file passed to
-  `serve --license`; certs are not uploaded anywhere.
+  station talks to it. Licences reach a station as a file, passed to
+  `serve --license` or POSTed to `/api/license`; certs are not uploaded anywhere.
 - Control-plane configuration tier (ADR-0003 tier 2): `--control-plane-url`
   is accepted, but the probe always fails, so the station falls back to the
   ephemeral tier.
@@ -494,7 +495,11 @@ positions are enumeration order, not physical bays.
   which is not enforced yet). It informs only and never blocks a job. The Certificate page shows each certificate's own
   marking: an "Evaluation" pill and a Licence field, or the customer named in the attached
   licence, labelled unchecked (the browser holds no vendor root; `verify-cert
-  --vendor-root-b64` checks the chain). Installing a licence is still the `serve --license` flag.
+  --vendor-root-b64` checks the chain). A licence is installed with the `serve --license` flag at start-up or, without a restart,
+  by POSTing the licence file to `/api/license` (it must verify against a root given with
+  `--vendor-root-b64`, which a request can never add; without one the route answers 409). A
+  licence installed that way lasts until the station restarts, which goes back to the
+  `--license` licence or to evaluation; there is no install form in the bench UI yet.
   Licensing never blocks an erasure (ADR-0005).
 - RBAC, SAML/OIDC on the station, customer cert portal.
 - PDF/A-3 cert rendering (JSON-LD only for now; PDF wraps the JSON later).

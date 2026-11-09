@@ -2560,3 +2560,320 @@ async fn license_route_reports_a_failed_lease_save() {
         "{view}"
     );
 }
+
+// --- POST /api/license (licence-visibility story 4) --------------------------
+
+/// A station started with `roots` (`--vendor-root-b64`) and, optionally, a
+/// licence context, signing with `key`.
+async fn spawn_server_with_roots(
+    key: Arc<SigningKey>,
+    roots: Vec<VerifyingKey>,
+    license: Option<Arc<wipe_server::LicenseContext>>,
+) -> (String, AppState) {
+    let backend = Arc::new(MockBackend::with_catalog(
+        wipe_engine_mock::default_devices_public(),
+        MockTiming::fast(),
+    ));
+    let mut state = AppState::new(backend, None, key).with_vendor_roots(roots);
+    if let Some(license) = license {
+        state = state.with_license(license);
+    }
+    let app = router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), state)
+}
+
+/// A licence `license_id` from `root` for the instance key `key_id`.
+fn issue_licence(
+    root: &wipe_license::VendorRoot,
+    license_id: &str,
+    key_id: &str,
+    not_after: time::OffsetDateTime,
+) -> wipe_license::LicenseCertificate {
+    let now = time::OffsetDateTime::now_utc();
+    let ent = wipe_license::Entitlements {
+        customer_id: format!("cust-{license_id}"),
+        customer_name: "Acme Recycling".into(),
+        quota: wipe_license::Quota::Unlimited,
+        scope: wipe_license::Scope::Site {
+            site_id: "s".into(),
+        },
+        not_before: now - time::Duration::days(60),
+        not_after,
+        features: vec![],
+        allowed_methods: wipe_license::AllowedMethods::All,
+        machine_binding: None,
+    };
+    root.issue(license_id, key_id, ent, now).unwrap()
+}
+
+fn in_30_days() -> time::OffsetDateTime {
+    time::OffsetDateTime::now_utc() + time::Duration::days(30)
+}
+
+/// POST `body` to `/api/license`.
+async fn post_license(base: &str, body: impl Into<reqwest::Body>) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/license"))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap())
+}
+
+/// Erase `device` and return its certificate.
+async fn erase_and_certify(base: &str, device: &str) -> serde_json::Value {
+    let client = reqwest::Client::new();
+    let job_id = http_create_job(&client, base, device).await;
+    let (status, body) = http_post(&client, format!("{base}/api/jobs/{job_id}/start"), None).await;
+    assert_eq!(status, 200, "{body}");
+    http_wait_for_state(&client, base, &job_id, "erased").await;
+    http_wait_for_certificate(&client, base, &job_id).await
+}
+
+/// A station with a valid licence `lic-a` from `root`, with some lease
+/// history, so a rejected or accepted install can be compared against it.
+fn licensed_with_a(
+    root: &wipe_license::VendorRoot,
+    key: &SigningKey,
+) -> Arc<wipe_server::LicenseContext> {
+    let licence = issue_licence(root, "lic-a", &key.public_key_id(), in_30_days());
+    let mut lease =
+        wipe_license::LeaseState::new(time::OffsetDateTime::now_utc() - time::Duration::hours(2));
+    lease.license_id = Some("lic-a".into());
+    lease.erasures_used = 4;
+    lease.evaluation_erasures = 2;
+    Arc::new(wipe_server::LicenseContext::licensed(
+        "station-1",
+        wipe_license::AttestationChain::new(licence),
+        lease,
+    ))
+}
+
+#[tokio::test]
+async fn installing_a_licence_on_an_unlicensed_station_licenses_the_next_certificate() {
+    let root = wipe_license::VendorRoot::generate();
+    let key = Arc::new(SigningKey::generate());
+    let (base, _state) =
+        spawn_server_with_roots(key.clone(), vec![root.verifying_key()], None).await;
+    assert_eq!(get_license(&base).await["status"]["status"], "unlicensed");
+
+    let licence = issue_licence(&root, "lic-1", &key.public_key_id(), in_30_days());
+    let (status, view) = post_license(&base, serde_json::to_string(&licence).unwrap()).await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["status"]["status"], "valid", "{view}");
+    assert_eq!(
+        view["customer"],
+        json!({ "id": "cust-lic-1", "name": "Acme Recycling" })
+    );
+    assert_eq!(view["instance_public_key_id"], key.public_key_id());
+    assert_eq!(get_license(&base).await, view);
+
+    let signed = erase_and_certify(&base, "dev-nvme-0").await;
+    assert_eq!(signed["certificate"]["evaluation"], false, "{signed}");
+    assert_eq!(
+        signed["attestation"]["license"]["body"]["license_id"],
+        "lic-1"
+    );
+    let parsed: wipe_cert::SignedCertificate = serde_json::from_value(signed).unwrap();
+    let chain: wipe_license::AttestationChain =
+        serde_json::from_value(parsed.attestation.clone().unwrap()).unwrap();
+    assert!(wipe_license::verify_chain(
+        Some(&chain),
+        &parsed.signature.public_key_id,
+        time::OffsetDateTime::now_utc(),
+        &[root.verifying_key()],
+    )
+    .is_licensed());
+}
+
+#[tokio::test]
+async fn replacing_a_licence_restarts_only_the_licensed_count() {
+    let root = wipe_license::VendorRoot::generate();
+    let key = Arc::new(SigningKey::generate());
+    let ctx = licensed_with_a(&root, &key);
+    let before = ctx.lease_state();
+    let (base, state) =
+        spawn_server_with_roots(key.clone(), vec![root.verifying_key()], Some(ctx)).await;
+
+    let b = issue_licence(&root, "lic-b", &key.public_key_id(), in_30_days());
+    let (status, view) = post_license(&base, serde_json::to_string(&b).unwrap()).await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["customer"]["id"], "cust-lic-b");
+    assert_eq!(get_license(&base).await["customer"]["id"], "cust-lic-b");
+    let lease = state.license().lease_state();
+    assert_eq!(lease.license_id.as_deref(), Some("lic-b"));
+    assert_eq!(lease.erasures_used, 0);
+    assert_eq!(lease.evaluation_erasures, before.evaluation_erasures);
+    assert_eq!(lease.time_watermark, before.time_watermark);
+}
+
+#[tokio::test]
+async fn reinstalling_the_same_licence_keeps_the_licensed_count() {
+    let root = wipe_license::VendorRoot::generate();
+    let key = Arc::new(SigningKey::generate());
+    let ctx = licensed_with_a(&root, &key);
+    let (base, state) =
+        spawn_server_with_roots(key.clone(), vec![root.verifying_key()], Some(ctx)).await;
+
+    let a = issue_licence(&root, "lic-a", &key.public_key_id(), in_30_days());
+    let (status, view) = post_license(&base, serde_json::to_string(&a).unwrap()).await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(state.license().lease_state().erasures_used, 4);
+}
+
+#[tokio::test]
+async fn an_expired_but_authentic_licence_is_installed_and_reported_expired() {
+    let root = wipe_license::VendorRoot::generate();
+    let key = Arc::new(SigningKey::generate());
+    let (base, _state) =
+        spawn_server_with_roots(key.clone(), vec![root.verifying_key()], None).await;
+    let past = time::OffsetDateTime::now_utc() - time::Duration::days(3);
+    let licence = issue_licence(&root, "lic-old", &key.public_key_id(), past);
+    let (status, view) = post_license(&base, serde_json::to_string(&licence).unwrap()).await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["status"]["status"], "expired", "{view}");
+    assert_eq!(get_license(&base).await, view);
+}
+
+#[tokio::test]
+async fn a_body_that_is_not_a_licence_is_422_and_changes_nothing() {
+    let root = wipe_license::VendorRoot::generate();
+    let key = Arc::new(SigningKey::generate());
+    let ctx = licensed_with_a(&root, &key);
+    let (base, state) =
+        spawn_server_with_roots(key.clone(), vec![root.verifying_key()], Some(ctx)).await;
+    let before = get_license(&base).await;
+    let lease_before = state.license().lease_state();
+    let bodies: [&[u8]; 4] = [b"\"hello\"", b"{}", b"hello", b"{\"a\": \"\xff\xfe\"}"];
+    for body in bodies {
+        let (status, err) = post_license(&base, body.to_vec()).await;
+        assert_eq!(status, 422, "{body:?}: {err}");
+        assert!(
+            err["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("not a licence file: "),
+            "{body:?}: {err}"
+        );
+        assert_eq!(err.as_object().unwrap().len(), 1, "{err}");
+    }
+    assert_eq!(get_license(&base).await, before);
+    assert_eq!(state.license().lease_state(), lease_before);
+}
+
+#[tokio::test]
+async fn an_untrusted_or_tampered_licence_is_422_and_the_next_certificate_is_unchanged() {
+    let root = wipe_license::VendorRoot::generate();
+    let key = Arc::new(SigningKey::generate());
+    let ctx = licensed_with_a(&root, &key);
+    let (base, state) =
+        spawn_server_with_roots(key.clone(), vec![root.verifying_key()], Some(ctx)).await;
+    let before = get_license(&base).await;
+    let lease_before = state.license().lease_state();
+
+    let other_root = wipe_license::VendorRoot::generate();
+    let foreign = issue_licence(&other_root, "lic-x", &key.public_key_id(), in_30_days());
+    let mut tampered = issue_licence(&root, "lic-y", &key.public_key_id(), in_30_days());
+    tampered.body.entitlements.customer_name = "Someone Else".into();
+    for licence in [foreign, tampered] {
+        let (status, err) = post_license(&base, serde_json::to_string(&licence).unwrap()).await;
+        assert_eq!(status, 422, "{err}");
+        assert!(
+            err["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("licence did not verify"),
+            "{err}"
+        );
+    }
+    assert_eq!(get_license(&base).await, before);
+    assert_eq!(state.license().lease_state(), lease_before);
+
+    let signed = erase_and_certify(&base, "dev-nvme-0").await;
+    assert_eq!(signed["certificate"]["evaluation"], false, "{signed}");
+    assert_eq!(
+        signed["attestation"]["license"]["body"]["license_id"],
+        "lic-a"
+    );
+}
+
+#[tokio::test]
+async fn a_licence_for_another_station_is_422_naming_both_keys() {
+    let root = wipe_license::VendorRoot::generate();
+    let key = Arc::new(SigningKey::generate());
+    let (base, _state) =
+        spawn_server_with_roots(key.clone(), vec![root.verifying_key()], None).await;
+    let other_key = SigningKey::generate().public_key_id();
+    let licence = issue_licence(&root, "lic-1", &other_key, in_30_days());
+    let (status, err) = post_license(&base, serde_json::to_string(&licence).unwrap()).await;
+    assert_eq!(status, 422, "{err}");
+    let expected = wipe_license::InstallProblem::WrongInstanceKey {
+        expected: key.public_key_id(),
+        found: other_key,
+    }
+    .to_string();
+    assert_eq!(err, json!({ "error": expected }));
+    assert_eq!(get_license(&base).await["status"]["status"], "unlicensed");
+
+    let signed = erase_and_certify(&base, "dev-nvme-0").await;
+    assert_eq!(signed["certificate"]["evaluation"], true, "{signed}");
+    assert!(signed.get("attestation").is_none(), "{signed}");
+}
+
+#[tokio::test]
+async fn a_station_with_no_vendor_root_refuses_an_install_with_409() {
+    let root = wipe_license::VendorRoot::generate();
+    let key = Arc::new(SigningKey::generate());
+    let (base, _state) = spawn_server_with_roots(key.clone(), vec![], None).await;
+    let licence = issue_licence(&root, "lic-1", &key.public_key_id(), in_30_days());
+    let (status, err) = post_license(&base, serde_json::to_string(&licence).unwrap()).await;
+    assert_eq!(status, 409, "{err}");
+    let msg = err["error"].as_str().unwrap();
+    assert!(msg.contains("no vendor root is configured"), "{err}");
+    assert!(msg.contains("--vendor-root-b64"), "{err}");
+    assert_eq!(get_license(&base).await["status"]["status"], "unlicensed");
+
+    // `AppState::new`, as the desktop shell builds it, trusts no root either.
+    let plain = spawn_server().await;
+    let (status, _) = post_license(&plain, serde_json::to_string(&licence).unwrap()).await;
+    assert_eq!(status, 409);
+}
+
+#[tokio::test]
+async fn installing_over_an_unreadable_lease_file_reports_it_and_never_writes_it() {
+    let dir = license_tmpdir("install-corrupt");
+    let path = dir.join("lease-state.json");
+    std::fs::write(&path, b"not json").unwrap();
+    let ctx = Arc::new(wipe_server::LicenseContext::open(
+        "station-1",
+        None,
+        Arc::new(wipe_server::LocalFileLeaseStore::new(path.clone())),
+        time::OffsetDateTime::now_utc(),
+    ));
+    let root = wipe_license::VendorRoot::generate();
+    let key = Arc::new(SigningKey::generate());
+    let (base, state) =
+        spawn_server_with_roots(key.clone(), vec![root.verifying_key()], Some(ctx)).await;
+    let licence = issue_licence(&root, "lic-1", &key.public_key_id(), in_30_days());
+    let (status, view) = post_license(&base, serde_json::to_string(&licence).unwrap()).await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(
+        view["status"]["status"], "lease_state_unavailable",
+        "{view}"
+    );
+    let decision = state
+        .license()
+        .signing_decision(time::OffsetDateTime::now_utc());
+    assert!(decision.evaluation);
+    state.license().record_erasure();
+    assert_eq!(std::fs::read(&path).unwrap(), b"not json");
+    let _ = std::fs::remove_dir_all(&dir);
+}

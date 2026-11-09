@@ -237,6 +237,14 @@ export const api = {
   destructionPolicy: () =>
     jsonFetch<{ concurrence_policy: ConcurrencePolicy }>("/api/destruction/policy"),
   license: () => jsonFetch<LicenseInfo>("/api/license"),
+  /** Install a licence while the station runs. `licenceJson` is the licence
+   *  file's text, sent as is. Resolves to the new licence state; otherwise
+   *  rejects with an Error whose message carries the HTTP status and the
+   *  station's `{"error"}` body (409 when it trusts no vendor root, 422 when
+   *  the licence does not parse, verify or name this station's key). Held until
+   *  the station restarts. */
+  installLicense: (licenceJson: string) =>
+    jsonFetch<LicenseInfo>("/api/license", { method: "POST", body: licenceJson }),
 };
 
 export function formatBytes(n: number): string {

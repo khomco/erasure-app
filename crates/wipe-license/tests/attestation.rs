@@ -686,6 +686,16 @@ fn an_untrusted_licence_is_refused_before_the_key_check() {
 }
 
 #[test]
+fn a_malformed_licence_file_names_the_file_and_the_problem() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("licence.json");
+    std::fs::write(&path, b"{ not json").unwrap();
+    let err = wipe_license::load_license(&path).unwrap_err().to_string();
+    assert!(err.contains(&path.display().to_string()), "{err}");
+    assert!(err.contains("not a licence file"), "{err}");
+}
+
+#[test]
 fn a_licence_round_trips_through_a_file() {
     use wipe_license::{load_license, save_license};
     let root = VendorRoot::generate();

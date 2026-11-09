@@ -18,8 +18,9 @@
 //! every status check, signing decision and recorded erasure, so a restart
 //! neither resets the clock watermark nor refills a `Count` quota. Lease I/O
 //! never fails a signature and never holds one up for longer than
-//! [`LEASE_SAVE_TIMEOUT`]: every save runs on one writer thread per context,
-//! and a save that fails or does not finish in time only marks certificates
+//! [`LEASE_SAVE_TIMEOUT`]: every save runs on one writer thread, shared by a
+//! context and every context derived from it with
+//! [`with_chain`](LicenseContext::with_chain), and a save that fails or does not finish in time only marks certificates
 //! `evaluation` (ROADMAP §0.2), with [`LeaseStatus::LeaseStateUnavailable`]
 //! saying why.
 
@@ -46,23 +47,29 @@ pub const LEASE_SAVE_TIMEOUT: Duration = Duration::from_secs(2);
 type SaveAck = mpsc::Sender<Result<(), StoreError>>;
 type SaveJob = (LeaseState, SaveAck);
 
+/// The installed licence (if any) and the running lease.
+///
+/// The lease cells (`lease`, `save_fault`, `writer`) are shared by every
+/// context derived through [`with_chain`](Self::with_chain), so a licence
+/// installed at runtime keeps the running lease and saves through the same
+/// ordered writer as a signing decision still holding the previous context.
 pub struct LicenseContext {
     chain: Option<AttestationChain>,
     fingerprint: String,
-    lease: RwLock<LeaseState>,
+    lease: Arc<RwLock<LeaseState>>,
     store: Arc<dyn LeaseStore>,
     /// Set when the stored lease exists but could not be read or parsed.
-    /// Sticky for the life of the context: that file is never overwritten,
-    /// so the operator can inspect or repair it.
+    /// Sticky for the life of the lease: that file is never overwritten, so
+    /// the operator can inspect or repair it.
     load_fault: Option<String>,
     /// The last save's error, cleared by the next successful save.
-    save_fault: Mutex<Option<String>>,
+    save_fault: Arc<Mutex<Option<String>>>,
     /// Feeds the writer thread, which performs every `store.save` in the
     /// order snapshots were sent. Taking the snapshot and sending it under
     /// this one lock is what keeps an older snapshot from landing after a
     /// newer one. `None` if the thread could not be started. Dropping the
-    /// context drops the sender and ends the thread.
-    writer: Mutex<Option<mpsc::Sender<SaveJob>>>,
+    /// last context sharing it drops the sender and ends the thread.
+    writer: Arc<Mutex<Option<mpsc::Sender<SaveJob>>>>,
 }
 
 /// One thread that saves lease snapshots in submission order. A hung write
@@ -166,11 +173,42 @@ impl LicenseContext {
         Self {
             chain,
             fingerprint: machine_fingerprint(station_id),
-            lease: RwLock::new(lease),
+            lease: Arc::new(RwLock::new(lease)),
             store,
             load_fault,
-            save_fault: Mutex::new(None),
-            writer: Mutex::new(writer),
+            save_fault: Arc::new(Mutex::new(None)),
+            writer: Arc::new(Mutex::new(writer)),
+        }
+    }
+
+    /// This station under `chain`, keeping the running lease: the same
+    /// watermark, evaluation count, store, writer thread and lease faults.
+    /// For a licence installed while the station runs.
+    ///
+    /// The licensed count follows [`open`](Self::open)'s rule: it restarts at
+    /// 0 when `chain`'s licence id differs from the lease's, and is kept when
+    /// it is the same licence. The change is made to the shared lease in RAM
+    /// at once (so `self` sees it too) and reaches the store with the next
+    /// save; a lease file that failed to load is still never written.
+    ///
+    /// Does not verify `chain`: run `wipe_license::check_installable` first.
+    pub fn with_chain(&self, chain: AttestationChain) -> LicenseContext {
+        {
+            let mut lease = self.lease.write();
+            let id = &chain.license.body.license_id;
+            if lease.license_id.as_deref() != Some(id.as_str()) {
+                lease.erasures_used = 0;
+                lease.license_id = Some(id.clone());
+            }
+        }
+        LicenseContext {
+            chain: Some(chain),
+            fingerprint: self.fingerprint.clone(),
+            lease: self.lease.clone(),
+            store: self.store.clone(),
+            load_fault: self.load_fault.clone(),
+            save_fault: self.save_fault.clone(),
+            writer: self.writer.clone(),
         }
     }
 
@@ -418,4 +456,168 @@ pub struct SigningDecision {
     /// invalidating an erasure signature an auditor already checked.
     pub attestation: Option<serde_json::Value>,
     pub status: LeaseStatus,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{StoreError, StoreTier};
+    use time::Duration;
+
+    /// A lease store in RAM that records saves, or whose load fails.
+    struct MemStore {
+        stored: Mutex<Option<LeaseState>>,
+        corrupt: bool,
+        saves: Mutex<usize>,
+    }
+
+    impl MemStore {
+        fn holding(state: Option<LeaseState>) -> Arc<Self> {
+            Arc::new(Self {
+                stored: Mutex::new(state),
+                corrupt: false,
+                saves: Mutex::new(0),
+            })
+        }
+        fn corrupt() -> Arc<Self> {
+            Arc::new(Self {
+                stored: Mutex::new(None),
+                corrupt: true,
+                saves: Mutex::new(0),
+            })
+        }
+    }
+
+    impl LeaseStore for MemStore {
+        fn tier(&self) -> StoreTier {
+            StoreTier::LocalFile
+        }
+        fn location(&self) -> String {
+            "mem".into()
+        }
+        fn detail(&self) -> String {
+            "mem".into()
+        }
+        fn load(&self) -> Result<Option<LeaseState>, StoreError> {
+            if self.corrupt {
+                return Err(StoreError::LeaseParse("garbage".into()));
+            }
+            Ok(self.stored.lock().clone())
+        }
+        fn save(&self, state: &LeaseState) -> Result<(), StoreError> {
+            *self.saves.lock() += 1;
+            *self.stored.lock() = Some(state.clone());
+            Ok(())
+        }
+    }
+
+    fn chain(license_id: &str) -> AttestationChain {
+        let now = OffsetDateTime::now_utc();
+        let ent = Entitlements {
+            customer_id: "c".into(),
+            customer_name: "C".into(),
+            quota: wipe_license::Quota::Unlimited,
+            scope: wipe_license::Scope::Site {
+                site_id: "s".into(),
+            },
+            not_before: now - Duration::days(30),
+            not_after: now + Duration::days(30),
+            features: vec![],
+            allowed_methods: wipe_license::AllowedMethods::All,
+            machine_binding: None,
+        };
+        let cert = wipe_license::VendorRoot::generate()
+            .issue(license_id, "ed25519:k", ent, now)
+            .unwrap();
+        AttestationChain::new(cert)
+    }
+
+    fn stored(license_id: Option<&str>, used: u64, evaluation: u64) -> LeaseState {
+        let mut s = LeaseState::new(OffsetDateTime::now_utc() - Duration::hours(1));
+        s.license_id = license_id.map(str::to_owned);
+        s.erasures_used = used;
+        s.evaluation_erasures = evaluation;
+        s
+    }
+
+    #[test]
+    fn a_different_licence_restarts_the_licensed_count_and_keeps_the_rest() {
+        let before = stored(Some("lic-a"), 5, 3);
+        let store = MemStore::holding(Some(before.clone()));
+        let ctx = LicenseContext::open(
+            "st",
+            Some(chain("lic-a")),
+            store.clone(),
+            before.time_watermark,
+        );
+        assert_eq!(ctx.lease_state().erasures_used, 5);
+
+        let next = ctx.with_chain(chain("lic-b"));
+        let lease = next.lease_state();
+        assert_eq!(lease.erasures_used, 0);
+        assert_eq!(lease.license_id.as_deref(), Some("lic-b"));
+        assert_eq!(lease.evaluation_erasures, 3);
+        assert_eq!(lease.time_watermark, before.time_watermark);
+        assert_eq!(next.fingerprint(), ctx.fingerprint());
+        assert_eq!(
+            next.entitlements().map(|e| e.customer_id.as_str()),
+            Some("c")
+        );
+    }
+
+    #[test]
+    fn the_same_licence_keeps_the_licensed_count() {
+        let before = stored(Some("lic-a"), 5, 0);
+        let store = MemStore::holding(Some(before.clone()));
+        let ctx = LicenseContext::open("st", Some(chain("lic-a")), store, before.time_watermark);
+        assert_eq!(
+            ctx.with_chain(chain("lic-a")).lease_state().erasures_used,
+            5
+        );
+    }
+
+    #[test]
+    fn an_unlicensed_station_takes_a_licence_with_its_evaluation_count() {
+        let before = stored(None, 0, 7);
+        let store = MemStore::holding(Some(before.clone()));
+        let ctx = LicenseContext::open("st", None, store, before.time_watermark);
+        let next = ctx.with_chain(chain("lic-a"));
+        let lease = next.lease_state();
+        assert_eq!(lease.evaluation_erasures, 7);
+        assert_eq!(lease.erasures_used, 0);
+        assert_eq!(lease.license_id.as_deref(), Some("lic-a"));
+        assert!(matches!(
+            next.view(OffsetDateTime::now_utc()).status,
+            LeaseStatus::Valid { .. }
+        ));
+    }
+
+    #[test]
+    fn both_contexts_share_one_lease_and_one_writer() {
+        let store = MemStore::holding(None);
+        let ctx = LicenseContext::open("st", None, store.clone(), OffsetDateTime::now_utc());
+        let next = ctx.with_chain(chain("lic-a"));
+        // A decision still holding the old context counts into the same lease.
+        ctx.record_evaluation_erasure();
+        next.record_erasure();
+        let lease = next.lease_state();
+        assert_eq!(lease.evaluation_erasures, 1);
+        assert_eq!(lease.erasures_used, 1);
+        assert_eq!(ctx.lease_state(), lease);
+        assert_eq!(store.stored.lock().clone(), Some(lease));
+    }
+
+    #[test]
+    fn a_load_fault_is_inherited_and_the_file_is_never_written() {
+        let store = MemStore::corrupt();
+        let ctx = LicenseContext::open("st", None, store.clone(), OffsetDateTime::now_utc());
+        let next = ctx.with_chain(chain("lic-a"));
+        assert!(matches!(
+            next.view(OffsetDateTime::now_utc()).status,
+            LeaseStatus::LeaseStateUnavailable { .. }
+        ));
+        assert!(next.signing_decision(OffsetDateTime::now_utc()).evaluation);
+        next.record_erasure();
+        assert_eq!(*store.saves.lock(), 0);
+    }
 }
