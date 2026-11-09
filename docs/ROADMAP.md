@@ -455,7 +455,9 @@ build.** Three frontends, one engine.
   Devices bay map ticks idle bays; one shared classification, intent and ticket, a
   per-drive asset tag, one Job created and started per drive through the existing
   routes, and a per-drive results list.*
-- O1.5 Queue view with throughput and ETA.
+- O1.5 Queue view with throughput and ETA. *Grouped Jobs list shipped 2026-11-09
+  (bench-throughput-inbox story 4; CONTEXT §8, §10.2): Active, Queued and Finished
+  sections with counts. Throughput and ETA not built.*
 - **Exit:** a supervisor can prove who ran what, and an operator can start a
   tray in one gesture.
 

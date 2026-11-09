@@ -5,6 +5,8 @@ import { CheckCircle2, CircleOff, FileSignature, Loader2, Trash2, XCircle } from
 import { api, classNames, formatBytes } from "@/api/client";
 import type { Job, JobStateLabel } from "@/api/types";
 import { latestErasure, useEventStream } from "@/api/ws";
+import type { InboxSource } from "./inbox";
+import { groupJobs, type JobGroupKind } from "./jobGroups";
 
 function StateIcon({ state }: { state: JobStateLabel }) {
   if (state === "erased")
@@ -19,6 +21,10 @@ function StateIcon({ state }: { state: JobStateLabel }) {
   return <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />;
 }
 
+/**
+ * The Jobs page (`/jobs`): every Job on this station in three sections —
+ * Active, Queued, Finished — each headed with its count (`groupJobs`).
+ */
 export function JobsPage() {
   const jobs = useQuery({
     queryKey: ["jobs"],
@@ -28,9 +34,28 @@ export function JobsPage() {
   // Pulse the list whenever a job event comes in.
   useEventStream(() => {});
 
-  if (jobs.isLoading) return <div className="text-slate-400">Loading jobs…</div>;
-  const list = (jobs.data ?? []).slice().reverse();
-  if (list.length === 0) {
+  return <JobsView jobs={jobs} />;
+}
+
+/** The page body for a given list state: error, loading, or the list. No queries. */
+export function JobsView({ jobs, RowLink }: { jobs: InboxSource<Job>; RowLink?: JobRowLink }) {
+  if (jobs.error) {
+    const message = jobs.error instanceof Error ? jobs.error.message : String(jobs.error);
+    return <div className="card text-rose-300">{message}</div>;
+  }
+  if (!jobs.data) return <div className="text-slate-400">Loading jobs…</div>;
+  return <JobsList jobs={jobs.data} RowLink={RowLink} />;
+}
+
+const GROUP_TITLE: Record<JobGroupKind, string> = {
+  active: "Active",
+  queued: "Queued",
+  finished: "Finished",
+};
+
+/** The grouped list, or the empty state. Presentational: no queries. */
+export function JobsList({ jobs, RowLink = RouterJobLink }: { jobs: readonly Job[]; RowLink?: JobRowLink }) {
+  if (jobs.length === 0) {
     return (
       <div className="card text-slate-400">
         No jobs yet. Start one from the Devices page.
@@ -38,18 +63,44 @@ export function JobsPage() {
     );
   }
   return (
-    <div className="space-y-2">
+    <div className="space-y-5">
       <h2 className="text-lg font-semibold">Jobs</h2>
-      <div className="space-y-2">
-        {list.map((j) => (
-          <JobRow key={j.id} job={j} />
-        ))}
-      </div>
+      {groupJobs(jobs).map((group) => (
+        <section key={group.kind} className="space-y-2">
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+            {GROUP_TITLE[group.kind]} · {group.jobs.length}
+          </h3>
+          {group.jobs.length === 0 ? (
+            <div className="text-sm text-slate-500">None</div>
+          ) : (
+            group.jobs.map((j) => <JobRow key={j.id} job={j} RowLink={RowLink} />)
+          )}
+        </section>
+      ))}
     </div>
   );
 }
 
-function JobRow({ job }: { job: Job }) {
+const ROW_CLASS = "block transition hover:border-indigo-500/40";
+
+/** Renders one row's anchor to its Job page. */
+export type JobRowLink = (props: { job: Job; className: string; children: React.ReactNode }) => React.ReactNode;
+
+/** The in-app link: TanStack `Link`, which needs a router context. */
+const RouterJobLink: JobRowLink = ({ job, className, children }) => (
+  <Link to="/jobs/$jobId" params={{ jobId: job.id }} className={className}>
+    {children}
+  </Link>
+);
+
+/** A plain `<a href="/jobs/<id>">`: renders without a router (static-render tests). */
+export const HrefJobLink: JobRowLink = ({ job, className, children }) => (
+  <a href={`/jobs/${job.id}`} className={className}>
+    {children}
+  </a>
+);
+
+function JobRow({ job, RowLink }: { job: Job; RowLink: JobRowLink }) {
   const erasure = latestErasure(job);
   const device = erasure?.device_snapshot;
   const progress = erasure?.progress;
@@ -60,11 +111,7 @@ function JobRow({ job }: { job: Job }) {
     job.state.state === "aborted";
 
   return (
-    <Link
-      to="/jobs/$jobId"
-      params={{ jobId: job.id }}
-      className="block transition hover:border-indigo-500/40"
-    >
+    <RowLink job={job} className={ROW_CLASS}>
       <div className="card flex items-center justify-between gap-4">
         <div className="flex min-w-0 items-center gap-3">
           <StateIcon state={job.state.state} />
@@ -100,6 +147,6 @@ function JobRow({ job }: { job: Job }) {
           <span className="pill">{job.state.state.replace(/_/g, " ")}</span>
         </div>
       </div>
-    </Link>
+    </RowLink>
   );
 }

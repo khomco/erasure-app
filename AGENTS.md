@@ -51,7 +51,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   deleting Mailpit messages.
 - Never pipe `cargo test` through `grep`/`awk` to summarize: compile errors are discarded and
   a broken build prints as a clean run (68844bf).
-- Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 362 tests, under a second.
+- Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 385 tests, under a second.
 - Portal (ADR-0006 §1): `pnpm install` at the root, then `pnpm --filter portal build`,
   `pnpm --filter portal typecheck`, `pnpm --filter portal test` (dev server on :5174, proxying
   `/api` to the hub on :7900). `wipe-hub serve` serves `apps/portal/dist` under the working
