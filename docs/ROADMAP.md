@@ -357,7 +357,10 @@ and **0008** (station ↔ hub protocol and the reconciliation contract).
   issued what.
 
 **A2 — Activation and reconciliation online**
-- A2.1 Activation endpoint + station-side wiring of `HttpLicenseClient`.
+- A2.1 Activation endpoint + station-side wiring. *Decided 2026-11-08 by
+  [ADR-0008](adr/0008-station-enrollment-and-licence-fetch.md): enrollment by
+  device authorization approved by an organization owner, and signed licence
+  fetch; built by `station-enrollment`.*
 - A2.2 Lease/usage reporting from station to hub, offline-tolerant.
 - A2.3 Revocation list: signed, windowed, pulled when online.
   **Honest limit to document (W2, L3): a station that never connects can never
@@ -509,7 +512,8 @@ it: three tiers a customer can buy, activate, renew and outgrow.
   exceeded (4.3).
 - **L-R4 Activation UX** in the operator portal: paste/upload a licence file,
   or enter an activation code that fetches it (A2). Must work with no network,
-  by file, forever.
+  by file, forever. The code path is ADR-0008: the bench shows a code and an
+  owner approves it in the portal (`station-enrollment`).
 - **L-R5 Expiry and renewal.** Warn at 30, 7 and 1 days. At expiry, the station keeps
   erasing and drops to `evaluation` certificates, with an unmissable banner.
   The exception is a licence carrying the customer's opt-in `stop` lapse policy
@@ -520,7 +524,8 @@ it: three tiers a customer can buy, activate, renew and outgrow.
   Annual offerings renew automatically as Stripe subscriptions (D15). Since
   2026-11-08 an owner issues each renewed station a renewed licence file from
   the portal and installs it by hand (licence-delivery story 2). A connected
-  station fetching its renewed licence by itself waits on D6 (ADR-0008).
+  station fetches its renewed licence by itself under ADR-0008
+  (`station-enrollment` story 5).
 - **L-R6 Revocation** with its honest limit stated in the docs (A2.3).
 - **L-R7 Upgrade paths**: machine → site, adding features mid-term, replacing a
   dead station's licence without a support call being the only route.
@@ -660,7 +665,8 @@ Enterprise data model► O4.1                     ← CONTEXT §11 v0.2 #4
 ## 6. ADR candidates
 
 0006 and 0007 were written on 2026-11-05 in a different shape from the rows
-below (see the ADRs). 0008–0010 are still unwritten. ADR-0011 (destruction by
+below (see the ADRs). 0008 was written on 2026-11-08 for enrollment and licence
+fetch only; its other scope below is still open. 0009–0010 are still unwritten. ADR-0011 (destruction by
 operator attestation) took the next free number. Each remaining one is
 load-bearing enough that building without it would bake in a decision nobody
 made deliberately.
@@ -669,7 +675,7 @@ made deliberately.
 | --- | --- | --- |
 | **0006** | Documentation + marketing site architecture: one in-repo Astro site, content layout, the generated-artifact drift-gate contract, the WASM verification target | W2, W3.2 |
 | **0007** | Control-plane persistence and tenancy: Postgres, multi-tenant with a vendor supertenant, and its relationship to the station-side store (ADR-0003) and the proposed Enterprise SQLite schema | A1 |
-| **0008** | Station ↔ hub protocol and reconciliation contract: REST vs gRPC, what a station sends, what it does when the hub is unreachable forever | A2 |
+| **0008** | Station ↔ hub protocol and reconciliation contract: REST vs gRPC, what a station sends, what it does when the hub is unreachable forever. *Partly written 2026-11-08: enrollment and licence fetch (REST, signed by the instance key). Usage reporting and revocation distribution remain.* | A2 |
 | **0009** | Operator identity, authentication and RBAC — including PXE first-boot authentication, an open CONTEXT §12 question with no answer | O1 |
 | **0010** | Licence scopes and seat model: site semantics, the honest limits of offline seat counting, revocation distribution, expiry behaviour | L2 |
 

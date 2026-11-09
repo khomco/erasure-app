@@ -1,0 +1,24 @@
+- id: "1"
+  title: Hub enrollment start and poll (device authorization)
+  description: >-
+    CAP-1 (ADR-0008 §1). Migration, signed start, RFC 8628 poll, throttle, audit.
+- id: "2"
+  title: Owner approves an enrollment in the portal
+  description: >-
+    CAP-2. /activate page; approval goes through stations::register.
+- id: "3"
+  title: wipestation enroll and signed station requests
+  description: >-
+    CAP-3. Shared request signer/verifier, CLI flow, hub address in config,
+    install via the runtime licence install, commerce demo path. Needs
+    licence-visibility story 4.
+- id: "4"
+  title: Register with platform in the bench app
+  description: >-
+    CAP-4. Desktop screen with code, QR and outcome; TS mirrors.
+- id: "5"
+  title: Connected stations fetch renewed licences
+  description: >-
+    CAP-5 (ADR-0008 §3). Challenge, signed licence fetch, automatic reissue,
+    24-hour check that never blocks a job.
+  spec_checkpoint: true
