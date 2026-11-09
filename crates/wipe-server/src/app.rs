@@ -588,9 +588,18 @@ wipestation serve --static-dir apps/desktop/dist</code></pre>
     axum::response::Html(body)
 }
 
+/// Bind `addr` and serve the station on it.
 pub async fn serve(state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
-    let app = router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_on(state, listener).await
+}
+
+/// Serve the station on a listener the host already bound, so a host can
+/// bind first and build the station with the address it actually got (the
+/// desktop shell does, to point its window at that address).
+pub async fn serve_on(state: AppState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
+    let addr = listener.local_addr()?;
+    let app = router(state);
     info!(%addr, "wipestation api listening");
     axum::serve(listener, app).await?;
     Ok(())

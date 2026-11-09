@@ -654,7 +654,10 @@ orchestrator and the hardware. Implementations:
 ### Three frontends, one engine
 
 - **Tauri window** — native shell pointed at the in-process Axum API,
-  initially hidden until `/api/health` responds.
+  initially hidden until `/api/health` responds. The shell binds first and
+  points the window at the address it bound; if the station cannot start
+  (port busy, bad `WIPESTATION_API_ADDR`, build error) the window opens on
+  a shell-served error page naming the reason instead.
 - **Axum HTTP + WebSocket** — same Axum, also serves the React UI;
   used by tablets and automation.
 - **Ratatui TUI** *(deferred)* — for the PXE/bootable scenario where
@@ -1407,9 +1410,8 @@ and resolve. None of these have a decided answer.
   never overwrites an existing file and is owner-only on Unix (on
   Windows it relies on the `%LOCALAPPDATA%` profile's access control,
   not an explicit mode), and a seed that cannot be read or is not 32
-  bytes stops start-up with its path named; on the desktop that error is
-  only logged and the window opens over no working API until story 3
-  makes it visible), or
+  bytes stops start-up with its path named; on the desktop the window
+  opens on a start-up error page naming it), or
   generated fresh on each start without a path (the desktop app when its
   app-data directory cannot be written or found; an existing
   `station.key` in an unwritable directory is ignored, so a fresh key
@@ -1461,7 +1463,12 @@ and resolve. None of these have a decided answer.
   simulator (identify mode) is attached; it keeps saved configuration,
   lease state and its signing key in its machine-local per-user app-data
   directory (Tauri `app_local_data_dir()`, not `~/.config/wipestation`),
-  has no licence, and uses a random station id on every launch.
+  has no licence, and uses a random station id on every launch. It binds
+  its address before touching its station files in that directory, so a
+  second copy started on the same address finds the port busy and shows
+  an error page instead. Copies on different addresses are not prevented:
+  there is no lock on the app-data directory, so they would share one
+  layout, lease state and signing key.
 - **Vendor console** — our side of the control plane: licence issuance,
   entitlements, revocation, cross-tenant support and metering.
 - **Fleet console** — the customer's side: their stations, their

@@ -25,11 +25,11 @@ parking_lot = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 url = { workspace = true }
+axum = { workspace = true }
 
 [dev-dependencies]
 wipe-common = { path = "../../../crates/wipe-common" }
 time = { workspace = true }
-axum = { workspace = true }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

@@ -10,8 +10,8 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Wipestation",
-        "url": "http://127.0.0.1:7878",
         "width": 1200,
         "height": 800,
         "minWidth": 900,
