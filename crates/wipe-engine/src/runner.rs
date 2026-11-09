@@ -117,23 +117,40 @@ impl JobRunner {
         Ok(id)
     }
 
-    /// Begin processing a queued Job. Spawns an async task that drives
-    /// the Job through one ErasureEvent (with verification if requested)
-    /// to a terminal disposition.
+    /// Begin processing a queued Job. Moves it `Queued` → `InProgress`
+    /// (check and transition under one write guard, so a second `start`
+    /// is refused), broadcasts that change, then spawns an async task that
+    /// drives the Job through one ErasureEvent (with verification if
+    /// requested) to a terminal disposition. If the Job has left
+    /// `InProgress` (aborted or escalated) before the task begins, the task
+    /// does nothing.
+    ///
+    /// Refused with `JobNotFound` for an unknown id and `InvalidState` if
+    /// the Job is not `Queued` (already started, escalated, aborted or
+    /// finished).
     ///
     /// Retries and escalation-to-destroy are explicit operator actions
     /// in v0.2 (`retry_erasure`, `escalate_to_destroy`) — automatic
     /// policy is deferred to SanitizationProfile in v0.2 #3.
     pub fn start(&self, id: Uuid) -> WipeResult<()> {
-        let job = self
-            .get(id)
-            .ok_or_else(|| WipeError::InvalidState(format!("job {id} not found")))?;
-        if job.state != wipe_common::JobState::Queued {
-            return Err(WipeError::InvalidState(format!(
-                "job {id} is in state {:?}",
-                job.state
-            )));
+        {
+            let mut inner = self.inner.write();
+            let job = inner.jobs.get_mut(&id).ok_or(WipeError::JobNotFound(id))?;
+            if job.state != wipe_common::JobState::Queued {
+                return Err(WipeError::InvalidState(format!(
+                    "job {id} is in state {:?}",
+                    job.state
+                )));
+            }
+            job.state = wipe_common::JobState::InProgress;
+            job.started_at = Some(OffsetDateTime::now_utc());
         }
+        let _ = self.events.send(JobBroadcast::JobStateChanged {
+            job_id: id,
+            from: wipe_common::JobState::Queued,
+            to: wipe_common::JobState::InProgress,
+            at: OffsetDateTime::now_utc(),
+        });
         let runner = self.clone();
         tokio::spawn(async move {
             if let Err(e) = runner.run_job(id).await {
@@ -151,18 +168,29 @@ impl JobRunner {
     /// Mark an in-flight Job as Aborted. Active ErasureEvent (if any) is
     /// not torn down — the running task will observe the state change
     /// and exit.
+    ///
+    /// Refused with `JobNotFound` for an unknown id and `InvalidState` for
+    /// a Job in any terminal state other than `Aborted` (`Erased`,
+    /// `Destroyed`, `Quarantined`). Aborting an already `Aborted` Job is an `Ok` no-op
+    /// with no broadcast, so a retried abort succeeds.
     pub async fn abort(&self, id: Uuid) -> WipeResult<()> {
-        let job = self
-            .get(id)
-            .ok_or_else(|| WipeError::InvalidState(format!("job {id} not found")))?;
-        if job.state.is_terminal() {
-            return Ok(());
-        }
-        let from = job.state;
-        self.mutate_job(id, |j| {
-            j.state = wipe_common::JobState::Aborted;
-            j.ended_at = Some(OffsetDateTime::now_utc());
-        });
+        let from = {
+            let mut inner = self.inner.write();
+            let job = inner.jobs.get_mut(&id).ok_or(WipeError::JobNotFound(id))?;
+            if job.state == wipe_common::JobState::Aborted {
+                return Ok(());
+            }
+            if job.state.is_terminal() {
+                return Err(WipeError::InvalidState(format!(
+                    "job {id} already terminal (state {:?})",
+                    job.state
+                )));
+            }
+            let from = job.state;
+            job.state = wipe_common::JobState::Aborted;
+            job.ended_at = Some(OffsetDateTime::now_utc());
+            from
+        };
         let _ = self.events.send(JobBroadcast::JobStateChanged {
             job_id: id,
             from,
@@ -186,10 +214,7 @@ impl JobRunner {
         // `link_to_manifest` cannot slip between them.
         let from = {
             let mut inner = self.inner.write();
-            let job = inner
-                .jobs
-                .get_mut(&id)
-                .ok_or_else(|| WipeError::InvalidState(format!("job {id} not found")))?;
+            let job = inner.jobs.get_mut(&id).ok_or(WipeError::JobNotFound(id))?;
             if job.state.is_terminal() {
                 return Err(WipeError::InvalidState(format!(
                     "job {id} already terminal"
@@ -226,9 +251,7 @@ impl JobRunner {
     /// signing flow once the supervisor has co-signed the manifest
     /// (and, transitively, every cert it groups).
     pub fn mark_destroyed(&self, id: Uuid) -> WipeResult<()> {
-        let job = self
-            .get(id)
-            .ok_or_else(|| WipeError::InvalidState(format!("job {id} not found")))?;
+        let job = self.get(id).ok_or(WipeError::JobNotFound(id))?;
         if job.state != wipe_common::JobState::PendingCoSign {
             return Err(WipeError::InvalidState(format!(
                 "job {id} not in PendingCoSign (got {:?})",
@@ -264,10 +287,7 @@ impl JobRunner {
             if job_ids[..i].contains(id) {
                 return Err(WipeError::InvalidState(format!("job {id} is listed twice")));
             }
-            let job = inner
-                .jobs
-                .get(id)
-                .ok_or_else(|| WipeError::InvalidState(format!("job {id} not found")))?;
+            let job = inner.jobs.get(id).ok_or(WipeError::JobNotFound(*id))?;
             if job.state != wipe_common::JobState::PendingCoSign {
                 return Err(WipeError::InvalidState(format!(
                     "job {id} not in PendingCoSign (got {:?})",
@@ -359,27 +379,21 @@ impl JobRunner {
         });
     }
 
-    /// Drive a Job from `Queued` through one ErasureEvent + Verification
-    /// to `Erased` (happy path). On verification failure or wipe failure,
-    /// the inner ErasureEvent terminates as `Failed` and the outer Job
-    /// stays `InProgress` — the operator can call `retry_erasure` or
-    /// `escalate_to_destroy` to drive it further.
+    /// Drive a Job that `start` has already moved to `InProgress` through
+    /// one ErasureEvent + Verification to `Erased` (happy path). On
+    /// verification failure or wipe failure, the inner ErasureEvent
+    /// terminates as `Failed` and the outer Job stays `InProgress` — the
+    /// operator can call `retry_erasure` or `escalate_to_destroy` to drive
+    /// it further.
     async fn run_job(&self, id: Uuid) -> WipeResult<()> {
-        let job = self
-            .get(id)
-            .ok_or_else(|| WipeError::InvalidState(format!("job {id} not found")))?;
-
-        // Outer state: Queued → InProgress.
-        self.mutate_job(id, |j| {
-            j.state = wipe_common::JobState::InProgress;
-            j.started_at = Some(OffsetDateTime::now_utc());
-        });
-        let _ = self.events.send(JobBroadcast::JobStateChanged {
-            job_id: id,
-            from: wipe_common::JobState::Queued,
-            to: wipe_common::JobState::InProgress,
-            at: OffsetDateTime::now_utc(),
-        });
+        let job = self.get(id).ok_or(WipeError::JobNotFound(id))?;
+        // An `abort` or `escalate_to_destroy` may land between `start`
+        // returning and this task running; those take precedence, so no
+        // erasure is attempted.
+        if job.state != wipe_common::JobState::InProgress {
+            debug!(%id, state = ?job.state, "job left InProgress before its task ran; not erasing");
+            return Ok(());
+        }
 
         // Build the spec for the first ErasureEvent from the outer JobSpec.
         let erasure_spec = ErasureEventSpec {

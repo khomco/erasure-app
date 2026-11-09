@@ -11,7 +11,7 @@ use uuid::Uuid;
 use wipe_common::{
     Capabilities, Classification, DestructMethod, DestructionEvent, DestructionManifest, Device,
     DeviceId, Intent, Job, JobSpec, ManifestState, OperatorRef, ResolvedBayTopology, StationId,
-    StationInfo,
+    StationInfo, WipeError,
 };
 
 use crate::app::AppState;
@@ -255,7 +255,7 @@ pub async fn start_job(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    state.runner.start(id).map_err(api_err)?;
+    state.runner.start(id).map_err(runner_err)?;
     Ok(Json(json!({"ok": true, "job_id": id})))
 }
 
@@ -263,7 +263,7 @@ pub async fn abort_job(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    state.runner.abort(id).await.map_err(api_err)?;
+    state.runner.abort(id).await.map_err(runner_err)?;
     Ok(Json(json!({"ok": true, "job_id": id})))
 }
 
@@ -302,7 +302,7 @@ pub async fn escalate_to_destroy(
     state
         .runner
         .escalate_to_destroy(id, dest)
-        .map_err(api_err)?;
+        .map_err(runner_err)?;
     Ok(Json(json!({"ok": true, "job_id": id})))
 }
 
@@ -489,7 +489,7 @@ pub async fn cosign_manifest(
             .map_err(api_err)?;
         }
         drop(certs);
-        state.runner.mark_destroyed(*jid).map_err(api_err)?;
+        state.runner.mark_destroyed(*jid).map_err(runner_err)?;
     }
 
     let mut manifests = state.manifests.write();
@@ -506,6 +506,18 @@ pub struct ApiError(pub StatusCode, pub String);
 
 fn api_err<E: std::fmt::Display>(e: E) -> ApiError {
     ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+/// Map a `JobRunner` refusal to a status: an unknown Job is 404, a
+/// transition the Job's state does not allow is 409, anything else
+/// (backend, I/O) stays 500. The body keeps the runner's message.
+fn runner_err(e: WipeError) -> ApiError {
+    let status = match e {
+        WipeError::JobNotFound(_) => StatusCode::NOT_FOUND,
+        WipeError::InvalidState(_) => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    ApiError(status, e.to_string())
 }
 
 impl IntoResponse for ApiError {

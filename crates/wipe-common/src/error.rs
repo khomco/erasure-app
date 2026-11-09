@@ -18,6 +18,10 @@ pub enum WipeError {
     Backend(String),
     #[error("invalid state: {0}")]
     InvalidState(String),
+    /// The runner holds no Job with this id. Distinct from `InvalidState`
+    /// so the HTTP layer can answer 404 rather than 409.
+    #[error("job {0} not found")]
+    JobNotFound(uuid::Uuid),
     #[error("cert generation failed: {0}")]
     Cert(String),
     #[error("license check failed: {0}")]

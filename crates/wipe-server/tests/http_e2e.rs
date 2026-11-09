@@ -843,10 +843,10 @@ async fn re_escalating_a_job_on_a_manifest_is_refused() {
         .send()
         .await
         .unwrap();
-    assert!(
-        !resp.status().is_success(),
-        "re-escalation of a linked job succeeded: {}",
-        resp.status()
+    assert_eq!(
+        resp.status(),
+        409,
+        "re-escalation of a linked job must be a conflict"
     );
     let body: serde_json::Value = resp.json().await.unwrap();
     let manifest_id = before["manifest_id"].as_str().unwrap();
@@ -1106,4 +1106,288 @@ async fn certificate_signed_after_linking_still_omits_the_manifest() {
         state.runner.get(job_id).unwrap().manifest_id,
         Some(manifest_id)
     );
+}
+
+// --- runner refusals map to 404 / 409 (CAP-3) --------------------------------
+
+fn http_op() -> serde_json::Value {
+    json!({ "id": "op-1", "display_name": "Alice", "email": "alice@example.com" })
+}
+
+async fn http_create_job(client: &reqwest::Client, base: &str, device: &str) -> String {
+    let created: serde_json::Value = client
+        .post(format!("{base}/api/jobs"))
+        .json(&json!({
+            "device_id": device,
+            "classification": "high",
+            "intent": "destroy",
+            "operator": http_op(),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    created["job_id"].as_str().unwrap().to_string()
+}
+
+/// POST `body` (or nothing) to `url`; return the status and the JSON body.
+async fn http_post(
+    client: &reqwest::Client,
+    url: String,
+    body: Option<serde_json::Value>,
+) -> (u16, serde_json::Value) {
+    let req = client.post(url);
+    let req = match body {
+        Some(b) => req.json(&b),
+        None => req,
+    };
+    let resp = req.send().await.unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+async fn http_get_job(client: &reqwest::Client, base: &str, job_id: &str) -> serde_json::Value {
+    client
+        .get(format!("{base}/api/jobs/{job_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+async fn http_wait_for_state(
+    client: &reqwest::Client,
+    base: &str,
+    job_id: &str,
+    state: &str,
+) -> serde_json::Value {
+    for _ in 0..200 {
+        let job = http_get_job(client, base, job_id).await;
+        if job["state"]["state"] == state {
+            return job;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("job {job_id} never reached {state}");
+}
+
+fn count_activities(job: &serde_json::Value, kind: &str) -> usize {
+    job["activities"]
+        .as_array()
+        .map(|a| a.iter().filter(|x| x["type"] == kind).count())
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn unknown_job_id_is_404_on_start_abort_and_escalate() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let unknown = uuid::Uuid::new_v4();
+
+    for (path, body) in [
+        ("start", None),
+        ("abort", None),
+        (
+            "escalate-to-destroy",
+            Some(json!({ "method": "shred", "operator": http_op() })),
+        ),
+    ] {
+        let (status, body) =
+            http_post(&client, format!("{base}/api/jobs/{unknown}/{path}"), body).await;
+        assert_eq!(status, 404, "{path}: {body}");
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(&unknown.to_string()),
+            "{path}: error should name the job, got {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_job_id_is_still_400() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (status, _) = http_post(&client, format!("{base}/api/jobs/not-a-uuid/start"), None).await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn starting_a_job_twice_is_200_then_409_with_one_erasure() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
+
+    let (first, _) = http_post(&client, format!("{base}/api/jobs/{job_id}/start"), None).await;
+    let (second, body) = http_post(&client, format!("{base}/api/jobs/{job_id}/start"), None).await;
+    assert_eq!(first, 200);
+    assert_eq!(second, 409, "{body}");
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("is in state"));
+
+    let job = http_wait_for_state(&client, &base, &job_id, "erased").await;
+    assert_eq!(count_activities(&job, "erasure"), 1);
+}
+
+#[tokio::test]
+async fn starting_an_escalated_job_is_409_and_it_stays_pending_co_sign() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
+    let (status, _) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/escalate-to-destroy"),
+        Some(json!({ "method": "shred", "operator": http_op() })),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = http_post(&client, format!("{base}/api/jobs/{job_id}/start"), None).await;
+    assert_eq!(status, 409, "{body}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "pending_co_sign");
+    assert_eq!(count_activities(&job, "erasure"), 0);
+}
+
+#[tokio::test]
+async fn escalating_an_aborted_job_is_409_and_appends_nothing() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
+    let (status, _) = http_post(&client, format!("{base}/api/jobs/{job_id}/abort"), None).await;
+    assert_eq!(status, 200);
+
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/escalate-to-destroy"),
+        Some(json!({ "method": "shred", "operator": http_op() })),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "aborted");
+    assert_eq!(count_activities(&job, "destruction"), 0);
+}
+
+#[tokio::test]
+async fn aborting_an_erased_job_is_409_and_it_stays_erased() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
+    let (status, _) = http_post(&client, format!("{base}/api/jobs/{job_id}/start"), None).await;
+    assert_eq!(status, 200);
+    http_wait_for_state(&client, &base, &job_id, "erased").await;
+
+    let (status, body) = http_post(&client, format!("{base}/api/jobs/{job_id}/abort"), None).await;
+    assert_eq!(status, 409, "{body}");
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "erased");
+}
+
+#[tokio::test]
+async fn aborting_an_aborted_job_is_200() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
+
+    let (first, _) = http_post(&client, format!("{base}/api/jobs/{job_id}/abort"), None).await;
+    let (second, body) = http_post(&client, format!("{base}/api/jobs/{job_id}/abort"), None).await;
+    assert_eq!(first, 200);
+    assert_eq!(second, 200, "{body}");
+    assert_eq!(body["ok"], true);
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "aborted");
+}
+
+#[tokio::test]
+async fn cosigning_an_unknown_manifest_is_404() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let unknown = uuid::Uuid::new_v4();
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/manifests/{unknown}/cosign"),
+        Some(json!({ "supervisor": http_op() })),
+    )
+    .await;
+    assert_eq!(status, 404, "{body}");
+}
+
+#[tokio::test]
+async fn cosigning_a_signed_manifest_again_is_409_and_adds_no_cosignature() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
+    let (status, _) = http_post(&client, format!("{base}/api/jobs/{job_id}/start"), None).await;
+    assert_eq!(status, 200);
+    // The certificate needs an erasure activity to snapshot the device.
+    let mut has_erasure = false;
+    for _ in 0..200 {
+        if count_activities(&http_get_job(&client, &base, &job_id).await, "erasure") > 0 {
+            has_erasure = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(has_erasure, "job never gained an erasure activity");
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/escalate-to-destroy"),
+        Some(json!({ "method": "shred", "operator": http_op() })),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let mut has_cert = false;
+    for _ in 0..200 {
+        let resp = client
+            .get(format!("{base}/api/jobs/{job_id}/certificate"))
+            .send()
+            .await
+            .unwrap();
+        if resp.status().is_success() {
+            has_cert = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(has_cert, "certificate generated at pending_co_sign");
+
+    let (status, manifest) = http_post(
+        &client,
+        format!("{base}/api/manifests"),
+        Some(json!({ "assembled_by": http_op(), "job_ids": [job_id] })),
+    )
+    .await;
+    assert_eq!(status, 200, "{manifest}");
+    let manifest_id = manifest["id"].as_str().unwrap().to_string();
+    let cosign = json!({ "supervisor": http_op() });
+    let url = format!("{base}/api/manifests/{manifest_id}/cosign");
+    let (first, _) = http_post(&client, url.clone(), Some(cosign.clone())).await;
+    let (second, body) = http_post(&client, url, Some(cosign)).await;
+    assert_eq!(first, 200);
+    assert_eq!(second, 409, "{body}");
+
+    let cert: serde_json::Value = client
+        .get(format!("{base}/api/jobs/{job_id}/certificate"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cert["co_signatures"].as_array().unwrap().len(), 1);
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "destroyed");
+
+    // A Destroyed Job cannot be aborted either.
+    let (status, body) = http_post(&client, format!("{base}/api/jobs/{job_id}/abort"), None).await;
+    assert_eq!(status, 409, "{body}");
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "destroyed");
 }

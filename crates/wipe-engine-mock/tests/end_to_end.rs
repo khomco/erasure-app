@@ -397,7 +397,7 @@ async fn link_to_manifest_refuses_an_unknown_job_and_stamps_nothing() {
     let err = runner
         .link_to_manifest(uuid::Uuid::new_v4(), &[id, uuid::Uuid::new_v4()])
         .unwrap_err();
-    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+    assert!(matches!(err, wipe_common::WipeError::JobNotFound(_)));
 
     let job = runner.get(id).unwrap();
     assert_eq!(job.manifest_id, None);
@@ -429,3 +429,182 @@ async fn link_to_manifest_refuses_a_job_listed_twice_and_stamps_nothing() {
 // A PendingCoSign Job with no DestructionEvent is not constructible through
 // the runner (only `escalate_to_destroy` enters PendingCoSign, and it
 // appends one), so that refusal has no test here.
+
+// --- runner refusals (CAP-3: not-found vs. refused transition) -------------
+
+fn erasure_count(job: &Job) -> usize {
+    job.activities
+        .iter()
+        .filter(|a| matches!(a, JobActivity::Erasure(_)))
+        .count()
+}
+
+#[tokio::test]
+async fn starting_a_job_twice_is_refused_and_runs_one_erasure() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+
+    runner.start(id).unwrap();
+    let err = runner.start(id).unwrap_err();
+    assert!(
+        matches!(err, wipe_common::WipeError::InvalidState(_)),
+        "{err}"
+    );
+    assert!(err.to_string().contains("is in state"), "{err}");
+
+    let job = wait_until(&runner, id, |j| j.state.is_terminal()).await;
+    assert_eq!(job.state, JobState::Erased);
+    assert_eq!(erasure_count(&job), 1);
+}
+
+#[tokio::test]
+async fn start_moves_the_job_to_in_progress_before_returning() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    let mut rx = runner.subscribe();
+
+    runner.start(id).unwrap();
+
+    let job = runner.get(id).unwrap();
+    assert_eq!(job.state, JobState::InProgress);
+    assert!(job.started_at.is_some());
+    match rx.try_recv() {
+        Ok(JobBroadcast::JobStateChanged {
+            from: JobState::Queued,
+            to: JobState::InProgress,
+            ..
+        }) => {}
+        other => panic!("expected Queued->InProgress broadcast first, got {other:?}"),
+    }
+    wait_until(&runner, id, |j| j.state.is_terminal()).await;
+}
+
+#[tokio::test]
+async fn starting_an_escalated_job_is_refused() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    runner
+        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .unwrap();
+    let mut rx = runner.subscribe();
+
+    let err = runner.start(id).unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let job = runner.get(id).unwrap();
+    assert_eq!(job.state, JobState::PendingCoSign);
+    assert_eq!(erasure_count(&job), 0);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn aborting_an_erased_job_is_refused_and_changes_nothing() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    runner.start(id).unwrap();
+    let before = wait_until(&runner, id, |j| j.state.is_terminal()).await;
+    assert_eq!(before.state, JobState::Erased);
+    let mut rx = runner.subscribe();
+
+    let err = runner.abort(id).await.unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+    assert!(err.to_string().contains("already terminal"), "{err}");
+
+    let job = runner.get(id).unwrap();
+    assert_eq!(job.state, JobState::Erased);
+    assert_eq!(job.ended_at, before.ended_at);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn aborting_an_aborted_job_is_an_ok_no_op() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    runner.abort(id).await.unwrap();
+    let before = runner.get(id).unwrap();
+    assert_eq!(before.state, JobState::Aborted);
+    let mut rx = runner.subscribe();
+
+    runner.abort(id).await.unwrap();
+
+    let job = runner.get(id).unwrap();
+    assert_eq!(job.state, JobState::Aborted);
+    assert_eq!(job.ended_at, before.ended_at);
+    assert!(
+        rx.try_recv().is_err(),
+        "a repeated abort must not broadcast"
+    );
+}
+
+#[tokio::test]
+async fn unknown_job_ids_are_job_not_found() {
+    let runner = mock_runner();
+    let unknown = uuid::Uuid::new_v4();
+
+    let err = runner.start(unknown).unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::JobNotFound(id) if id == unknown));
+    assert_eq!(err.to_string(), format!("job {unknown} not found"));
+
+    let err = runner.abort(unknown).await.unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::JobNotFound(id) if id == unknown));
+
+    let err = runner
+        .escalate_to_destroy(unknown, destruction("dev-nvme-0"))
+        .unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::JobNotFound(id) if id == unknown));
+
+    let err = runner.mark_destroyed(unknown).unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::JobNotFound(id) if id == unknown));
+}
+
+/// Give a spawned job task time to run (it would append an Erasure
+/// activity almost at once if it ignored the state change).
+async fn let_spawned_task_run() {
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn abort_right_after_start_runs_no_erasure() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    let mut rx = runner.subscribe();
+
+    runner.start(id).unwrap();
+    runner.abort(id).await.unwrap();
+    let_spawned_task_run().await;
+
+    let job = runner.get(id).unwrap();
+    assert_eq!(job.state, JobState::Aborted);
+    assert_eq!(erasure_count(&job), 0);
+    let mut into_in_progress = 0;
+    while let Ok(b) = rx.try_recv() {
+        if let JobBroadcast::JobStateChanged {
+            to: JobState::InProgress,
+            ..
+        } = b
+        {
+            into_in_progress += 1;
+        }
+    }
+    assert_eq!(into_in_progress, 1);
+}
+
+#[tokio::test]
+async fn escalate_right_after_start_runs_no_erasure() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+
+    runner.start(id).unwrap();
+    runner
+        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .unwrap();
+    let_spawned_task_run().await;
+
+    let job = runner.get(id).unwrap();
+    assert_eq!(job.state, JobState::PendingCoSign);
+    assert_eq!(erasure_count(&job), 0);
+}

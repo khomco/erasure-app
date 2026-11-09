@@ -260,7 +260,11 @@ the hardware in front of them. See ADR-0002.
   terminal) but nothing ever moves a Job into it. The diagram also
   omits two real paths: `Queued → PendingCoSign` (escalation before
   the Job starts) and `→ Aborted` from any non-terminal state,
-  `PendingCoSign` included.
+  `PendingCoSign` included. `start` moves `Queued → InProgress` itself,
+  before the erasure task runs, so a second `start` is refused. Aborting a
+  Job in any terminal state other than `Aborted` (`Erased`, `Destroyed`,
+  `Quarantined`) is refused;
+  aborting an already `Aborted` Job is a no-op that succeeds.
 - **PendingCoSign** — the waypoint on the Destroy path: the
   Asset has been physically destroyed (or scheduled for it), a
   **DestructionEvent** has captured the evidence, and the Job is waiting
@@ -764,7 +768,7 @@ folder or in `.scratch/DECISIONS.md`.
 | Outer-Job composition — `Job` → `ErasureEvent`, new outer `Job` + `JobState`, `JobActivity` sum type, `JobEvent` → `JobUpdate` | §11 #2 / ADR-0001 | ✅ partial | One ErasureEvent per Job (no retries/fallback); `Quarantined` never entered; `station_id` never recorded |
 | Destroy path — `DestructionEvent`, `PendingCoSign`, `DestructionManifest`, supervisor co-sign | ADR-0001 | ✅ partial | Co-sign uses the **station** key, and signer/role sit outside the signed bytes — it is a second signature, not an independent one; `verify-cert` ignores co-signatures. `manifest_id` / `manifest_ref` are stamped on assembly (not inside the signed cert), and a Job on a manifest cannot be re-escalated. A never-erased Job can no longer be finalised uncertified (c779361), but how to certify it is open |
 | Certificate schema v2 — `activities` chain and explicit `AssetDisposition` | ADR-0001 | ✅ partial | v1 certs do **not** verify under v2 (see the ADR-0001 addendum) |
-| REST: escalate-to-destroy, manifests, co-sign | ADR-0001 | ✅ | |
+| REST: escalate-to-destroy, manifests, co-sign | ADR-0001 | ✅ | As built: on start, abort and escalate-to-destroy an unknown Job is 404 and a transition its state does not allow is 409; on co-sign an unknown manifest is 404, and a manifest that is not pending or has a member Job not in `PendingCoSign` is 409 (all `{"error": …}`); other runner failures stay 500 |
 | React UI: activity timeline on Job Detail + Manifests page | ADR-0001 | ✅ | |
 | At-a-glance bench status overlay on the Devices page | §11 #3 | ✅ | |
 | Configurable bay topology + generated SVG bay map | §11 #10 / ADR-0002 | ✅ | UI templates differ from the Rust presets |
