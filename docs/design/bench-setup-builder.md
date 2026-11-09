@@ -4,9 +4,10 @@
 built in `wipestation serve` and in the Tauri shell, which both start their
 station through `wipe_server::bootstrap` and so both attach the simulator that
 identify mode needs. Not built: SES auto-detect, custom labels, and the
-Devices-page entry links (see the dated notes below). The Tauri shell still has
-no saved store, persistent signing key or licence: a layout built there lasts
-until the app quits.
+Devices-page entry links (see the dated notes below). The Tauri shell keeps a
+saved layout, its lease state and its signing key in its per-user app-data
+directory, so a layout built there survives a relaunch; it still has no
+licence.
 
 Companion to [ADR-0002](../adr/0002-configurable-bay-topology.md) (the model)
 and [ADR-0003](../adr/0003-station-config-persistence.md) (where a saved layout
@@ -232,10 +233,15 @@ a fleet of identical benches. **Import** accepts it back.
 > renames (`LocalFileStore::save` in `crates/wipe-server/src/store.rs`), so the
 > write is atomic within one filesystem. It persists only when the station has
 > a writable store tier; otherwise the save holds until restart and the page
-> says so. The Tauri shell builds its station with `Persistence::InMemory`
-> (`wipe_server::bootstrap`), so its store is in RAM only and a layout saved
-> there is still lost when the app quits (story 2 moves it to an app-data
-> directory).
+> says so. The Tauri shell builds its station with `Persistence::Detect` and
+> `config_dir` set to its per-user app-data directory (`wipe_server::bootstrap`;
+> desktop-parity story 2), so a layout saved there is written to
+> `<app-data>/bay-topology.json` and reloaded on the next launch. If that
+> directory cannot be written the store falls to tier 3: the page warns that
+> configuration cannot be saved and the operator acknowledges with "Continue
+> without saving"; only if Tauri cannot resolve it at all is the store in RAM,
+> and that in-memory store accepts saves without the tier-3 prompt and loses
+> them on quit.
 
 ## Model changes this needed (all four done)
 

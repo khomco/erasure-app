@@ -31,15 +31,31 @@ fn addr() -> SocketAddr {
 }
 
 /// Mirrors the desktop shell's posture (`apps/desktop/src-tauri/src/lib.rs`)
-/// minus mDNS: `Fleet::Off`, so tests advertise nothing on the LAN. The
-/// best-effort fleet handling is covered by `start_fleet`'s unit test.
-fn desktop_config() -> StationConfig {
+/// for a writable app-data dir `dir`, minus mDNS: `Fleet::Off`, so tests
+/// advertise nothing on the LAN. The best-effort fleet handling is covered by
+/// `start_fleet`'s unit test.
+fn desktop_config(dir: &Path) -> StationConfig {
+    StationConfig {
+        hostname: "wipestation-desktop".into(),
+        fleet: Fleet::Off,
+        key_path: Some(dir.join("station.key")),
+        persistence: Persistence::Detect {
+            control_plane_url: None,
+            ephemeral_config: false,
+            config_dir: Some(dir.to_path_buf()),
+        },
+        ..StationConfig::new(addr())
+    }
+}
+
+/// The desktop's fallback when it has no app-data directory.
+fn in_memory_config() -> StationConfig {
     StationConfig {
         hostname: "wipestation-desktop".into(),
         fleet: Fleet::Off,
         persistence: Persistence::InMemory {
-            reason: "The desktop app keeps configuration and licence lease state in memory \
-                     only."
+            reason: "The desktop app could not find its app-data directory (test), so it \
+                     keeps configuration and licence lease state in memory only."
                 .into(),
         },
         ..StationConfig::new(addr())
@@ -82,12 +98,12 @@ async fn a_key_file_is_created_once_and_reused() {
 }
 
 #[tokio::test]
-async fn the_desktop_posture_keeps_everything_in_memory() {
+async fn the_in_memory_fallback_keeps_everything_in_memory() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tmpdir("in-memory");
     // Point default detection here: an in-memory station must not use it.
     std::env::set_var("WIPESTATION_CONFIG_DIR", &dir);
-    let (state, lines) = build(desktop_config());
+    let (state, lines) = build(in_memory_config());
     std::env::remove_var("WIPESTATION_CONFIG_DIR");
 
     assert_eq!(state.topology_store.tier(), StoreTier::Ephemeral);
@@ -108,7 +124,8 @@ async fn the_desktop_posture_keeps_everything_in_memory() {
 
 #[tokio::test]
 async fn a_station_built_with_the_desktop_config_serves_the_simulator() {
-    let (state, _) = build(desktop_config());
+    let dir = tmpdir("desktop-sim");
+    let (state, _) = build(desktop_config(&dir));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bound = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -118,6 +135,69 @@ async fn a_station_built_with_the_desktop_config_serves_the_simulator() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
+}
+
+/// The desktop's app-data dir holds the layout, lease state and key across
+/// launches, and is not the CLI's default config dir.
+#[tokio::test]
+async fn a_config_dir_station_keeps_its_layout_lease_and_key_across_builds() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmpdir("config-dir");
+    let cli_dir = tmpdir("config-dir-cli-default");
+    std::env::set_var("WIPESTATION_CONFIG_DIR", &cli_dir);
+    let built = build_station(desktop_config(&dir), &mut |_| {});
+    let first = built.unwrap();
+
+    assert_eq!(first.topology_store.tier(), StoreTier::LocalFile);
+    assert_eq!(
+        first.topology_store.location(),
+        dir.join("bay-topology.json").display().to_string()
+    );
+    assert_eq!(
+        first.license().lease_persistence().location,
+        dir.join("lease-state.json").display().to_string()
+    );
+    let mut layout = wipe_common::preset("dock-2bay").unwrap();
+    layout.label = "Saved in the app-data dir".into();
+    first.save_bay_topology(layout).unwrap();
+    first
+        .license()
+        .signing_decision(time::OffsetDateTime::now_utc());
+    let first_key_id = first.signing_key.public_key_id();
+    drop(first);
+
+    let second = build_station(desktop_config(&dir), &mut |_| {});
+    std::env::remove_var("WIPESTATION_CONFIG_DIR");
+    let second = second.unwrap();
+
+    assert_eq!(
+        second.bay_topology.read().as_ref().unwrap().label,
+        "Saved in the app-data dir"
+    );
+    assert_eq!(first_key_id, second.signing_key.public_key_id());
+    assert_eq!(
+        second.license().lease_persistence().tier,
+        StoreTier::LocalFile
+    );
+    assert!(dir.join("lease-state.json").is_file());
+    assert!(list(&cli_dir).is_empty(), "wrote {:?}", list(&cli_dir));
+}
+
+/// A `config_dir` file is a store location, not a seed: a corrupt one is
+/// logged and ignored, as on the CLI's default path, rather than failing.
+#[tokio::test]
+async fn a_corrupt_layout_in_the_config_dir_does_not_fail_the_build() {
+    let dir = tmpdir("config-dir-corrupt");
+    std::fs::write(dir.join("bay-topology.json"), "{ not json").unwrap();
+    let (state, lines) = build(desktop_config(&dir));
+    assert!(state.bay_topology.read().is_none());
+    assert_eq!(state.topology_store.tier(), StoreTier::LocalFile);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("bay topology: not configured")),
+        "{lines:?}"
+    );
 }
 
 #[tokio::test]
@@ -138,6 +218,7 @@ async fn a_saved_layout_outranks_a_profile_seed() {
             persistence: Persistence::Detect {
                 control_plane_url: None,
                 ephemeral_config: false,
+                config_dir: None,
             },
             ..StationConfig::new(addr())
         },
@@ -207,6 +288,7 @@ async fn a_cli_station_reports_its_start_up_lines_in_order() {
         persistence: Persistence::Detect {
             control_plane_url: None,
             ephemeral_config: false,
+            config_dir: None,
         },
         ..StationConfig::new(addr())
     });

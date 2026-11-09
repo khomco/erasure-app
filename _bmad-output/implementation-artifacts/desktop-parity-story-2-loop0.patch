@@ -1,0 +1,868 @@
+diff --git a/CONTEXT.md b/CONTEXT.md
+index 271e919..7a4e54b 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -914,9 +914,9 @@ folder or in `.scratch/DECISIONS.md`.
+ | At-a-glance bench status overlay on the Devices page | §11 #3 | ✅ | |
+ | Configurable bay topology + generated SVG bay map | §11 #10 / ADR-0002 | ✅ | UI templates differ from the Rust presets |
+ | Tiered, self-detecting station config store | ADR-0003 | ✅ partial | Control-plane tier always fails (no hub); corrupt config only logged, not surfaced |
+-| Bench-setup builder + learn-by-hot-swap identify mode | ADR-0002/0003 | ✅ partial | Both hosts start through `wipe_server::bootstrap`, so the desktop (Tauri) shell has identify mode; it still wires no saved store, so layouts are lost on quit |
++| Bench-setup builder + learn-by-hot-swap identify mode | ADR-0002/0003 | ✅ partial | Both hosts start through `wipe_server::bootstrap`, so the desktop (Tauri) shell has identify mode; it saves layouts to `bay-topology.json` in its per-user app-data directory, so they survive a relaunch |
+ | Model-aware enclosure catalog + shell artwork with machine-enforced legibility rules | ADR-0004 | ✅ partial | Site-local overlay exists in code but no host wires it |
+-| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark persisted in `lease-state.json` beside the bay topology (RAM-only, resetting on restart, where that directory is not writable and in the desktop shell; tier printed at `wipestation serve` start-up only); `FileCounter` exists but nothing uses it yet (rewindable, not hardware-backed); `TpmCounter` cannot count and claims no hardware backing; `allowed_methods` unenforced; evaluation erasures counted and persisted, shown only in the `wipestation serve` start-up line, with no limit attached; `GET /api/license` reports the verdict (`LeaseStatus` and its operator message), customer, `not_after`, licence instance key id, lapse policy and fingerprint, read-only (no watermark move, no save); the Certificate page shows each certificate's signed `evaluation` marking (header pill and Licence field) and the customer named in an attached licence, labelled unchecked because the browser holds no vendor root (`verify-cert --vendor-root-b64` checks it); `POST /api/license` installs a licence file's JSON while the station runs (licence-visibility story 4): the same checks as start-up (`check_installable` against the `--vendor-root-b64` roots, which `serve` now keeps whether or not `--license` is given and a request can never add, and the station's signing key id), the new licence swapped into the shared cell the certificate generator reads, the running lease kept (watermark, evaluation count, store, writer, faults; the licensed count restarts at 0 only for a different licence id), answered with the `GET /api/license` view; 409 with no vendor root (the desktop shell, or `serve` without `--vendor-root-b64`), 422 for a body that does not parse, verify or name this station's key, with nothing changed; an installed licence is held in memory only, so a restart returns to the `--license` licence or to evaluation; a station-wide licence banner (`LicenceBanner` in the desktop `Layout`, polling `GET /api/license` each minute) sits above every bench page: evaluation mode when unlicensed, the server's operator message in danger tone for any other non-valid status, expiry warnings from 30 days left ("renew now" from 7, danger tone from 1; under the `stop` lapse policy it says new jobs will be refused at expiry, which story 5 has not built yet), and "Licence status unknown" if the route fails; it informs only, with no button or link, and the desktop shell, always unlicensed, therefore always shows the evaluation banner; no licence install from the UI yet (the route has no form); desktop shell is always unlicensed and refuses runtime install (no vendor root); like every station route, `POST /api/license` is unauthenticated (and CORS is permissive), so anyone who can reach the station API can install any authentic licence for this station, for example a superseded `evaluation`-policy file over a `stop` one; switching licences restarts the licensed count, so installing B and then A again, or installing B and restarting with `--license A`, restarts A's count (the ADR-0005 §3a speed bump, now reachable over HTTP) |
++| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark persisted in `lease-state.json` beside the bay topology (the desktop shell keeps it in its per-user app-data directory; RAM-only, resetting on restart, where that directory is not writable or, on the desktop, cannot be found; tier printed at `wipestation serve` start-up only); `FileCounter` exists but nothing uses it yet (rewindable, not hardware-backed); `TpmCounter` cannot count and claims no hardware backing; `allowed_methods` unenforced; evaluation erasures counted and persisted, shown only in the `wipestation serve` start-up line, with no limit attached; `GET /api/license` reports the verdict (`LeaseStatus` and its operator message), customer, `not_after`, licence instance key id, lapse policy and fingerprint, read-only (no watermark move, no save); the Certificate page shows each certificate's signed `evaluation` marking (header pill and Licence field) and the customer named in an attached licence, labelled unchecked because the browser holds no vendor root (`verify-cert --vendor-root-b64` checks it); `POST /api/license` installs a licence file's JSON while the station runs (licence-visibility story 4): the same checks as start-up (`check_installable` against the `--vendor-root-b64` roots, which `serve` now keeps whether or not `--license` is given and a request can never add, and the station's signing key id), the new licence swapped into the shared cell the certificate generator reads, the running lease kept (watermark, evaluation count, store, writer, faults; the licensed count restarts at 0 only for a different licence id), answered with the `GET /api/license` view; 409 with no vendor root (the desktop shell, or `serve` without `--vendor-root-b64`), 422 for a body that does not parse, verify or name this station's key, with nothing changed; an installed licence is held in memory only, so a restart returns to the `--license` licence or to evaluation; a station-wide licence banner (`LicenceBanner` in the desktop `Layout`, polling `GET /api/license` each minute) sits above every bench page: evaluation mode when unlicensed, the server's operator message in danger tone for any other non-valid status, expiry warnings from 30 days left ("renew now" from 7, danger tone from 1; under the `stop` lapse policy it says new jobs will be refused at expiry, which story 5 has not built yet), and "Licence status unknown" if the route fails; it informs only, with no button or link, and the desktop shell, always unlicensed, therefore always shows the evaluation banner; no licence install from the UI yet (the route has no form); desktop shell is always unlicensed and refuses runtime install (no vendor root); like every station route, `POST /api/license` is unauthenticated (and CORS is permissive), so anyone who can reach the station API can install any authentic licence for this station, for example a superseded `evaluation`-policy file over a `stop` one; switching licences restarts the licensed count, so installing B and then A again, or installing B and restarting with `--license A`, restarts A's count (the ADR-0005 §3a speed bump, now reachable over HTTP) |
+ | Vitest suite over the frontend's pure domain modules | §12 | ✅ | |
+ | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
+ | Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check; landing page (problem, offline-verifiable certificate, differentiators, "what we are not", one early-access CTA); product, standards posture (certification roadmap labelled future), segment (ITAD, enterprise IT, government), pricing ("early-access pricing on request"), contact, privacy and terms pages; early-access and contact forms | ADR-0006 / ROADMAP W1.1–W1.4 | ✅ partial | The forms stay closed (no script, submit disabled, "not open yet") unless the build is given `PUBLIC_HUB_ORIGIN`, and `astro build` refuses that until the privacy notice is published (`site.privacyNoticePublished`), so production builds cannot take sales leads yet; pricing has no amounts unless the build is given `PRICING_HUB_ORIGIN` (`offerings-and-payments` story 5, below); privacy and terms are placeholders to publish before launch; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); copy and statuses await vendor sign-off |
+@@ -1040,9 +1040,8 @@ keep resolving.
+     **Gaps:** the store's tier 2 (control plane) is a stub that always
+     reports itself unavailable; both hosts start through the shared
+     `wipe_server::bootstrap`, so the desktop app has identify mode (the
+-    simulator is attached), but its store is in-memory only: it keeps a
+-    saved layout only for the session (the ephemeral store accepts saves
+-    without the tier-3 prompt and loses them on quit);
++    simulator is attached) and keeps a saved layout in its per-user
++    app-data directory across relaunches;
+     and no host wires the catalog overlay.
+ 11. **Diagnostic / HealthCheck runtime** — the remainder of ADR-0001.
+     `DiagnosticEvent` and `HealthCheckEvent` shipped as schema-only
+@@ -1401,8 +1400,10 @@ and resolve. None of these have a decided answer.
+   station id), failing as wrong-machine otherwise. Today the key lives
+   on the station: read from the `--key-path` file (generated and
+   written there if the file does not exist yet, so it persists
+-  afterwards), or generated fresh on each start without a path (always
+-  fresh in the desktop app), in which case a licence issued to an
++  afterwards; the desktop app uses `station.key` in its per-user app-data
++  directory, and a seed created there is owner-only on Unix), or
++  generated fresh on each start without a path (the desktop app when its
++  app-data directory cannot be written or found), in which case a licence issued to an
+   earlier key no longer installs.
+ - **Lease / watermark** — the station's offline enforcement state
+   (`wipe_license::LeaseState`): the highest clock time seen (the
+@@ -1415,8 +1416,9 @@ and resolve. None of these have a decided answer.
+   `wipestation serve` prints at start-up, and nothing is limited by it. `wipestation serve` keeps it in
+   `lease-state.json` beside the bay topology, saved after every status
+   check, signing decision and counted erasure, so a restart clears
+-  neither; where that directory is not writable (and in the desktop shell)
+-  it is held in RAM and resets on every start (starting from an existing
++  neither (the desktop shell keeps it in its per-user app-data directory
++  the same way); where that directory is not writable (or, on the
++  desktop, cannot be found) it is held in RAM and resets on every start (starting from an existing
+   readable file there, if any). A lease file that cannot be read or saved,
+   or a save that takes over 2 s, marks licensed certificates
+   `evaluation` and never stops an erasure; an unreadable one is never
+@@ -1446,9 +1448,10 @@ and resolve. None of these have a decided answer.
+   shell**: the Tauri host `wipestation-desktop` (`apps/desktop/src-tauri`)
+   that runs the API and UI in one window. It builds its station with
+   the same `wipe_server::bootstrap` as `wipestation serve`, so the
+-  simulator (identify mode) is attached; it keeps configuration and
+-  lease state in memory only, has no licence, and uses a fresh signing
+-  key and a random station id on every launch.
++  simulator (identify mode) is attached; it keeps saved configuration,
++  lease state and its signing key in its per-user app-data directory
++  (not `~/.config/wipestation`), has no licence, and uses a random
++  station id on every launch.
+ - **Vendor console** — our side of the control plane: licence issuance,
+   entitlements, revocation, cross-tenant support and metering.
+ - **Fleet console** — the customer's side: their stations, their
+diff --git a/Cargo.lock b/Cargo.lock
+index 92ccb03..bb3336f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -6517,10 +6517,12 @@ dependencies = [
+  "tauri",
+  "tauri-build",
+  "tauri-plugin-shell",
++ "time",
+  "tokio",
+  "tracing",
+  "tracing-subscriber",
+  "url",
++ "wipe-common",
+  "wipe-engine",
+  "wipe-server",
+ ]
+diff --git a/README.md b/README.md
+index e312f08..c8aec86 100644
+--- a/README.md
++++ b/README.md
+@@ -251,7 +251,7 @@ URL — there's no "API port" and "UI port" split.
+ | **Headless / air-gap** | `wipestation serve --no-fleet` | Same as above, mDNS off |
+ | **Remote tablet console** | open `http://<station-ip>:7878` from another device | Same React UI, talks to the remote station's API |
+ | **Fast demo mode** | `wipestation serve --fast` | Erasures complete in ~1s for live demos |
+-| **Native desktop window** | `cargo run -p wipestation-desktop` | Tauri window over an in-process API on `127.0.0.1:7878` (`WIPESTATION_API_ADDR` moves the API, but the window URL stays `http://127.0.0.1:7878`), same UI as the browser path. It starts its station through the same `wipe_server::bootstrap` as `serve`, so it has identify mode (the hot-plug simulator is attached). Apart from that variable the shell takes none of `serve`'s options: configuration and lease state stay in memory (bench setup is not saved), no licence (every cert is evaluation), default (slow) mock timing, and a fresh signing key and random station id on every launch, so certs from one launch do not verify against the next launch's key. It advertises on mDNS, so each launch appears to other stations as a new peer. If the port is taken, the bind error is only logged and the window shows whatever answers there. Its `api_url_cmd` Tauri command exists but the frontend never calls it |
++| **Native desktop window** | `cargo run -p wipestation-desktop` | Tauri window over an in-process API on `127.0.0.1:7878` (`WIPESTATION_API_ADDR` moves the API, but the window URL stays `http://127.0.0.1:7878`), same UI as the browser path. It starts its station through the same `wipe_server::bootstrap` as `serve`, so it has identify mode (the hot-plug simulator is attached). Apart from that variable the shell takes none of `serve`'s options. It keeps its saved bench layout (`bay-topology.json`), lease state (`lease-state.json`) and signing key seed (`station.key`, owner-only on Unix) in its per-user app-data directory (`~/Library/Application Support/dev.wipestation.desktop` on macOS, `~/.local/share/dev.wipestation.desktop` (or `$XDG_DATA_HOME/…`) on Linux, `%APPDATA%\dev.wipestation.desktop` on Windows), not in `serve`'s `~/.config/wipestation`, and ignores `WIPESTATION_CONFIG_DIR`, so a layout, the lease counts and the signing key survive a relaunch. If that directory cannot be written, the UI asks where to keep configuration (ADR-0003 tier 3) and the key is fresh for that run; if it cannot be found at all, everything is held in memory. No licence (every cert is evaluation, and there is no vendor root to install one), default (slow) mock timing, and a random station id on every launch. It advertises on mDNS, so each launch appears to other stations as a new peer. If the port is taken, the bind error is only logged and the window shows whatever answers there. Its `api_url_cmd` Tauri command exists but the frontend never calls it |
+ | **Inspect catalog** | `wipestation inspect` | Prints the mock device catalog as JSON |
+ | **Offline cert verify** | `wipestation verify-cert path.json --public-key-b64 <key> [--vendor-root-b64 <root>] [--require-licensed]` | Checks the primary signature against the station key, then the content by `cert_format_version` (v2 signature-only; v3 refuses a self-contradicting destruction record or any co-signature; an unknown version is refused by name), and, given a vendor root, the ADR-0005 attestation chain; `--require-licensed`, which takes effect only together with `--vendor-root-b64`, fails an evaluation cert. Prints the format version, the device (or "not read from the device") and, for a destroyed drive, the technique and label, caution, who recorded it (name, title, identity assurance, time, identifiers and source), the completion (time, equipment, criterion, video) and the concurrence or "none required". Does not check v2 co-signatures. No network needed |
+ 
+diff --git a/apps/desktop/src-tauri/Cargo.toml b/apps/desktop/src-tauri/Cargo.toml
+index 4d7dc98..1aee06d 100644
+--- a/apps/desktop/src-tauri/Cargo.toml
++++ b/apps/desktop/src-tauri/Cargo.toml
+@@ -26,5 +26,9 @@ async-trait = { workspace = true }
+ anyhow = { workspace = true }
+ url = { workspace = true }
+ 
++[dev-dependencies]
++wipe-common = { path = "../../../crates/wipe-common" }
++time = { workspace = true }
++
+ [features]
+ custom-protocol = ["tauri/custom-protocol"]
+diff --git a/apps/desktop/src-tauri/src/lib.rs b/apps/desktop/src-tauri/src/lib.rs
+index 3666ea2..4578b43 100644
+--- a/apps/desktop/src-tauri/src/lib.rs
++++ b/apps/desktop/src-tauri/src/lib.rs
+@@ -3,7 +3,9 @@
+ //! The Tauri window is a thin viewport over the same Axum API the headless
+ //! CLI exposes. We:
+ //!   1. Initialize tracing so a developer can see what's happening.
+-//!   2. Bind the API on 127.0.0.1:7878 (or `WIPESTATION_API_ADDR`).
++//!   2. Bind the API on 127.0.0.1:7878 (or `WIPESTATION_API_ADDR`), with
++//!      saved configuration, lease state and the signing key kept in the
++//!      per-user app-data directory (see [`station_config`]).
+ //!   3. Wait for the API to answer `/api/health`.
+ //!   4. Show the (initially-hidden) window pointed at the API.
+ //!
+@@ -39,8 +41,9 @@ pub fn run() {
+             // Spawn the API in the background.
+             let api_url_for_setup = api_url.clone();
+             let resource_dist = app.path().resource_dir().ok().map(|d| d.join("dist"));
++            let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string());
+             tauri::async_runtime::spawn(async move {
+-                match bootstrap_api(api_addr, resource_dist).await {
++                match bootstrap_api(api_addr, resource_dist, app_data_dir).await {
+                     Ok(_) => info!("api server exited"),
+                     Err(e) => tracing::error!(?e, "api server failed to start or crashed"),
+                 }
+@@ -76,32 +79,110 @@ fn api_url_cmd() -> String {
+         .unwrap_or_else(|_| format!("http://{DEFAULT_ADDR}"))
+ }
+ 
+-/// The desktop's station: nothing written to disk (configuration and lease
+-/// state in RAM), a fresh signing key and random station id per launch, no
+-/// licence, best-effort mDNS. The resource dir's `dist` is tried before the
+-/// shared bundle locations.
++/// File names the desktop keeps in its app-data directory. The topology and
++/// lease names are the store's own (ADR-0003, ADR-0005 §3a).
++const BAY_TOPOLOGY_FILE: &str = "bay-topology.json";
++const SIGNING_KEY_FILE: &str = "station.key";
++
++/// What the desktop can do with its per-user app-data directory
++/// (`app.path().app_data_dir()`, identifier `dev.wipestation.desktop`).
++#[derive(Debug, Clone, PartialEq, Eq)]
++enum DataDir {
++    /// Resolved, created and passed the write probe.
++    Writable(PathBuf),
++    /// Resolved, but could not be created or written; the reason.
++    Unwritable(PathBuf, String),
++    /// Tauri could not resolve it; the error.
++    Unavailable(String),
++}
++
++/// Create the app-data directory and check it with the store's own write
++/// probe (`LocalFileStore::probe`), so the verdict matches what the store
++/// will find when it detects its tier.
++fn prepare_data_dir(resolved: Result<PathBuf, String>) -> DataDir {
++    let dir = match resolved {
++        Ok(dir) => dir,
++        Err(e) => return DataDir::Unavailable(e),
++    };
++    if let Err(e) = std::fs::create_dir_all(&dir) {
++        return DataDir::Unwritable(dir, format!("cannot create it: {e}"));
++    }
++    match wipe_server::store::LocalFileStore::probe(&dir.join(BAY_TOPOLOGY_FILE)) {
++        Ok(()) => DataDir::Writable(dir),
++        Err(e) => DataDir::Unwritable(dir, format!("cannot write to it: {e}")),
++    }
++}
++
++fn log_data_dir(data_dir: &DataDir) {
++    match data_dir {
++        DataDir::Writable(dir) => info!(dir = %dir.display(), "app-data directory ready"),
++        DataDir::Unwritable(dir, reason) => warn!(
++            dir = %dir.display(), %reason,
++            "app-data directory not writable; the UI will ask where to keep configuration, \
++             and the signing key is fresh for this run"
++        ),
++        DataDir::Unavailable(reason) => warn!(
++            %reason,
++            "no app-data directory; configuration, lease state and signing key are held in \
++             memory only"
++        ),
++    }
++}
++
++/// The desktop's station: best-effort mDNS, a random fleet station id per
++/// launch, no licence. The resource dir's `dist` is tried before the shared
++/// bundle locations.
++///
++/// Persistence follows `data_dir`:
++///   * writable: store tiers detected at `<dir>/bay-topology.json` (lease
++///     state beside it) and the signing seed kept in `<dir>/station.key`;
++///   * unwritable: the same detection, which falls to the operator prompt
++///     (ADR-0003 tier 3), and a fresh key for this run;
++///   * unavailable: everything in memory and a fresh key.
+ fn station_config(
+     addr: SocketAddr,
+     resource_dist: Option<PathBuf>,
++    data_dir: &DataDir,
+ ) -> wipe_server::bootstrap::StationConfig {
+     use wipe_server::bootstrap::{Fleet, Persistence, StationConfig};
++    let detect_in = |dir: &PathBuf| Persistence::Detect {
++        control_plane_url: None,
++        ephemeral_config: false,
++        config_dir: Some(dir.clone()),
++    };
++    let (persistence, key_path) = match data_dir {
++        DataDir::Writable(dir) => (detect_in(dir), Some(dir.join(SIGNING_KEY_FILE))),
++        DataDir::Unwritable(dir, _) => (detect_in(dir), None),
++        DataDir::Unavailable(e) => (
++            Persistence::InMemory {
++                reason: format!(
++                    "The desktop app could not find its app-data directory ({e}), so it keeps \
++                     configuration and licence lease state in memory only."
++                ),
++            },
++            None,
++        ),
++    };
+     StationConfig {
+         hostname: hostname_or_default(),
+         fleet: Fleet::BestEffort,
+         host_static_candidates: resource_dist.into_iter().collect(),
+-        persistence: Persistence::InMemory {
+-            reason: "The desktop app keeps configuration and licence lease state in memory \
+-                     only."
+-                .into(),
+-        },
++        persistence,
++        key_path,
+         ..StationConfig::new(addr)
+     }
+ }
+ 
+ /// Build the station with the shared bootstrap (`wipe_server::bootstrap`) and
+ /// serve it.
+-async fn bootstrap_api(addr: SocketAddr, resource_dist: Option<PathBuf>) -> anyhow::Result<()> {
+-    let cfg = station_config(addr, resource_dist);
++async fn bootstrap_api(
++    addr: SocketAddr,
++    resource_dist: Option<PathBuf>,
++    app_data_dir: Result<PathBuf, String>,
++) -> anyhow::Result<()> {
++    let data_dir = prepare_data_dir(app_data_dir);
++    log_data_dir(&data_dir);
++    let cfg = station_config(addr, resource_dist, &data_dir);
+     let state = wipe_server::bootstrap::build_station(cfg, &mut |line| info!("{line}"))?;
+     info!(%addr, "binding API");
+     wipe_server::serve(state, addr).await?;
+@@ -150,22 +231,184 @@ async fn reqwest_get(url: &str) -> Result<bool, std::io::Error> {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use wipe_server::bootstrap::{Fleet, Persistence};
++    use wipe_server::{
++        bootstrap::{build_station, Fleet, Persistence},
++        StoreTier,
++    };
++
++    fn addr() -> SocketAddr {
++        "127.0.0.1:7878".parse().unwrap()
++    }
++
++    fn tmpdir(name: &str) -> PathBuf {
++        let dir =
++            std::env::temp_dir().join(format!("wipestation-desktop-{name}-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        dir
++    }
+ 
+     #[test]
+-    fn the_desktop_station_keeps_everything_in_memory_and_prefers_its_resource_dist() {
+-        let addr: SocketAddr = "127.0.0.1:7878".parse().unwrap();
++    fn the_desktop_station_prefers_its_resource_dist_and_has_no_licence() {
+         let dist = PathBuf::from("/resources/dist");
+-        let cfg = station_config(addr, Some(dist.clone()));
+-        assert_eq!(cfg.addr, addr);
++        let data = DataDir::Writable(PathBuf::from("/data"));
++        let cfg = station_config(addr(), Some(dist.clone()), &data);
++        assert_eq!(cfg.addr, addr());
+         assert_eq!(cfg.fleet, Fleet::BestEffort);
+-        assert!(matches!(cfg.persistence, Persistence::InMemory { .. }));
+-        assert!(cfg.key_path.is_none());
++        assert!(cfg.station_id.is_none());
++        assert!(cfg.bay_topology.is_none());
+         assert!(cfg.license.is_none());
+         assert!(cfg.vendor_roots.is_empty());
+         assert!(cfg.static_dir.is_none());
+         assert_eq!(cfg.host_static_candidates.first(), Some(&dist));
+ 
+-        assert!(station_config(addr, None).host_static_candidates.is_empty());
++        assert!(station_config(addr(), None, &data)
++            .host_static_candidates
++            .is_empty());
++    }
++
++    #[test]
++    fn a_writable_data_dir_detects_stores_there_and_keeps_the_key_there() {
++        let dir = PathBuf::from("/data");
++        let cfg = station_config(addr(), None, &DataDir::Writable(dir.clone()));
++        match cfg.persistence {
++            Persistence::Detect {
++                control_plane_url,
++                ephemeral_config,
++                config_dir,
++            } => {
++                assert!(control_plane_url.is_none());
++                assert!(!ephemeral_config);
++                assert_eq!(config_dir, Some(dir.clone()));
++            }
++            other => panic!("expected Detect, got {other:?}"),
++        }
++        assert_eq!(cfg.key_path, Some(dir.join("station.key")));
++    }
++
++    #[test]
++    fn an_unwritable_data_dir_still_detects_but_uses_a_fresh_key() {
++        let dir = PathBuf::from("/data");
++        let cfg = station_config(
++            addr(),
++            None,
++            &DataDir::Unwritable(dir.clone(), "read-only".into()),
++        );
++        match cfg.persistence {
++            Persistence::Detect { config_dir, .. } => assert_eq!(config_dir, Some(dir)),
++            other => panic!("expected Detect, got {other:?}"),
++        }
++        assert!(cfg.key_path.is_none());
++    }
++
++    #[test]
++    fn no_data_dir_keeps_everything_in_memory_and_says_why() {
++        let cfg = station_config(
++            addr(),
++            None,
++            &DataDir::Unavailable("no home directory".into()),
++        );
++        match cfg.persistence {
++            Persistence::InMemory { reason } => {
++                assert!(reason.contains("no home directory"), "{reason}")
++            }
++            other => panic!("expected InMemory, got {other:?}"),
++        }
++        assert!(cfg.key_path.is_none());
++    }
++
++    #[test]
++    fn prepare_data_dir_creates_a_missing_dir_and_passes_errors_through() {
++        let dir = tmpdir("prepare").join("nested");
++        assert_eq!(
++            prepare_data_dir(Ok(dir.clone())),
++            DataDir::Writable(dir.clone())
++        );
++        assert!(dir.is_dir());
++        assert_eq!(
++            prepare_data_dir(Err("unknown path".into())),
++            DataDir::Unavailable("unknown path".into())
++        );
++    }
++
++    #[test]
++    fn a_file_where_the_data_dir_should_be_is_unwritable() {
++        let parent = tmpdir("not-a-dir");
++        std::fs::create_dir_all(&parent).unwrap();
++        let file = parent.join("app-data");
++        std::fs::write(&file, b"not a directory").unwrap();
++        match prepare_data_dir(Ok(file.clone())) {
++            DataDir::Unwritable(dir, reason) => {
++                assert_eq!(dir, file);
++                assert!(!reason.is_empty());
++            }
++            other => panic!("expected Unwritable, got {other:?}"),
++        }
++    }
++
++    /// An unwritable app-data dir still starts a station: the store falls to
++    /// the operator prompt (ADR-0003 tier 3), lease state is RAM-only and the
++    /// key is fresh for the run.
++    #[tokio::test]
++    async fn an_unwritable_data_dir_starts_a_station_that_asks_the_operator() {
++        let parent = tmpdir("unwritable-build");
++        std::fs::create_dir_all(&parent).unwrap();
++        let file = parent.join("app-data");
++        std::fs::write(&file, b"not a directory").unwrap();
++        let data = prepare_data_dir(Ok(file.clone()));
++        assert!(matches!(data, DataDir::Unwritable(..)), "{data:?}");
++        let cfg = wipe_server::bootstrap::StationConfig {
++            fleet: Fleet::Off,
++            ..station_config("127.0.0.1:0".parse().unwrap(), None, &data)
++        };
++        let state = build_station(cfg, &mut |_| {}).unwrap();
++        assert_eq!(state.topology_store.tier(), StoreTier::Ephemeral);
++        assert!(state.topology_store.awaiting_decision());
++        assert_eq!(
++            state.license().lease_persistence().tier,
++            StoreTier::Ephemeral
++        );
++        assert!(!file.join("station.key").exists());
++    }
++
++    /// Layout, lease state and signing key survive a relaunch.
++    #[tokio::test]
++    async fn a_relaunched_desktop_station_keeps_its_layout_and_key() {
++        let dir = tmpdir("relaunch");
++        let data = prepare_data_dir(Ok(dir.clone()));
++        assert_eq!(data, DataDir::Writable(dir.clone()));
++        let build = || {
++            let cfg = wipe_server::bootstrap::StationConfig {
++                fleet: Fleet::Off,
++                ..station_config("127.0.0.1:0".parse().unwrap(), None, &data)
++            };
++            build_station(cfg, &mut |_| {}).unwrap()
++        };
++
++        let first = build();
++        assert!(first.bay_topology.read().is_none());
++        let mut layout = wipe_common::preset("dock-2bay").unwrap();
++        layout.label = "Saved on the desktop".into();
++        first.save_bay_topology(layout).unwrap();
++        // A signing decision is what writes the lease state.
++        let decision = first
++            .license()
++            .signing_decision(time::OffsetDateTime::now_utc());
++        assert!(decision.evaluation);
++
++        let second = build();
++        let reloaded = second.bay_topology.read().clone().unwrap();
++        assert_eq!(reloaded.label, "Saved on the desktop");
++        assert_eq!(
++            first.signing_key.public_key_id(),
++            second.signing_key.public_key_id()
++        );
++        assert_eq!(second.topology_store.tier(), StoreTier::LocalFile);
++        assert_eq!(
++            second.license().lease_persistence().tier,
++            StoreTier::LocalFile
++        );
++        assert!(dir.join("station.key").is_file());
++        assert!(dir.join("bay-topology.json").is_file());
++        assert!(dir.join("lease-state.json").is_file());
+     }
+ }
+diff --git a/crates/wipe-cli/src/main.rs b/crates/wipe-cli/src/main.rs
+index 3e7253a..042aecd 100644
+--- a/crates/wipe-cli/src/main.rs
++++ b/crates/wipe-cli/src/main.rs
+@@ -362,6 +362,7 @@ fn station_config(
+         persistence: Persistence::Detect {
+             control_plane_url,
+             ephemeral_config,
++            config_dir: None,
+         },
+         license,
+         vendor_roots,
+@@ -849,9 +850,11 @@ mod tests {
+             Persistence::Detect {
+                 control_plane_url,
+                 ephemeral_config,
++                config_dir,
+             } => {
+                 assert_eq!(control_plane_url.as_deref(), Some("U"));
+                 assert!(ephemeral_config);
++                assert!(config_dir.is_none());
+             }
+             other => panic!("expected Detect, got {other:?}"),
+         }
+@@ -867,9 +870,11 @@ mod tests {
+                 Persistence::Detect {
+                     control_plane_url,
+                     ephemeral_config,
++                    config_dir,
+                 } => {
+                     assert!(control_plane_url.is_none());
+                     assert!(!ephemeral_config);
++                    assert!(config_dir.is_none());
+                 }
+                 other => panic!("expected Detect, got {other:?}"),
+             }
+diff --git a/crates/wipe-server/src/bootstrap.rs b/crates/wipe-server/src/bootstrap.rs
+index edf8184..e9f074d 100644
+--- a/crates/wipe-server/src/bootstrap.rs
++++ b/crates/wipe-server/src/bootstrap.rs
+@@ -42,12 +42,18 @@ pub enum Fleet {
+ /// ADR-0005 §3a).
+ #[derive(Debug, Clone)]
+ pub enum Persistence {
+-    /// Walk the store tiers: `--bay-topology` path or the default config
+-    /// path, then the control plane, then RAM. `ephemeral_config` keeps
+-    /// *configuration* in RAM but still detects the lease store.
++    /// Walk the store tiers: `--bay-topology` path, else
++    /// `<config_dir>/bay-topology.json`, else the default config path; then
++    /// the control plane, then RAM. `ephemeral_config` keeps *configuration*
++    /// in RAM but still detects the lease store.
+     Detect {
+         control_plane_url: Option<String>,
+         ephemeral_config: bool,
++        /// Directory the host keeps its saved configuration and lease state
++        /// in (the desktop's app-data dir). Only a store location: the file
++        /// in it is never loaded as a seed, so an unreadable one is logged
++        /// and ignored rather than failing start-up. `None` on the CLI.
++        config_dir: Option<PathBuf>,
+     },
+     /// Configuration and lease state both in RAM; nothing is written to disk.
+     /// `reason` is what the station reports as the cause.
+@@ -190,9 +196,11 @@ pub fn build_station(cfg: StationConfig, report: &mut dyn FnMut(String)) -> Resu
+         Persistence::Detect {
+             control_plane_url,
+             ephemeral_config,
++            config_dir,
+         } => {
+             let store_cfg = StoreConfig {
+-                explicit_path: bay_topology_path,
++                explicit_path: bay_topology_path
++                    .or_else(|| config_dir.map(|d| d.join("bay-topology.json"))),
+                 control_plane_url,
+                 station_id: resolved_station_id.clone(),
+             };
+@@ -443,27 +451,45 @@ pub fn resolve_profile(name: &str) -> Result<(wipe_common::BayTopology, &'static
+     ))
+ }
+ 
++/// Read the station's Ed25519 seed from `path`, or create it there.
++///
++/// A created seed is written exclusively (an existing file is never
++/// overwritten) and, on Unix, readable by its owner only (`0o600`): it is the
++/// key every certificate this station signs is checked against.
+ fn load_or_create_signing_key(path: Option<PathBuf>) -> Result<SigningKey> {
+-    match path {
+-        None => Ok(SigningKey::generate()),
+-        Some(p) => {
+-            if p.exists() {
+-                let bytes = fs::read(&p)?;
+-                if bytes.len() != 32 {
+-                    return Err(anyhow!(
+-                        "{p:?} is not a 32-byte Ed25519 seed (got {})",
+-                        bytes.len()
+-                    ));
+-                }
+-                let arr: [u8; 32] = bytes.try_into().unwrap();
+-                Ok(SigningKey::from_seed(arr))
+-            } else {
+-                let key = SigningKey::generate();
+-                fs::write(&p, key.0.to_bytes())?;
+-                Ok(key)
+-            }
++    let Some(p) = path else {
++        return Ok(SigningKey::generate());
++    };
++    if p.exists() {
++        let bytes = fs::read(&p).with_context(|| format!("reading signing key {}", p.display()))?;
++        if bytes.len() != 32 {
++            return Err(anyhow!(
++                "{p:?} is not a 32-byte Ed25519 seed (got {})",
++                bytes.len()
++            ));
+         }
++        let arr: [u8; 32] = bytes.try_into().unwrap();
++        return Ok(SigningKey::from_seed(arr));
+     }
++    let key = SigningKey::generate();
++    write_new_secret(&p, &key.0.to_bytes())
++        .with_context(|| format!("writing signing key {}", p.display()))?;
++    Ok(key)
++}
++
++/// Create `path` (failing if it exists) holding `bytes`, owner-only on Unix.
++fn write_new_secret(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
++    use std::io::Write;
++    let mut opts = fs::OpenOptions::new();
++    opts.write(true).create_new(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::OpenOptionsExt;
++        opts.mode(0o600);
++    }
++    let mut file = opts.open(path)?;
++    file.write_all(bytes)?;
++    file.sync_all()
+ }
+ 
+ /// The topology store and the lease store a detecting station runs with.
+@@ -617,6 +643,31 @@ mod tests {
+         );
+     }
+ 
++    #[cfg(unix)]
++    #[test]
++    fn a_created_signing_key_is_owner_only_and_never_overwritten() {
++        use std::os::unix::fs::PermissionsExt;
++        let dir = lease_tmpdir("key-mode");
++        let path = dir.join("station.key");
++        let key = load_or_create_signing_key(Some(path.clone())).unwrap();
++        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
++        assert_eq!(mode, 0o600, "mode {mode:o}");
++        // An existing file is not replaced by the create path.
++        assert!(write_new_secret(&path, &[0u8; 32]).is_err());
++        let again = load_or_create_signing_key(Some(path)).unwrap();
++        assert_eq!(key.public_key_id(), again.public_key_id());
++    }
++
++    #[test]
++    fn a_signing_key_error_names_its_path() {
++        let path = PathBuf::from("/nonexistent-wipestation-dir/station.key");
++        let err = load_or_create_signing_key(Some(path)).err().unwrap();
++        assert!(
++            format!("{err:#}").contains("/nonexistent-wipestation-dir/station.key"),
++            "{err:#}"
++        );
++    }
++
+     #[test]
+     fn an_mdns_failure_fails_a_required_fleet_and_is_reported_under_best_effort() {
+         let fail = || -> Result<()> { Err(anyhow!("no multicast")) };
+diff --git a/crates/wipe-server/tests/bootstrap.rs b/crates/wipe-server/tests/bootstrap.rs
+index 34566a3..a696126 100644
+--- a/crates/wipe-server/tests/bootstrap.rs
++++ b/crates/wipe-server/tests/bootstrap.rs
+@@ -31,15 +31,31 @@ fn addr() -> SocketAddr {
+ }
+ 
+ /// Mirrors the desktop shell's posture (`apps/desktop/src-tauri/src/lib.rs`)
+-/// minus mDNS: `Fleet::Off`, so tests advertise nothing on the LAN. The
+-/// best-effort fleet handling is covered by `start_fleet`'s unit test.
+-fn desktop_config() -> StationConfig {
++/// for a writable app-data dir `dir`, minus mDNS: `Fleet::Off`, so tests
++/// advertise nothing on the LAN. The best-effort fleet handling is covered by
++/// `start_fleet`'s unit test.
++fn desktop_config(dir: &Path) -> StationConfig {
++    StationConfig {
++        hostname: "wipestation-desktop".into(),
++        fleet: Fleet::Off,
++        key_path: Some(dir.join("station.key")),
++        persistence: Persistence::Detect {
++            control_plane_url: None,
++            ephemeral_config: false,
++            config_dir: Some(dir.to_path_buf()),
++        },
++        ..StationConfig::new(addr())
++    }
++}
++
++/// The desktop's fallback when it has no app-data directory.
++fn in_memory_config() -> StationConfig {
+     StationConfig {
+         hostname: "wipestation-desktop".into(),
+         fleet: Fleet::Off,
+         persistence: Persistence::InMemory {
+-            reason: "The desktop app keeps configuration and licence lease state in memory \
+-                     only."
++            reason: "The desktop app could not find its app-data directory (test), so it \
++                     keeps configuration and licence lease state in memory only."
+                 .into(),
+         },
+         ..StationConfig::new(addr())
+@@ -82,12 +98,12 @@ async fn a_key_file_is_created_once_and_reused() {
+ }
+ 
+ #[tokio::test]
+-async fn the_desktop_posture_keeps_everything_in_memory() {
++async fn the_in_memory_fallback_keeps_everything_in_memory() {
+     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+     let dir = tmpdir("in-memory");
+     // Point default detection here: an in-memory station must not use it.
+     std::env::set_var("WIPESTATION_CONFIG_DIR", &dir);
+-    let (state, lines) = build(desktop_config());
++    let (state, lines) = build(in_memory_config());
+     std::env::remove_var("WIPESTATION_CONFIG_DIR");
+ 
+     assert_eq!(state.topology_store.tier(), StoreTier::Ephemeral);
+@@ -108,7 +124,8 @@ async fn the_desktop_posture_keeps_everything_in_memory() {
+ 
+ #[tokio::test]
+ async fn a_station_built_with_the_desktop_config_serves_the_simulator() {
+-    let (state, _) = build(desktop_config());
++    let dir = tmpdir("desktop-sim");
++    let (state, _) = build(desktop_config(&dir));
+     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+     let bound = listener.local_addr().unwrap();
+     tokio::spawn(async move {
+@@ -120,6 +137,70 @@ async fn a_station_built_with_the_desktop_config_serves_the_simulator() {
+     assert_eq!(r.status(), 200);
+ }
+ 
++/// The desktop's app-data dir holds the layout, lease state and key across
++/// launches, and is not the CLI's default config dir.
++#[tokio::test]
++async fn a_config_dir_station_keeps_its_layout_lease_and_key_across_builds() {
++    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
++    let dir = tmpdir("config-dir");
++    let cli_dir = tmpdir("config-dir-cli-default");
++    std::env::set_var("WIPESTATION_CONFIG_DIR", &cli_dir);
++    let built = build_station(desktop_config(&dir), &mut |_| {});
++    let first = built.unwrap();
++
++    assert_eq!(first.topology_store.tier(), StoreTier::LocalFile);
++    assert_eq!(
++        first.topology_store.location(),
++        dir.join("bay-topology.json").display().to_string()
++    );
++    assert_eq!(
++        first.license().lease_persistence().location,
++        dir.join("lease-state.json").display().to_string()
++    );
++    let mut layout = wipe_common::preset("dock-2bay").unwrap();
++    layout.label = "Saved in the app-data dir".into();
++    first.save_bay_topology(layout).unwrap();
++    first
++        .license()
++        .signing_decision(time::OffsetDateTime::now_utc());
++
++    let second = build_station(desktop_config(&dir), &mut |_| {});
++    std::env::remove_var("WIPESTATION_CONFIG_DIR");
++    let second = second.unwrap();
++
++    assert_eq!(
++        second.bay_topology.read().as_ref().unwrap().label,
++        "Saved in the app-data dir"
++    );
++    assert_eq!(
++        first.signing_key.public_key_id(),
++        second.signing_key.public_key_id()
++    );
++    assert_eq!(
++        second.license().lease_persistence().tier,
++        StoreTier::LocalFile
++    );
++    assert!(dir.join("lease-state.json").is_file());
++    assert!(list(&cli_dir).is_empty(), "wrote {:?}", list(&cli_dir));
++}
++
++/// A `config_dir` file is a store location, not a seed: a corrupt one is
++/// logged and ignored, as on the CLI's default path, rather than failing.
++#[tokio::test]
++async fn a_corrupt_layout_in_the_config_dir_does_not_fail_the_build() {
++    let dir = tmpdir("config-dir-corrupt");
++    std::fs::write(dir.join("bay-topology.json"), "{ not json").unwrap();
++    let (state, lines) = build(desktop_config(&dir));
++    assert!(state.bay_topology.read().is_none());
++    assert_eq!(state.topology_store.tier(), StoreTier::LocalFile);
++    assert!(
++        lines
++            .iter()
++            .any(|l| l.starts_with("bay topology: not configured")),
++        "{lines:?}"
++    );
++}
++
+ #[tokio::test]
+ async fn a_saved_layout_outranks_a_profile_seed() {
+     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+@@ -138,6 +219,7 @@ async fn a_saved_layout_outranks_a_profile_seed() {
+             persistence: Persistence::Detect {
+                 control_plane_url: None,
+                 ephemeral_config: false,
++                config_dir: None,
+             },
+             ..StationConfig::new(addr())
+         },
+@@ -207,6 +289,7 @@ async fn a_cli_station_reports_its_start_up_lines_in_order() {
+         persistence: Persistence::Detect {
+             control_plane_url: None,
+             ephemeral_config: false,
++            config_dir: None,
+         },
+         ..StationConfig::new(addr())
+     });
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 1037a8f..3afa8a4 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -324,7 +324,7 @@ lead are read-side; the discovery transport is pluggable.
+ | Mode | Binary | Frontend |
+ | --- | --- | --- |
+ | Standalone, browser | `wipestation serve` | Same React bundle at `http://127.0.0.1:7878` |
+-| Standalone, native window | `wipestation-desktop` (`cargo run -p wipestation-desktop`, or `pnpm tauri dev` / `pnpm tauri build`) | Tauri 2 window over an in-process `wipe-server` on `127.0.0.1:7878`. Only `WIPESTATION_API_ADDR` is honoured (it moves the API; the window URL stays `127.0.0.1:7878`); none of `serve`'s options apply. It builds its station with the same `wipe_server::bootstrap::build_station` as `serve`, so the simulator (identify mode) is attached; configuration and lease state stay in memory, no licence, default mock timing, and a fresh signing key and random station id on every launch. It advertises on mDNS, so each launch appears as a new peer. If the port is taken the bind error is only logged and the window shows whatever answers there |
++| Standalone, native window | `wipestation-desktop` (`cargo run -p wipestation-desktop`, or `pnpm tauri dev` / `pnpm tauri build`) | Tauri 2 window over an in-process `wipe-server` on `127.0.0.1:7878`. Only `WIPESTATION_API_ADDR` is honoured (it moves the API; the window URL stays `127.0.0.1:7878`); none of `serve`'s options apply. It builds its station with the same `wipe_server::bootstrap::build_station` as `serve`, so the simulator (identify mode) is attached. Saved configuration, lease state and the signing key seed live in its per-user app-data directory (Tauri `app_data_dir()`, identifier `dev.wipestation.desktop`; `~/Library/Application Support/dev.wipestation.desktop` on macOS, `~/.local/share/dev.wipestation.desktop` (or `$XDG_DATA_HOME/…`) on Linux, `%APPDATA%\dev.wipestation.desktop` on Windows), passed to the bootstrap as `Persistence::Detect { config_dir }`; an unwritable directory falls to the tier-3 operator prompt with a fresh key, and an unresolvable one to `Persistence::InMemory`. No licence, default mock timing, and a random station id on every launch. It advertises on mDNS, so each launch appears as a new peer. If the port is taken the bind error is only logged and the window shows whatever answers there |
+ | Headless, no mDNS | `wipestation serve --no-fleet` | Same bundle; tablets must be given the address |
+ | Headless wipestation (PXE / rack) | `wipestation serve --no-ui` (future flag) | none on device; operator tablet connects to it |
+ | Roaming operator tablet | Same React bundle | Pointed at any station's `/api` |
+diff --git a/docs/adr/0003-station-config-persistence.md b/docs/adr/0003-station-config-persistence.md
+index e375b0d..1b91a6e 100644
+--- a/docs/adr/0003-station-config-persistence.md
++++ b/docs/adr/0003-station-config-persistence.md
+@@ -156,8 +156,9 @@ write probe, and nothing else:
+   enforcement**, not evidence and not configuration. It carries no customer
+   data or asset record.
+ - It lives in its own file, `lease-state.json`, in the directory that holds
+-  `bay-topology.json` (the parent of `--bay-topology`, else
+-  `$WIPESTATION_CONFIG_DIR`, else `~/.config/wipestation`), behind its own
++  `bay-topology.json` (the parent of `--bay-topology`, else the desktop
++  app's per-user app-data directory, else `$WIPESTATION_CONFIG_DIR`, else
++  `~/.config/wipestation`), behind its own
+   `LeaseStore` trait in `crates/wipe-server/src/store.rs`. It never enters the
+   topology document, and `save_bay_topology` does not touch it.
+ - Writes are temp file, `sync_all`, rename and (on Unix) a directory fsync.
+diff --git a/docs/adr/0005-licensing-and-attestation.md b/docs/adr/0005-licensing-and-attestation.md
+index 5e10429..4379025 100644
+--- a/docs/adr/0005-licensing-and-attestation.md
++++ b/docs/adr/0005-licensing-and-attestation.md
+@@ -246,8 +246,9 @@ how a certificate is marked when the station is unlicensed.
+    decision waits at most 2 s for its save; a slower one marks that
+    decision `evaluation`. Where that directory is not writable it runs
+    RAM-only and its start-up line says the quota count and clock-rollback
+-   protection reset on reboot; the desktop shell, which wires no store, is
+-   RAM-only too. A file that cannot be read or saved marks licensed
++   protection reset on reboot; the desktop shell keeps `lease-state.json`
++   in its per-user app-data directory and is RAM-only only where that
++   directory cannot be written or found. A file that cannot be read or saved marks licensed
+    certificates `evaluation` (`LeaseStatus::LeaseStateUnavailable`) and
+    never stops an erasure; an unreadable file is never overwritten. Under
+    a licence with a different id the watermark is kept and the count
+@@ -319,8 +320,9 @@ how a certificate is marked when the station is unlicensed.
+    without `--station-id` has the same fingerprint. `--station-id` does not
+    cover every station: `AppState::with_static_dir`
+    (`crates/wipe-server/src/app.rs`) starts from
+-   `LicenseContext::unlicensed("standalone", ..)`, and the desktop shell
+-   calls it, has no `--station-id` and installs no licence. For site scope,
++   `LicenseContext::unlicensed("standalone", ..)`; the desktop shell has no
++   `--station-id` (its licensing station id is `standalone`, its fleet id
++   random per launch) and no vendor root, so it installs no licence. For site scope,
+    `evaluate` (`lease.rs`) checks only `required_fingerprint()`, which is
+    `None` for `Scope::Site`, and nothing compares `site_id` with anything,
+    so a site licence validates on any station.
+diff --git a/docs/design/bench-setup-builder.md b/docs/design/bench-setup-builder.md
+index fa83b5a..81b82aa 100644
+--- a/docs/design/bench-setup-builder.md
++++ b/docs/design/bench-setup-builder.md
+@@ -4,9 +4,10 @@
+ built in `wipestation serve` and in the Tauri shell, which both start their
+ station through `wipe_server::bootstrap` and so both attach the simulator that
+ identify mode needs. Not built: SES auto-detect, custom labels, and the
+-Devices-page entry links (see the dated notes below). The Tauri shell still has
+-no saved store, persistent signing key or licence: a layout built there lasts
+-until the app quits.
++Devices-page entry links (see the dated notes below). The Tauri shell keeps a
++saved layout, its lease state and its signing key in its per-user app-data
++directory, so a layout built there survives a relaunch; it still has no
++licence.
+ 
+ Companion to [ADR-0002](../adr/0002-configurable-bay-topology.md) (the model)
+ and [ADR-0003](../adr/0003-station-config-persistence.md) (where a saved layout
+@@ -232,10 +233,12 @@ a fleet of identical benches. **Import** accepts it back.
+ > renames (`LocalFileStore::save` in `crates/wipe-server/src/store.rs`), so the
+ > write is atomic within one filesystem. It persists only when the station has
+ > a writable store tier; otherwise the save holds until restart and the page
+-> says so. The Tauri shell builds its station with `Persistence::InMemory`
+-> (`wipe_server::bootstrap`), so its store is in RAM only and a layout saved
+-> there is still lost when the app quits (story 2 moves it to an app-data
+-> directory).
++> says so. The Tauri shell builds its station with `Persistence::Detect` and
++> `config_dir` set to its per-user app-data directory (`wipe_server::bootstrap`;
++> desktop-parity story 2), so a layout saved there is written to
++> `<app-data>/bay-topology.json` and reloaded on the next launch. If that
++> directory cannot be written the store falls to tier 3 and the page asks the
++> operator; only if Tauri cannot resolve it at all is the store in RAM.
+ 
+ ## Model changes this needed (all four done)
+ 

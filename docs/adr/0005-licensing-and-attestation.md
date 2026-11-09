@@ -246,8 +246,9 @@ how a certificate is marked when the station is unlicensed.
    decision waits at most 2 s for its save; a slower one marks that
    decision `evaluation`. Where that directory is not writable it runs
    RAM-only and its start-up line says the quota count and clock-rollback
-   protection reset on reboot; the desktop shell, which wires no store, is
-   RAM-only too. A file that cannot be read or saved marks licensed
+   protection reset on reboot; the desktop shell keeps `lease-state.json`
+   in its per-user app-data directory and is RAM-only only where that
+   directory cannot be written or found. A file that cannot be read or saved marks licensed
    certificates `evaluation` (`LeaseStatus::LeaseStateUnavailable`) and
    never stops an erasure; an unreadable file is never overwritten. Under
    a licence with a different id the watermark is kept and the count
@@ -319,8 +320,9 @@ how a certificate is marked when the station is unlicensed.
    without `--station-id` has the same fingerprint. `--station-id` does not
    cover every station: `AppState::with_static_dir`
    (`crates/wipe-server/src/app.rs`) starts from
-   `LicenseContext::unlicensed("standalone", ..)`, and the desktop shell
-   calls it, has no `--station-id` and installs no licence. For site scope,
+   `LicenseContext::unlicensed("standalone", ..)`; the desktop shell has no
+   `--station-id` (its licensing station id is `standalone`, its fleet id
+   random per launch) and no vendor root, so it installs no licence. For site scope,
    `evaluate` (`lease.rs`) checks only `required_fingerprint()`, which is
    `None` for `Scope::Site`, and nothing compares `site_id` with anything,
    so a site licence validates on any station.

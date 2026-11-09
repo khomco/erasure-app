@@ -914,9 +914,9 @@ folder or in `.scratch/DECISIONS.md`.
 | At-a-glance bench status overlay on the Devices page | §11 #3 | ✅ | |
 | Configurable bay topology + generated SVG bay map | §11 #10 / ADR-0002 | ✅ | UI templates differ from the Rust presets |
 | Tiered, self-detecting station config store | ADR-0003 | ✅ partial | Control-plane tier always fails (no hub); corrupt config only logged, not surfaced |
-| Bench-setup builder + learn-by-hot-swap identify mode | ADR-0002/0003 | ✅ partial | Both hosts start through `wipe_server::bootstrap`, so the desktop (Tauri) shell has identify mode; it still wires no saved store, so layouts are lost on quit |
+| Bench-setup builder + learn-by-hot-swap identify mode | ADR-0002/0003 | ✅ partial | Both hosts start through `wipe_server::bootstrap`, so the desktop (Tauri) shell has identify mode; it saves layouts to `bay-topology.json` in its per-user app-data directory, so they survive a relaunch |
 | Model-aware enclosure catalog + shell artwork with machine-enforced legibility rules | ADR-0004 | ✅ partial | Site-local overlay exists in code but no host wires it |
-| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark persisted in `lease-state.json` beside the bay topology (RAM-only, resetting on restart, where that directory is not writable and in the desktop shell; tier printed at `wipestation serve` start-up only); `FileCounter` exists but nothing uses it yet (rewindable, not hardware-backed); `TpmCounter` cannot count and claims no hardware backing; `allowed_methods` unenforced; evaluation erasures counted and persisted, shown only in the `wipestation serve` start-up line, with no limit attached; `GET /api/license` reports the verdict (`LeaseStatus` and its operator message), customer, `not_after`, licence instance key id, lapse policy and fingerprint, read-only (no watermark move, no save); the Certificate page shows each certificate's signed `evaluation` marking (header pill and Licence field) and the customer named in an attached licence, labelled unchecked because the browser holds no vendor root (`verify-cert --vendor-root-b64` checks it); `POST /api/license` installs a licence file's JSON while the station runs (licence-visibility story 4): the same checks as start-up (`check_installable` against the `--vendor-root-b64` roots, which `serve` now keeps whether or not `--license` is given and a request can never add, and the station's signing key id), the new licence swapped into the shared cell the certificate generator reads, the running lease kept (watermark, evaluation count, store, writer, faults; the licensed count restarts at 0 only for a different licence id), answered with the `GET /api/license` view; 409 with no vendor root (the desktop shell, or `serve` without `--vendor-root-b64`), 422 for a body that does not parse, verify or name this station's key, with nothing changed; an installed licence is held in memory only, so a restart returns to the `--license` licence or to evaluation; a station-wide licence banner (`LicenceBanner` in the desktop `Layout`, polling `GET /api/license` each minute) sits above every bench page: evaluation mode when unlicensed, the server's operator message in danger tone for any other non-valid status, expiry warnings from 30 days left ("renew now" from 7, danger tone from 1; under the `stop` lapse policy it says new jobs will be refused at expiry, which story 5 has not built yet), and "Licence status unknown" if the route fails; it informs only, with no button or link, and the desktop shell, always unlicensed, therefore always shows the evaluation banner; no licence install from the UI yet (the route has no form); desktop shell is always unlicensed and refuses runtime install (no vendor root); like every station route, `POST /api/license` is unauthenticated (and CORS is permissive), so anyone who can reach the station API can install any authentic licence for this station, for example a superseded `evaluation`-policy file over a `stop` one; switching licences restarts the licensed count, so installing B and then A again, or installing B and restarting with `--license A`, restarts A's count (the ADR-0005 §3a speed bump, now reachable over HTTP) |
+| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark persisted in `lease-state.json` beside the bay topology (the desktop shell keeps it in its per-user app-data directory; RAM-only, resetting on restart, where that directory is not writable or, on the desktop, cannot be found; tier printed at `wipestation serve` start-up only); `FileCounter` exists but nothing uses it yet (rewindable, not hardware-backed); `TpmCounter` cannot count and claims no hardware backing; `allowed_methods` unenforced; evaluation erasures counted and persisted, shown only in the `wipestation serve` start-up line, with no limit attached; `GET /api/license` reports the verdict (`LeaseStatus` and its operator message), customer, `not_after`, licence instance key id, lapse policy and fingerprint, read-only (no watermark move, no save); the Certificate page shows each certificate's signed `evaluation` marking (header pill and Licence field) and the customer named in an attached licence, labelled unchecked because the browser holds no vendor root (`verify-cert --vendor-root-b64` checks it); `POST /api/license` installs a licence file's JSON while the station runs (licence-visibility story 4): the same checks as start-up (`check_installable` against the `--vendor-root-b64` roots, which `serve` now keeps whether or not `--license` is given and a request can never add, and the station's signing key id), the new licence swapped into the shared cell the certificate generator reads, the running lease kept (watermark, evaluation count, store, writer, faults; the licensed count restarts at 0 only for a different licence id), answered with the `GET /api/license` view; 409 with no vendor root (the desktop shell, or `serve` without `--vendor-root-b64`), 422 for a body that does not parse, verify or name this station's key, with nothing changed; an installed licence is held in memory only, so a restart returns to the `--license` licence or to evaluation; a station-wide licence banner (`LicenceBanner` in the desktop `Layout`, polling `GET /api/license` each minute) sits above every bench page: evaluation mode when unlicensed, the server's operator message in danger tone for any other non-valid status, expiry warnings from 30 days left ("renew now" from 7, danger tone from 1; under the `stop` lapse policy it says new jobs will be refused at expiry, which story 5 has not built yet), and "Licence status unknown" if the route fails; it informs only, with no button or link, and the desktop shell, always unlicensed, therefore always shows the evaluation banner; no licence install from the UI yet (the route has no form); desktop shell is always unlicensed and refuses runtime install (no vendor root); like every station route, `POST /api/license` is unauthenticated (and CORS is permissive), so anyone who can reach the station API can install any authentic licence for this station, for example a superseded `evaluation`-policy file over a `stop` one; switching licences restarts the licensed count, so installing B and then A again, or installing B and restarting with `--license A`, restarts A's count (the ADR-0005 §3a speed bump, now reachable over HTTP) |
 | Vitest suite over the frontend's pure domain modules | §12 | ✅ | |
 | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
 | Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check; landing page (problem, offline-verifiable certificate, differentiators, "what we are not", one early-access CTA); product, standards posture (certification roadmap labelled future), segment (ITAD, enterprise IT, government), pricing ("early-access pricing on request"), contact, privacy and terms pages; early-access and contact forms | ADR-0006 / ROADMAP W1.1–W1.4 | ✅ partial | The forms stay closed (no script, submit disabled, "not open yet") unless the build is given `PUBLIC_HUB_ORIGIN`, and `astro build` refuses that until the privacy notice is published (`site.privacyNoticePublished`), so production builds cannot take sales leads yet; pricing has no amounts unless the build is given `PRICING_HUB_ORIGIN` (`offerings-and-payments` story 5, below); privacy and terms are placeholders to publish before launch; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); copy and statuses await vendor sign-off |
@@ -1040,9 +1040,10 @@ keep resolving.
     **Gaps:** the store's tier 2 (control plane) is a stub that always
     reports itself unavailable; both hosts start through the shared
     `wipe_server::bootstrap`, so the desktop app has identify mode (the
-    simulator is attached), but its store is in-memory only: it keeps a
-    saved layout only for the session (the ephemeral store accepts saves
-    without the tier-3 prompt and loses them on quit);
+    simulator is attached) and keeps a saved layout in its per-user
+    app-data directory across relaunches (where Tauri cannot resolve that
+    directory, its in-memory store accepts saves without the tier-3 prompt
+    and loses them on quit);
     and no host wires the catalog overlay.
 11. **Diagnostic / HealthCheck runtime** — the remainder of ADR-0001.
     `DiagnosticEvent` and `HealthCheckEvent` shipped as schema-only
@@ -1401,8 +1402,18 @@ and resolve. None of these have a decided answer.
   station id), failing as wrong-machine otherwise. Today the key lives
   on the station: read from the `--key-path` file (generated and
   written there if the file does not exist yet, so it persists
-  afterwards), or generated fresh on each start without a path (always
-  fresh in the desktop app), in which case a licence issued to an
+  afterwards; the desktop app uses `station.key` in its machine-local
+  per-user app-data directory; a created seed is written crash-safely,
+  never overwrites an existing file and is owner-only on Unix (on
+  Windows it relies on the `%LOCALAPPDATA%` profile's access control,
+  not an explicit mode), and a seed that cannot be read or is not 32
+  bytes stops start-up with its path named; on the desktop that error is
+  only logged and the window opens over no working API until story 3
+  makes it visible), or
+  generated fresh on each start without a path (the desktop app when its
+  app-data directory cannot be written or found; an existing
+  `station.key` in an unwritable directory is ignored, so a fresh key
+  signs that run's certificates), in which case a licence issued to an
   earlier key no longer installs.
 - **Lease / watermark** — the station's offline enforcement state
   (`wipe_license::LeaseState`): the highest clock time seen (the
@@ -1415,8 +1426,9 @@ and resolve. None of these have a decided answer.
   `wipestation serve` prints at start-up, and nothing is limited by it. `wipestation serve` keeps it in
   `lease-state.json` beside the bay topology, saved after every status
   check, signing decision and counted erasure, so a restart clears
-  neither; where that directory is not writable (and in the desktop shell)
-  it is held in RAM and resets on every start (starting from an existing
+  neither (the desktop shell keeps it in its per-user app-data directory
+  the same way); where that directory is not writable (or, on the
+  desktop, cannot be found) it is held in RAM and resets on every start (starting from an existing
   readable file there, if any). A lease file that cannot be read or saved,
   or a save that takes over 2 s, marks licensed certificates
   `evaluation` and never stops an erasure; an unreadable one is never
@@ -1446,9 +1458,10 @@ and resolve. None of these have a decided answer.
   shell**: the Tauri host `wipestation-desktop` (`apps/desktop/src-tauri`)
   that runs the API and UI in one window. It builds its station with
   the same `wipe_server::bootstrap` as `wipestation serve`, so the
-  simulator (identify mode) is attached; it keeps configuration and
-  lease state in memory only, has no licence, and uses a fresh signing
-  key and a random station id on every launch.
+  simulator (identify mode) is attached; it keeps saved configuration,
+  lease state and its signing key in its machine-local per-user app-data
+  directory (Tauri `app_local_data_dir()`, not `~/.config/wipestation`),
+  has no licence, and uses a random station id on every launch.
 - **Vendor console** — our side of the control plane: licence issuance,
   entitlements, revocation, cross-tenant support and metering.
 - **Fleet console** — the customer's side: their stations, their

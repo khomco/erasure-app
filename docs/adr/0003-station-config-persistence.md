@@ -156,8 +156,10 @@ write probe, and nothing else:
   enforcement**, not evidence and not configuration. It carries no customer
   data or asset record.
 - It lives in its own file, `lease-state.json`, in the directory that holds
-  `bay-topology.json` (the parent of `--bay-topology`, else
-  `$WIPESTATION_CONFIG_DIR`, else `~/.config/wipestation`), behind its own
+  `bay-topology.json`, which depends on the host: `wipestation serve` uses
+  the parent of `--bay-topology`, else `$WIPESTATION_CONFIG_DIR`, else
+  `~/.config/wipestation`; the desktop app uses its machine-local per-user
+  app-data directory. It sits behind its own
   `LeaseStore` trait in `crates/wipe-server/src/store.rs`. It never enters the
   topology document, and `save_bay_topology` does not touch it.
 - Writes are temp file, `sync_all`, rename and (on Unix) a directory fsync.

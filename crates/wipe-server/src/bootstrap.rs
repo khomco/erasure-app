@@ -42,12 +42,18 @@ pub enum Fleet {
 /// ADR-0005 §3a).
 #[derive(Debug, Clone)]
 pub enum Persistence {
-    /// Walk the store tiers: `--bay-topology` path or the default config
-    /// path, then the control plane, then RAM. `ephemeral_config` keeps
-    /// *configuration* in RAM but still detects the lease store.
+    /// Walk the store tiers: `--bay-topology` path, else
+    /// `<config_dir>/bay-topology.json`, else the default config path; then
+    /// the control plane, then RAM. `ephemeral_config` keeps *configuration*
+    /// in RAM but still detects the lease store.
     Detect {
         control_plane_url: Option<String>,
         ephemeral_config: bool,
+        /// Directory the host keeps its saved configuration and lease state
+        /// in (the desktop's app-data dir). Only a store location: the file
+        /// in it is never loaded as a seed, so an unreadable one is logged
+        /// and ignored rather than failing start-up. `None` on the CLI.
+        config_dir: Option<PathBuf>,
     },
     /// Configuration and lease state both in RAM; nothing is written to disk.
     /// `reason` is what the station reports as the cause.
@@ -190,9 +196,11 @@ pub fn build_station(cfg: StationConfig, report: &mut dyn FnMut(String)) -> Resu
         Persistence::Detect {
             control_plane_url,
             ephemeral_config,
+            config_dir,
         } => {
             let store_cfg = StoreConfig {
-                explicit_path: bay_topology_path,
+                explicit_path: bay_topology_path
+                    .or_else(|| config_dir.map(|d| d.join("bay-topology.json"))),
                 control_plane_url,
                 station_id: resolved_station_id.clone(),
             };
@@ -443,27 +451,123 @@ pub fn resolve_profile(name: &str) -> Result<(wipe_common::BayTopology, &'static
     ))
 }
 
+/// Read the station's Ed25519 seed from `path`, or create it there.
+///
+/// A created seed is written crash-safely and never overwrites an existing
+/// file, and on Unix it is readable by its owner only (`0o600`): it is the key
+/// every certificate this station signs is checked against. An existing file
+/// that is unreadable or not a 32-byte seed fails start-up with its path
+/// named, and is left untouched.
 fn load_or_create_signing_key(path: Option<PathBuf>) -> Result<SigningKey> {
-    match path {
-        None => Ok(SigningKey::generate()),
-        Some(p) => {
-            if p.exists() {
-                let bytes = fs::read(&p)?;
-                if bytes.len() != 32 {
-                    return Err(anyhow!(
-                        "{p:?} is not a 32-byte Ed25519 seed (got {})",
-                        bytes.len()
-                    ));
-                }
-                let arr: [u8; 32] = bytes.try_into().unwrap();
-                Ok(SigningKey::from_seed(arr))
-            } else {
-                let key = SigningKey::generate();
-                fs::write(&p, key.0.to_bytes())?;
-                Ok(key)
-            }
-        }
+    let Some(p) = path else {
+        return Ok(SigningKey::generate());
+    };
+    // `exists()` would report an unreadable key (EACCES) as absent and send
+    // it down the create path; only a definite NotFound creates.
+    match fs::symlink_metadata(&p) {
+        Ok(_) => read_signing_key(&p),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => create_signing_key(&p),
+        Err(e) => Err(e).with_context(|| format!("reading signing key {}", p.display())),
     }
+}
+
+fn read_signing_key(p: &Path) -> Result<SigningKey> {
+    let bytes = fs::read(p).with_context(|| format!("reading signing key {}", p.display()))?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|bytes: Vec<u8>| {
+        anyhow!(
+            "{} is not a 32-byte Ed25519 seed (got {})",
+            p.display(),
+            bytes.len()
+        )
+    })?;
+    Ok(SigningKey::from_seed(arr))
+}
+
+/// Generate a seed and create `p` holding it. If another process created `p`
+/// first, its key is read instead, so both sign with the same key.
+fn create_signing_key(p: &Path) -> Result<SigningKey> {
+    let key = SigningKey::generate();
+    match write_new_secret(p, &key.0.to_bytes()) {
+        Ok(()) => Ok(key),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_signing_key(p),
+        Err(e) => Err(e).with_context(|| format!("writing signing key {}", p.display())),
+    }
+}
+
+/// Create `path` holding `bytes`, owner-only on Unix, without ever exposing a
+/// partly written file or replacing an existing one.
+///
+/// The bytes go to a temp file beside `path` (created exclusively, synced),
+/// which is then hard-linked into place: the link fails with `AlreadyExists`
+/// if `path` now exists. The temp file is removed either way. On a filesystem
+/// without hard links (FAT/exFAT, some SMB/NFS) the link fails otherwise, and
+/// the bytes are written straight to `path` with [`create_exclusive`].
+fn write_new_secret(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
+    let mut tmp_name = name.to_os_string();
+    tmp_name.push(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp = path.with_file_name(tmp_name);
+    // A leftover from a crashed run with the same pid would make the
+    // exclusive create below fail; it never holds a key anyone uses.
+    let _ = fs::remove_file(&tmp);
+
+    let result = (|| {
+        create_exclusive(&tmp, bytes).map_err(|e| {
+            // Only the final step may report `AlreadyExists` (the race).
+            std::io::Error::new(
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    std::io::ErrorKind::Other
+                } else {
+                    e.kind()
+                },
+                e,
+            )
+        })?;
+        match fs::hard_link(&tmp, path) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+                create_exclusive(path, bytes)
+            }
+            other => other,
+        }
+    })();
+    let _ = fs::remove_file(&tmp);
+    result?;
+    // Make the new directory entry durable too; best effort.
+    #[cfg(unix)]
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        let _ = fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+    Ok(())
+}
+
+/// Create `path` exclusively (`AlreadyExists` if it exists), owner-only on
+/// Unix, write `bytes` and sync. A file this call created but could not fill
+/// is removed, so a failed write never leaves a short seed behind.
+fn create_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    if written.is_err() {
+        drop(file);
+        let _ = fs::remove_file(path);
+    }
+    written
 }
 
 /// The topology store and the lease store a detecting station runs with.
@@ -615,6 +719,139 @@ mod tests {
                 exe_dir.join("../../../../apps/desktop/dist"),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_created_signing_key_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = lease_tmpdir("key-mode");
+        let path = dir.join("station.key");
+        load_or_create_signing_key(Some(path.clone())).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "mode {mode:o}");
+    }
+
+    #[test]
+    fn creating_a_signing_key_leaves_no_temp_file_behind() {
+        let dir = lease_tmpdir("key-tmp");
+        let path = dir.join("station.key");
+        load_or_create_signing_key(Some(path.clone())).unwrap();
+        // A losing create (the key now exists) cleans up too.
+        assert!(write_new_secret(&path, &[0u8; 32]).is_err());
+        let names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["station.key".to_string()]);
+    }
+
+    #[test]
+    fn an_existing_signing_key_is_never_overwritten() {
+        let dir = lease_tmpdir("key-keep");
+        let path = dir.join("station.key");
+        let key = load_or_create_signing_key(Some(path.clone())).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let err = write_new_secret(&path, &[0u8; 32]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        let again = load_or_create_signing_key(Some(path)).unwrap();
+        assert_eq!(key.public_key_id(), again.public_key_id());
+    }
+
+    /// Another process created the key between our `exists()` check and our
+    /// create: its key is read and used, not an error and not replaced.
+    #[test]
+    fn losing_the_create_race_reads_the_winners_key() {
+        let dir = lease_tmpdir("key-race");
+        let path = dir.join("station.key");
+        let winner = SigningKey::generate();
+        fs::write(&path, winner.0.to_bytes()).unwrap();
+        let ours = create_signing_key(&path).unwrap();
+        assert_eq!(ours.public_key_id(), winner.public_key_id());
+        assert_eq!(fs::read(&path).unwrap(), winner.0.to_bytes());
+    }
+
+    #[test]
+    fn a_signing_key_read_error_names_its_path() {
+        let dir = lease_tmpdir("key-read-err");
+        let path = dir.join("station.key");
+        fs::create_dir(&path).unwrap();
+        let err = load_or_create_signing_key(Some(path.clone()))
+            .err()
+            .unwrap();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+        assert!(path.is_dir(), "the unreadable key is left in place");
+    }
+
+    #[test]
+    fn a_wrong_length_signing_key_names_its_path_and_is_left_untouched() {
+        let dir = lease_tmpdir("key-short");
+        let path = dir.join("station.key");
+        fs::write(&path, b"short").unwrap();
+        let err = load_or_create_signing_key(Some(path.clone()))
+            .err()
+            .unwrap();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+        assert!(msg.contains("got 5"), "{msg}");
+        assert_eq!(fs::read(&path).unwrap(), b"short");
+    }
+
+    /// The no-hard-link fallback: an exclusive, owner-only write of the final
+    /// path that never replaces an existing file.
+    #[test]
+    fn the_no_hard_link_fallback_creates_exclusively_and_owner_only() {
+        let dir = lease_tmpdir("key-fallback");
+        let path = dir.join("station.key");
+        create_exclusive(&path, &[7u8; 32]).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), [7u8; 32]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "mode {mode:o}");
+        }
+        let err = create_exclusive(&path, &[0u8; 32]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), [7u8; 32]);
+    }
+
+    /// A key whose metadata cannot be read (EACCES on its directory) is a
+    /// read error naming the path, not a create attempt.
+    #[cfg(unix)]
+    #[test]
+    fn an_unstatable_signing_key_is_a_read_error_not_a_create() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = lease_tmpdir("key-eacces");
+        let locked = dir.join("locked");
+        fs::create_dir(&locked).unwrap();
+        let path = locked.join("station.key");
+        fs::write(&path, [1u8; 32]).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = load_or_create_signing_key(Some(path.clone()));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        if fs::metadata(&path).is_ok() && result.is_ok() {
+            // Root ignores the mode bits; nothing to test there.
+            return;
+        }
+        let msg = format!("{:#}", result.err().unwrap());
+        assert!(msg.contains("reading signing key"), "{msg}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+    }
+
+    #[test]
+    fn a_signing_key_write_error_names_its_path() {
+        let path = std::env::temp_dir()
+            .join(format!("wipestation-no-such-dir-{}", std::process::id()))
+            .join("station.key");
+        let err = load_or_create_signing_key(Some(path.clone()))
+            .err()
+            .unwrap();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("writing signing key"), "{msg}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
     }
 
     #[test]

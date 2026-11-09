@@ -362,6 +362,7 @@ fn station_config(
         persistence: Persistence::Detect {
             control_plane_url,
             ephemeral_config,
+            config_dir: None,
         },
         license,
         vendor_roots,
@@ -849,9 +850,11 @@ mod tests {
             Persistence::Detect {
                 control_plane_url,
                 ephemeral_config,
+                config_dir,
             } => {
                 assert_eq!(control_plane_url.as_deref(), Some("U"));
                 assert!(ephemeral_config);
+                assert!(config_dir.is_none());
             }
             other => panic!("expected Detect, got {other:?}"),
         }
@@ -867,9 +870,11 @@ mod tests {
                 Persistence::Detect {
                     control_plane_url,
                     ephemeral_config,
+                    config_dir,
                 } => {
                     assert!(control_plane_url.is_none());
                     assert!(!ephemeral_config);
+                    assert!(config_dir.is_none());
                 }
                 other => panic!("expected Detect, got {other:?}"),
             }
