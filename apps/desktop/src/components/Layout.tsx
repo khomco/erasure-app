@@ -7,6 +7,7 @@ import { api, classNames } from "@/api/client";
 import { useEventStream } from "@/api/ws";
 import { useOperator } from "@/operator/context";
 import { SignInModal } from "@/operator/SignInModal";
+import { LicenceBanner } from "./LicenceBanner";
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const station = useQuery({ queryKey: ["station"], queryFn: api.station });
@@ -73,6 +74,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
           </div>
         </div>
       </header>
+      <LicenceBanner />
       <main className="flex-1 overflow-auto p-6">{children}</main>
       {(mustSignIn || showSignIn) && (
         <SignInModal

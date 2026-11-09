@@ -467,7 +467,7 @@ build.** Three frontends, one engine.
 - O3.2 Gloved-hand touch targets + high-contrast mode.
 - O3.3 Scanner input on every asset-tag field.
 - O3.4 Accessibility audit and fixes (keyboard, contrast, focus order).
-- O3.5 Licence status surface (O-R9).
+- ~~O3.5 Licence status surface (O-R9).~~ Shipped 2026-11-08 as the bench licence banner (licence-visibility story 3).
 - **Exit:** it works on a loud, badly-lit floor at arm's length.
 
 **O4 — Enterprise workflow**
@@ -575,8 +575,9 @@ distribution and expiry behaviour).
   licence file and shows the `wipestation serve --license … --vendor-root-b64 …`
   line (licence-delivery story 1). Installing it is still a start-up flag; the
   bench UI has no activation screen.*
-- L1.4 Licence status surface at the bench (O-R9 / O3.5).
+- ~~L1.4 Licence status surface at the bench (O-R9 / O3.5).~~ Shipped 2026-11-08: a persistent banner above every bench page (licence-visibility story 3).
 - L1.5 Expiry warnings and the drop-to-evaluation transition (L-R5).
+  *Expiry warnings shipped 2026-11-08 (licence-visibility story 3); the `stop` refusal at lapse is licence-visibility story 5.*
 - **Exit:** a customer can buy one station, activate it with no network, and
   see licensed certificates — and see plainly when they stop being licensed.
 
