@@ -12,6 +12,7 @@ import {
   StatementReview,
   type ReviewedStatement,
 } from "@/components/AttestationFields";
+import { ScanGroup, ScanInput } from "@/components/ScanInput";
 import { useOperator } from "@/operator/context";
 
 const CLASSIFICATIONS: Classification[] = ["low", "moderate", "high"];
@@ -43,7 +44,6 @@ export function RecordForDestructionPage() {
   const [attested, setAttested] = useState(false);
   const [created, setCreated] = useState<string[]>([]);
   const tagInput = useRef<HTMLInputElement>(null);
-  const serialInput = useRef<HTMLInputElement>(null);
 
   const addDrive = () => {
     const r = addScannedDrive(drives, scan);
@@ -71,21 +71,6 @@ export function RecordForDestructionPage() {
       qc.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
-
-  // A barcode scanner sends Enter after each scan: Enter on the asset tag
-  // moves to the serial; only Enter on the serial (or Add) adds the drive.
-  const onTagEnter = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      serialInput.current?.focus();
-    }
-  };
-  const onSerialEnter = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      addDrive();
-    }
-  };
 
   return (
     <div className="space-y-5">
@@ -134,27 +119,27 @@ export function RecordForDestructionPage() {
         <div className="flex items-center gap-2 text-sm font-semibold">
           <ScanLine className="h-4 w-4" /> Drives ({drives.length})
         </div>
-        <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
-          <input
+        {/* A barcode scanner sends Enter after each scan: Enter on the asset
+            tag moves to the serial; only Enter on the serial (or Add) adds the drive. */}
+        <ScanGroup className="grid grid-cols-[1fr_1fr_auto] gap-2">
+          <ScanInput
             ref={tagInput}
             className="field"
             placeholder="Asset tag"
             value={scan.asset_tag}
             onChange={(e) => setScan({ ...scan, asset_tag: e.target.value })}
-            onKeyDown={onTagEnter}
           />
-          <input
-            ref={serialInput}
+          <ScanInput
             className="field"
             placeholder="Serial"
             value={scan.serial}
             onChange={(e) => setScan({ ...scan, serial: e.target.value })}
-            onKeyDown={onSerialEnter}
+            onScanEnter={addDrive}
           />
           <button type="button" className="btn btn-secondary" onClick={addDrive}>
             Add
           </button>
-        </div>
+        </ScanGroup>
         {scanError && <div className="text-xs text-rose-300">{scanError}</div>}
         {drives.length > 0 && (
           <ul className="divide-y divide-slate-800 rounded-md border border-slate-800 text-sm">

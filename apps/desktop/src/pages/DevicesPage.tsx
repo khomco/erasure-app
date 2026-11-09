@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 
 import { api, classNames, formatBytes } from "@/api/client";
+import { ScanGroup, ScanInput } from "@/components/ScanInput";
 import { useOperator } from "@/operator/context";
 import { useEventStream } from "@/api/ws";
 import { BayMap, makeBayLookup, type BayCellData } from "@/bench/BayMap";
@@ -708,10 +709,11 @@ function EraseWizard({ device, onClose }: { device: Device; onClose: () => void 
           onIntent={setIntent}
         />
 
-        <div className="grid grid-cols-2 gap-3">
+        {/* A scanner's Enter in Asset tag moves to Ticket/RMA, never to Begin. */}
+        <ScanGroup className="grid grid-cols-2 gap-3">
           <div>
             <div className="label">Asset tag</div>
-            <input
+            <ScanInput
               className="field"
               value={assetTag}
               onChange={(e) => setAssetTag(e.target.value)}
@@ -719,7 +721,7 @@ function EraseWizard({ device, onClose }: { device: Device; onClose: () => void 
             />
           </div>
           <TicketField value={ticket} onChange={setTicket} />
-        </div>
+        </ScanGroup>
 
         {caps.data && (
           <div className="rounded-md border border-slate-800 bg-slate-950/50 p-3 text-xs">
@@ -848,7 +850,7 @@ function TicketField({ value, onChange }: { value: string; onChange: (v: string)
   return (
     <div>
       <div className="label">Ticket / RMA</div>
-      <input
+      <ScanInput
         className="field"
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -969,64 +971,68 @@ function BatchWizard({
         {!done && operator && <OperatorChip operator={operator} />}
 
         {!done && (
-          <>
-            <SpecChoices
-              classification={classification}
-              onClassification={setClassification}
-              intent={intent}
-              onIntent={setIntent}
-            />
+          <SpecChoices
+            classification={classification}
+            onClassification={setClassification}
+            intent={intent}
+            onIntent={setIntent}
+          />
+        )}
+
+        {/* One scan group: Ticket/RMA → row 1's asset tag → … → row N's. */}
+        <ScanGroup className="flex min-h-0 flex-col space-y-4">
+          {!done && (
             <div className="grid grid-cols-2 gap-3">
               <TicketField value={ticket} onChange={setTicket} />
             </div>
-          </>
-        )}
+          )}
 
-        <div className="min-h-0 overflow-y-auto rounded-md border border-slate-800">
-          <table className="w-full text-xs">
-            <thead className="bg-slate-950/50 text-left text-slate-400">
-              <tr>
-                <th className="px-3 py-1.5 font-medium">Bay</th>
-                <th className="px-3 py-1.5 font-medium">Drive</th>
-                <th className="px-3 py-1.5 font-medium">{done ? "Result" : "Asset tag"}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {done
-                ? results.map((r) => <BatchResultRow key={r.target.bayId} result={r} />)
-                : rows.map((t) => (
-                    <tr key={t.bayId} className="border-t border-slate-800">
-                      <td className="px-3 py-1.5 font-mono">{t.bayLabel}</td>
-                      <td className="px-3 py-1.5">
-                        <div>{t.device.model}</div>
-                        <div className="font-mono text-[10px] text-slate-500">{t.device.serial}</div>
-                      </td>
-                      <td className="px-3 py-1.5">
-                        <input
-                          className="field"
-                          value={assetTags.get(t.device.id) ?? ""}
-                          disabled={running}
-                          onChange={(e) => {
-                            const next = new Map(assetTags);
-                            next.set(t.device.id, e.target.value);
-                            setAssetTags(next);
-                          }}
-                          placeholder="optional"
-                          aria-label={`Asset tag for bay ${t.bayLabel}`}
-                        />
-                      </td>
-                    </tr>
-                  ))}
-              {!done && rows.length === 0 && (
+          <div className="min-h-0 overflow-y-auto rounded-md border border-slate-800">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-950/50 text-left text-slate-400">
                 <tr>
-                  <td colSpan={3} className="px-3 py-3 text-center text-slate-500">
-                    No idle drives left in the selection.
-                  </td>
+                  <th className="px-3 py-1.5 font-medium">Bay</th>
+                  <th className="px-3 py-1.5 font-medium">Drive</th>
+                  <th className="px-3 py-1.5 font-medium">{done ? "Result" : "Asset tag"}</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {done
+                  ? results.map((r) => <BatchResultRow key={r.target.bayId} result={r} />)
+                  : rows.map((t) => (
+                      <tr key={t.bayId} className="border-t border-slate-800">
+                        <td className="px-3 py-1.5 font-mono">{t.bayLabel}</td>
+                        <td className="px-3 py-1.5">
+                          <div>{t.device.model}</div>
+                          <div className="font-mono text-[10px] text-slate-500">{t.device.serial}</div>
+                        </td>
+                        <td className="px-3 py-1.5">
+                          <ScanInput
+                            className="field"
+                            value={assetTags.get(t.device.id) ?? ""}
+                            disabled={running}
+                            onChange={(e) => {
+                              const next = new Map(assetTags);
+                              next.set(t.device.id, e.target.value);
+                              setAssetTags(next);
+                            }}
+                            placeholder="optional"
+                            aria-label={`Asset tag for bay ${t.bayLabel}`}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                {!done && rows.length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="px-3 py-3 text-center text-slate-500">
+                      No idle drives left in the selection.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </ScanGroup>
 
         <div className="flex justify-end gap-2 pt-2">
           {done ? (

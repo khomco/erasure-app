@@ -27,8 +27,9 @@ export default defineConfig({
     sourcemap: true,
   },
   test: {
-    // Node environment: the units under test are pure domain logic, not
-    // components. A DOM harness can be added when component tests arrive.
+    // Node environment by default: most units under test are pure domain
+    // logic. A component test that needs a DOM opts in per file with a
+    // `// @vitest-environment happy-dom` header (e.g. ScanInput.test.ts).
     environment: "node",
     include: ["src/**/*.test.ts"],
   },

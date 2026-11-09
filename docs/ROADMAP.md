@@ -424,7 +424,7 @@ build.** Three frontends, one engine.
   **wall-board view** legible from across a bench.
 - **O-R5 Barcode/scanner input.** HID-wedge scanners are how asset tags get
   entered on a real floor. Any field that takes an asset tag must accept a
-  scan without focus gymnastics.
+  scan without focus gymnastics. *(Addressed for the desktop UI by O3.3.)*
 - **O-R6 Labels and QR.** Print a label for a sanitized drive. The QR must
   carry enough to verify **offline** (cert id + fingerprint), not merely a URL
   to a site that may not exist in ten years (§0.3).
@@ -472,7 +472,10 @@ build.** Three frontends, one engine.
 **O3 — The bench as a physical place**
 - O3.1 Wall-board view.
 - O3.2 Gloved-hand touch targets + high-contrast mode.
-- O3.3 Scanner input on every asset-tag field.
+- ~~O3.3 Scanner input on every asset-tag field.~~ *Shipped 2026-11-09
+  (bench-throughput-inbox story 3; CONTEXT §8, §10.2): a scanner's Enter in any
+  desktop asset-tag field moves to the next scan field, or stays in the last one;
+  it never starts, records or submits anything.*
 - O3.4 Accessibility audit and fixes (keyboard, contrast, focus order).
 - ~~O3.5 Licence status surface (O-R9).~~ Shipped 2026-11-08 as the bench licence banner (licence-visibility story 3).
 - **Exit:** it works on a loud, badly-lit floor at arm's length.

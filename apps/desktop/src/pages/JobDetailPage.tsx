@@ -21,6 +21,7 @@ import {
   StatementReview,
   type ReviewedStatement,
 } from "@/components/AttestationFields";
+import { ScanGroup, ScanInput } from "@/components/ScanInput";
 import { useOperator } from "@/operator/context";
 import type {
   Classification,
@@ -284,8 +285,8 @@ function RecordForDestructionButton({
                   </p>
                 )
               ) : (
-                <div className="grid grid-cols-2 gap-2">
-                  <input
+                <ScanGroup className="grid grid-cols-2 gap-2">
+                  <ScanInput
                     className="field"
                     placeholder="Asset tag"
                     value={ids.asset_tag}
@@ -293,7 +294,7 @@ function RecordForDestructionButton({
                       setForm({ ...form, identifiers: { ...ids, asset_tag: e.target.value } })
                     }
                   />
-                  <input
+                  <ScanInput
                     className="field"
                     placeholder="Serial"
                     value={ids.serial}
@@ -301,7 +302,7 @@ function RecordForDestructionButton({
                       setForm({ ...form, identifiers: { ...ids, serial: e.target.value } })
                     }
                   />
-                </div>
+                </ScanGroup>
               )}
             </div>
             <StatementReview
