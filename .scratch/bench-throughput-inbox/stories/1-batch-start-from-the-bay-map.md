@@ -179,7 +179,7 @@ Status: done
 - `apps/desktop/src/pages/DevicesPage.tsx` — select mode, selection bar, `BatchWizard`, shared spec controls extracted from `EraseWizard`.
 - `CONTEXT.md` (§8, §10.2 row with limitations), `README.md`, `docs/ROADMAP.md` (O1.4 struck), `AGENTS.md` (frontend test count 312).
 
-**Review.** 31 findings: 9 rows patched (5 distinct fixes: Cancel keeps the selection before a run; `aria-pressed` true/false in select mode; `makeBayLookup` test; BayMap render test; CONTEXT limitations), 5 deferred (Queued draws as wiping; untrimmed single-wizard fields; no keyboard on trays; server accepts duplicate Jobs per device; page interaction untested), 13 rejected low with reasons in the triage log, 4 false.
+**Review.** 31 findings: 10 rows patched (5 distinct fixes: Cancel keeps the selection before a run; `aria-pressed` true/false in select mode; `makeBayLookup` test; BayMap render test; CONTEXT limitations), 5 deferred (Queued draws as wiping; untrimmed single-wizard fields; no keyboard on trays; server accepts duplicate Jobs per device; page interaction untested), 12 rejected low with reasons in the triage log, 4 false.
 
 **Follow-up review recommended:** true — two medium-verdict entries were patched (Cancel discarding the selection; the untested bay lookup that decides which device a batch sends). Patched by verdict: high 0, medium 2, low 3. Named unverified risk: the Cancel-vs-close behaviour in `BatchWizard` is covered by no automated test.
 
