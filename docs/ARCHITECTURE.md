@@ -27,13 +27,14 @@ Station side (one `wipestation` process per bench):
 |   • /api/devices, /api/devices/:id/capabilities                |
 |   • /api/bay-topology (GET/PUT), …/config, …/resolve,          |
 |     …/store, …/store/acknowledge; /api/enclosure-catalog       |
-|   • /api/jobs[/:id], …/start, …/abort, …/escalate-to-destroy,  |
-|     …/certificate                                              |
+|   • /api/jobs[/:id], …/start, …/abort,                         |
+|     …/record-for-destruction, …/certificate                    |
+|   • /api/destruction/records, /api/destruction/statement       |
 |   • /api/manifests[/:id], /api/manifests/:id/cosign            |
 |   • /api/sim/devices[/attach|/detach] — always routed, 404     |
 |     unless the backend simulates hot-plug                      |
 |   • /api/events (WS) — JobBroadcast + FleetEvent fan-out       |
-|   • Auto-signs Certificate on JobState::Erased|PendingCoSign;  |
+|   • Auto-signs Certificate on Erased|PendingDestruction;       |
 |     certs held in RAM only                                     |
 +----------------------------------------------------------------+
           |               |               |               |
@@ -116,22 +117,26 @@ change.
 
 Two nested state machines. The **outer `Job`** tracks the Asset's
 disposition; the **inner `ErasureEvent`** tracks one wipe attempt. Today a
-Job holds at most one `ErasureEvent` (none if it is escalated or aborted
-from `Queued`).
+Job holds at most one `ErasureEvent` (none if it is recorded for
+destruction or aborted from `Queued`, or created from a scanned group).
 
 Outer — `JobState`:
 
 ```
 Queued ─▶ InProgress ─┬─▶ Erased
                       │
-                      ├─▶ PendingCoSign ─▶ Destroyed   (supervisor co-sign
-                      │                                  on a manifest)
+                      ├─▶ PendingDestruction ─▶ Destroyed
+                      │     (recorded for destruction; supervisor
+                      │      co-sign on a manifest finalises it)
                       ├─▶ Quarantined                 (declared; nothing
                       │                                  transitions into it)
                       └─▶ Aborted                       (operator)
 
+Queued also moves straight to PendingDestruction when recorded for
+destruction, and a scanned drive's Job is created in PendingDestruction.
 Aborted is reachable from any non-terminal state, including Queued and
-PendingCoSign (an already-signed cert remains).
+PendingDestruction (an already-signed cert remains). PendingDestruction
+serializes as pending_destruction and still accepts pending_co_sign.
 ```
 
 Inner — `ErasureEventState`, one per attempt:
@@ -153,15 +158,21 @@ inner state: the runner then runs the sampled reads and appends a sibling
 event stays `Completed`, the failing Verification is recorded and the Job
 stays `InProgress`. Certificate signing is not an inner state either;
 it is done by `wipe-server` (below) when the outer Job reaches `Erased`
-or `PendingCoSign`.
+or `PendingDestruction`.
 
 A `Failed` ErasureEvent does **not** fail the Job — the Job stays
-`InProgress` awaiting an operator decision: abort, or
-`escalate-to-destroy`. There is no retry or method-fallback route yet.
+`InProgress` awaiting an operator decision: abort, or record for
+destruction. There is no retry or method-fallback route yet.
 A Job keeps its attempt and results in `activities: Vec<JobActivity>`;
 after the attempt completes the runner appends a sibling
-`JobActivity::Verification`, and on escalation a
-`JobActivity::Destruction`. `Diagnostic` and `HealthCheck` variants
+`JobActivity::Verification`, and when the Job is recorded for
+destruction a `JobActivity::Destruction` carrying the operator's
+`DestructionAttestation` (ADR-0011 §1). The runner's
+`record_for_destruction` refuses an event with no attestation, and
+`record_scanned_for_destruction` creates one Job per scanned drive,
+all-or-nothing, refusing a drive that matches an open Job's asset tag or
+serial. Only these two enter `PendingDestruction`, and each broadcasts
+`ActivityAdded` then `JobStateChanged`. `Diagnostic` and `HealthCheck` variants
 exist in the type but the runner never emits them.
 
 Every transition emits a `JobUpdate` of kind `StateChanged` (renamed
@@ -175,16 +186,16 @@ attempt) — which flow channel → WebSocket → frontend.
 
 ## Certificate flow
 
-1. Job reaches `JobState::Erased` **or** `JobState::PendingCoSign`.
+1. Job reaches `JobState::Erased` **or** `JobState::PendingDestruction`.
    (There is no `JobState::Completed` — that name belongs to the inner
    `ErasureEventState`.)
 2. `wipe-server::AppState::spawn_cert_generator()` (a broadcast subscriber)
    wakes up.
 3. It calls `Certificate::from_job(...)` which flattens the job's
    `activities` chain into a JSON-LD payload (schema v2), stamping
-   `media_status.operational = false` on the `PendingCoSign` path and
+   `media_status.operational = false` on the `PendingDestruction` path and
    recording the resolved `AssetDisposition`. A Job with no erasure activity
-   (escalated from `Queued`) is skipped and gets no certificate; co-sign
+   (recorded from `Queued`, or created from a scanned group) is skipped and gets no certificate; co-sign
    then refuses to destroy it.
 4. `wipe_cert::sign(cert, signing_key)` canonicalizes the JSON (BTreeMap key
    sorting at every depth, finite-number check), hashes it with SHA-256,
@@ -204,7 +215,7 @@ attempt) — which flow channel → WebSocket → frontend.
    (`manifest_id`) and that Job's latest DestructionEvent
    (`manifest_ref`), but never inside the signed certificate: the cert
    generator strips the link from the copy it signs, and a Job already
-   on a manifest cannot be escalated to destroy again, so a new
+   on a manifest cannot be recorded for destruction again, so a new
    DestructionEvent cannot replace the record after assembly (aborting
    a linked Job is still allowed).
    [ADR-0011](adr/0011-destruction-by-operator-attestation.md) replaces

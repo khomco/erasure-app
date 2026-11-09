@@ -22,7 +22,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 
 ## Running and verifying
 
-- `cargo test --workspace` — 689 tests, ~30s. Needs `docker compose up -d` first (root
+- `cargo test --workspace` — 766 tests, ~30s. Needs `docker compose up -d` first (root
   `compose.yaml`: Postgres on `127.0.0.1:55432`, Mailpit SMTP `:1025`, UI/API `:8025`):
   `wipe-hub`'s compose-backed tests fail, never skip, when they are down.
 - Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and
@@ -51,7 +51,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   deleting Mailpit messages.
 - Never pipe `cargo test` through `grep`/`awk` to summarize: compile errors are discarded and
   a broken build prints as a clean run (68844bf).
-- Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 200 tests, under a second.
+- Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 235 tests, under a second.
 - Portal (ADR-0006 §1): `pnpm install` at the root, then `pnpm --filter portal build`,
   `pnpm --filter portal typecheck`, `pnpm --filter portal test` (dev server on :5174, proxying
   `/api` to the hub on :7900). `wipe-hub serve` serves `apps/portal/dist` under the working
@@ -85,7 +85,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   mutating methods (`issue`, `unfreeze`, `cancel`, `verify`); handlers get read-only
   `enumerate`/`capabilities`. Bypassing the runner skips evidence capture.
 - Certificates are produced only as a side effect of a `JobBroadcast::JobStateChanged` into
-  `Erased`/`PendingCoSign` (moving to `Erased`/`Destroyed` under ADR-0011) (`crates/wipe-server/src/app.rs:197`) — mutating `Job::state`
+  `Erased`/`PendingDestruction` (moving to `Erased`/`Destroyed` under ADR-0011) (`crates/wipe-server/src/app.rs:199`) — mutating `Job::state`
   without emitting that broadcast yields a silently uncertified job.
 - A `Certificate` is immutable once signed: `verify` re-canonicalizes against the stored hash,
   so co-signing must sign the same bytes.
@@ -93,7 +93,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   `*self.bay_topology.write()` — it is the only place the ADR-0003 revision check and
   persistence happen. The topology store holds configuration only; evidence never goes there.
 - Bay-topology matching rules live in Rust alone (ADR-0002) — never port them to TypeScript;
-  the dry-run handler `resolve_bay_topology` (`crates/wipe-server/src/handlers.rs:119`) is the
+  the dry-run handler `resolve_bay_topology` (`crates/wipe-server/src/handlers.rs:120`) is the
   intended seam for previewing an unsaved draft.
 - TypeScript domain types are hand-mirrored from Rust serde shapes and change together:
   `wipe-common` structs with `apps/desktop/src/api/types.ts`; `JobBroadcast`/`WsEnvelope` tags

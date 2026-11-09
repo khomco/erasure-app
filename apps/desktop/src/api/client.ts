@@ -48,10 +48,46 @@ export interface CreateJobRequest {
   sanitization_profile_ref?: string | null;
 }
 
-export interface EscalateRequest {
+/** Identifiers scanned (bar code or typed) from a drive's labels. */
+export interface ScannedIdentifiers {
+  asset_tag: string | null;
+  serial: string | null;
+}
+
+/** What the operator attests to; mirrors `handlers::AttestationFields`. */
+export interface AttestationFields {
   method: DestructMethod;
+  equipment_id: string;
+  location: string;
   operator: OperatorRef;
-  notes?: string | null;
+  full_name: string;
+  title: string;
+  /** The operator ticked "I attest" against the previewed statement. */
+  attest: boolean;
+  notes: string | null;
+}
+
+/**
+ * Record an existing Job for destruction. Omit `identifiers` to have the
+ * server read them from the device (`source: device`); send them to record
+ * scanned identifiers (`source: scanned`). The client never names the source.
+ */
+export interface RecordForDestructionRequest extends AttestationFields {
+  identifiers?: ScannedIdentifiers | null;
+}
+
+/** Record a scanned group of drives; one new Job per drive. */
+export interface RecordScannedRequest extends AttestationFields {
+  classification: JobSpec["classification"];
+  drives: ScannedIdentifiers[];
+}
+
+export interface StatementPreviewRequest {
+  method: DestructMethod;
+  equipment_id: string;
+  location: string;
+  full_name: string;
+  title: string;
 }
 
 export interface CreateManifestRequest {
@@ -114,8 +150,19 @@ export const api = {
     jsonFetch<{ ok: boolean }>(`/api/jobs/${id}/start`, { method: "POST" }),
   abortJob: (id: string) =>
     jsonFetch<{ ok: boolean }>(`/api/jobs/${id}/abort`, { method: "POST" }),
-  escalateToDestroy: (id: string, body: EscalateRequest) =>
-    jsonFetch<{ ok: boolean }>(`/api/jobs/${id}/escalate-to-destroy`, {
+  recordForDestruction: (id: string, body: RecordForDestructionRequest) =>
+    jsonFetch<{ ok: boolean }>(`/api/jobs/${id}/record-for-destruction`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  recordScanned: (body: RecordScannedRequest) =>
+    jsonFetch<{ job_ids: string[] }>("/api/destruction/records", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  // The statement is rendered only in Rust; the UI shows it verbatim.
+  previewStatement: (body: StatementPreviewRequest) =>
+    jsonFetch<{ statement: string }>("/api/destruction/statement", {
       method: "POST",
       body: JSON.stringify(body),
     }),

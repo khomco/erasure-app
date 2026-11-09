@@ -106,7 +106,9 @@ export interface ErasureEventStateWire {
 export type JobStateLabel =
   | "queued"
   | "in_progress"
-  | "pending_co_sign"
+  // Recorded for destruction (ADR-0011); the server still accepts the old
+  // name `pending_co_sign` on input but always sends this one.
+  | "pending_destruction"
   | "erased"
   | "destroyed"
   | "quarantined"

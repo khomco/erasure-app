@@ -263,8 +263,32 @@ fn destruction(device_id: &str) -> wipe_common::DestructionEvent {
         photo_refs: Vec::new(),
         notes: None,
         station_id: None,
-        attestation: None,
+        attestation: Some(attestation(
+            wipe_common::IdentifierSource::Device,
+            Some("ASSET-001"),
+            Some("SN-DEV"),
+        )),
     }
+}
+
+fn attestation(
+    source: wipe_common::IdentifierSource,
+    asset_tag: Option<&str>,
+    serial: Option<&str>,
+) -> wipe_common::DestructionAttestation {
+    wipe_common::DestructionAttestation::new(
+        wipe_common::DestructMethod::Shred,
+        time::OffsetDateTime::now_utc(),
+        "SHR-2",
+        "Bay 3",
+        wipe_common::RecordedIdentifiers {
+            asset_tag: asset_tag.map(Into::into),
+            serial: serial.map(Into::into),
+            source,
+        },
+        wipe_common::AttestationSigner::self_asserted(op(), "Alice Erasure", "Bench lead").unwrap(),
+    )
+    .unwrap()
 }
 
 fn destruction_events(job: &Job) -> Vec<&wipe_common::DestructionEvent> {
@@ -290,10 +314,10 @@ async fn link_to_manifest_stamps_job_and_latest_destruction_event() {
     let runner = mock_runner();
     let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
     runner
-        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .record_for_destruction(id, destruction("dev-nvme-0"))
         .unwrap();
     runner
-        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .record_for_destruction(id, destruction("dev-nvme-0"))
         .unwrap();
     let mut rx = runner.subscribe();
 
@@ -301,7 +325,7 @@ async fn link_to_manifest_stamps_job_and_latest_destruction_event() {
     runner.link_to_manifest(mid, &[id]).unwrap();
 
     let job = runner.get(id).unwrap();
-    assert_eq!(job.state, JobState::PendingCoSign);
+    assert_eq!(job.state, JobState::PendingDestruction);
     assert_eq!(job.manifest_id, Some(mid));
     let events = destruction_events(&job);
     assert_eq!(events.len(), 2);
@@ -321,7 +345,7 @@ async fn link_to_manifest_with_a_queued_job_stamps_nothing() {
     let runner = mock_runner();
     let pending = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
     runner
-        .escalate_to_destroy(pending, destruction("dev-nvme-0"))
+        .record_for_destruction(pending, destruction("dev-nvme-0"))
         .unwrap();
     let queued = runner.create_job(job_spec("dev-sata-0")).await.unwrap();
 
@@ -344,7 +368,7 @@ async fn link_to_manifest_refuses_an_already_linked_job() {
     let runner = mock_runner();
     let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
     runner
-        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .record_for_destruction(id, destruction("dev-nvme-0"))
         .unwrap();
     let first = uuid::Uuid::new_v4();
     runner.link_to_manifest(first, &[id]).unwrap();
@@ -360,11 +384,11 @@ async fn link_to_manifest_refuses_an_already_linked_job() {
 }
 
 #[tokio::test]
-async fn escalating_a_linked_job_is_refused_and_appends_nothing() {
+async fn recording_a_linked_job_again_is_refused_and_appends_nothing() {
     let runner = mock_runner();
     let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
     runner
-        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .record_for_destruction(id, destruction("dev-nvme-0"))
         .unwrap();
     let mid = uuid::Uuid::new_v4();
     runner.link_to_manifest(mid, &[id]).unwrap();
@@ -372,13 +396,13 @@ async fn escalating_a_linked_job_is_refused_and_appends_nothing() {
     let mut rx = runner.subscribe();
 
     let err = runner
-        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .record_for_destruction(id, destruction("dev-nvme-0"))
         .unwrap_err();
     assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
 
     let job = runner.get(id).unwrap();
     assert_eq!(job.activities.len(), before);
-    assert_eq!(job.state, JobState::PendingCoSign);
+    assert_eq!(job.state, JobState::PendingDestruction);
     assert_eq!(job.manifest_id, Some(mid));
     assert_eq!(
         destruction_events(&job).last().unwrap().manifest_ref,
@@ -392,7 +416,7 @@ async fn link_to_manifest_refuses_an_unknown_job_and_stamps_nothing() {
     let runner = mock_runner();
     let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
     runner
-        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .record_for_destruction(id, destruction("dev-nvme-0"))
         .unwrap();
 
     let err = runner
@@ -412,7 +436,7 @@ async fn link_to_manifest_refuses_a_job_listed_twice_and_stamps_nothing() {
     let runner = mock_runner();
     let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
     runner
-        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .record_for_destruction(id, destruction("dev-nvme-0"))
         .unwrap();
 
     let err = runner
@@ -427,8 +451,8 @@ async fn link_to_manifest_refuses_a_job_listed_twice_and_stamps_nothing() {
         .all(|d| d.manifest_ref.is_none()));
 }
 
-// A PendingCoSign Job with no DestructionEvent is not constructible through
-// the runner (only `escalate_to_destroy` enters PendingCoSign, and it
+// A PendingDestruction Job with no DestructionEvent is not constructible through
+// the runner (only `record_for_destruction` enters PendingDestruction, and it
 // appends one), so that refusal has no test here.
 
 // --- runner refusals (CAP-3: not-found vs. refused transition) -------------
@@ -481,11 +505,11 @@ async fn start_moves_the_job_to_in_progress_before_returning() {
 }
 
 #[tokio::test]
-async fn starting_an_escalated_job_is_refused() {
+async fn starting_a_job_recorded_for_destruction_is_refused() {
     let runner = mock_runner();
     let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
     runner
-        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .record_for_destruction(id, destruction("dev-nvme-0"))
         .unwrap();
     let mut rx = runner.subscribe();
 
@@ -494,7 +518,7 @@ async fn starting_an_escalated_job_is_refused() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     let job = runner.get(id).unwrap();
-    assert_eq!(job.state, JobState::PendingCoSign);
+    assert_eq!(job.state, JobState::PendingDestruction);
     assert_eq!(erasure_count(&job), 0);
     assert!(rx.try_recv().is_err());
 }
@@ -551,7 +575,7 @@ async fn unknown_job_ids_are_job_not_found() {
     assert!(matches!(err, wipe_common::WipeError::JobNotFound(id) if id == unknown));
 
     let err = runner
-        .escalate_to_destroy(unknown, destruction("dev-nvme-0"))
+        .record_for_destruction(unknown, destruction("dev-nvme-0"))
         .unwrap_err();
     assert!(matches!(err, wipe_common::WipeError::JobNotFound(id) if id == unknown));
 
@@ -595,17 +619,193 @@ async fn abort_right_after_start_runs_no_erasure() {
 }
 
 #[tokio::test]
-async fn escalate_right_after_start_runs_no_erasure() {
+async fn record_right_after_start_runs_no_erasure() {
     let runner = mock_runner();
     let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
 
     runner.start(id).unwrap();
     runner
-        .escalate_to_destroy(id, destruction("dev-nvme-0"))
+        .record_for_destruction(id, destruction("dev-nvme-0"))
         .unwrap();
     let_spawned_task_run().await;
 
     let job = runner.get(id).unwrap();
-    assert_eq!(job.state, JobState::PendingCoSign);
+    assert_eq!(job.state, JobState::PendingDestruction);
     assert_eq!(erasure_count(&job), 0);
+}
+
+// ---- Record for destruction (destruction-attestation story 2) ----------
+
+#[tokio::test]
+async fn a_destruction_record_without_an_attestation_is_refused() {
+    let runner = mock_runner();
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    let mut rx = runner.subscribe();
+    let mut ev = destruction("dev-nvme-0");
+    ev.attestation = None;
+
+    let err = runner.record_for_destruction(id, ev).unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+    let job = runner.get(id).unwrap();
+    assert_eq!(job.state, JobState::Queued);
+    assert!(destruction_events(&job).is_empty());
+    assert!(rx.try_recv().is_err(), "a refusal must not broadcast");
+}
+
+fn scanned_drive(
+    asset_tag: Option<&str>,
+    serial: &str,
+) -> (JobSpec, wipe_common::DestructionEvent) {
+    let device_id = format!("scanned:{serial}");
+    let mut spec = job_spec(&device_id);
+    spec.intent = Intent::Destroy;
+    spec.asset_tag = asset_tag.map(Into::into);
+    let mut ev = destruction(&device_id);
+    ev.attestation = Some(attestation(
+        wipe_common::IdentifierSource::Scanned,
+        asset_tag,
+        Some(serial),
+    ));
+    (spec, ev)
+}
+
+#[tokio::test]
+async fn a_scanned_group_creates_one_pending_job_per_drive_and_broadcasts() {
+    let runner = mock_runner();
+    let mut rx = runner.subscribe();
+    let ids = runner
+        .record_scanned_for_destruction(vec![
+            scanned_drive(Some("A-1"), "S1"),
+            scanned_drive(None, "S2"),
+            scanned_drive(Some("A-3"), "S3"),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 3);
+    for (id, serial) in ids.iter().zip(["S1", "S2", "S3"]) {
+        let job = runner.get(*id).unwrap();
+        assert_eq!(job.state, JobState::PendingDestruction);
+        assert_eq!(job.spec.intent, Intent::Destroy);
+        assert_eq!(job.spec.device_id, DeviceId(format!("scanned:{serial}")));
+        let events = destruction_events(&job);
+        assert_eq!(events.len(), 1);
+        let att = events[0].attestation.as_ref().unwrap();
+        assert_eq!(att.identifiers.serial.as_deref(), Some(serial));
+        assert_eq!(
+            att.identifiers.source,
+            wipe_common::IdentifierSource::Scanned
+        );
+    }
+    let mut added = 0;
+    let mut entered = 0;
+    while let Ok(b) = rx.try_recv() {
+        match b {
+            JobBroadcast::ActivityAdded {
+                activity: JobActivity::Destruction(_),
+                ..
+            } => added += 1,
+            JobBroadcast::JobStateChanged {
+                to: JobState::PendingDestruction,
+                ..
+            } => entered += 1,
+            _ => {}
+        }
+    }
+    assert_eq!((added, entered), (3, 3));
+}
+
+#[tokio::test]
+async fn a_scanned_group_matching_an_open_jobs_asset_tag_creates_nothing() {
+    let runner = mock_runner();
+    let open = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    let mut rx = runner.subscribe();
+    let err = runner
+        .record_scanned_for_destruction(vec![
+            scanned_drive(Some("A-1"), "S1"),
+            scanned_drive(Some("asset-001"), "S2"),
+        ])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+    assert!(err.to_string().contains(&open.to_string()), "{err}");
+    assert_eq!(runner.list().len(), 1);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_scanned_group_matching_an_attached_devices_serial_creates_nothing() {
+    let runner = mock_runner();
+    let mut spec = job_spec("dev-nvme-0");
+    spec.asset_tag = None;
+    let open = runner.create_job(spec).await.unwrap();
+    let err = runner
+        .record_scanned_for_destruction(vec![scanned_drive(None, "S6ABNX0W123456")])
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains(&open.to_string()), "{err}");
+    assert_eq!(runner.list().len(), 1);
+}
+
+#[tokio::test]
+async fn a_scanned_group_matching_a_terminal_job_is_recorded() {
+    let runner = mock_runner();
+    let old = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    runner.abort(old).await.unwrap();
+    let ids = runner
+        .record_scanned_for_destruction(vec![scanned_drive(Some("ASSET-001"), "S1")])
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+}
+
+#[tokio::test]
+async fn a_scanned_group_with_a_repeated_serial_or_no_drives_creates_nothing() {
+    let runner = mock_runner();
+    let err = runner
+        .record_scanned_for_destruction(vec![
+            scanned_drive(Some("A-1"), "S1"),
+            scanned_drive(Some("A-2"), "S1"),
+        ])
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("listed twice"), "{err}");
+    let err = runner
+        .record_scanned_for_destruction(Vec::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+    assert!(runner.list().is_empty());
+}
+
+#[tokio::test]
+async fn a_scanned_group_matching_an_erasure_snapshot_serial_creates_nothing() {
+    use wipe_engine::DeviceSimulator;
+    let backend = Arc::new(MockBackend::with_catalog(
+        wipe_engine_mock::default_devices_public(),
+        MockTiming::fast(),
+    ));
+    let runner = JobRunner::new(backend.clone());
+    let mut spec = job_spec("dev-sata-0");
+    spec.asset_tag = None;
+    let open = runner.create_job(spec).await.unwrap();
+    runner.start(open).unwrap();
+    let job = wait_until(&runner, open, |j| {
+        j.latest_erasure()
+            .is_some_and(|e| matches!(e.state, ErasureEventState::Failed))
+    })
+    .await;
+    assert_eq!(job.state, JobState::InProgress);
+    let serial = job.latest_erasure().unwrap().device_snapshot.serial.clone();
+    backend.detach(&DeviceId("dev-sata-0".into())).unwrap();
+
+    let err = runner
+        .record_scanned_for_destruction(vec![
+            scanned_drive(Some("A-1"), "S1"),
+            scanned_drive(None, &serial),
+        ])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+    assert!(err.to_string().contains(&open.to_string()), "{err}");
+    assert_eq!(runner.list().len(), 1);
 }

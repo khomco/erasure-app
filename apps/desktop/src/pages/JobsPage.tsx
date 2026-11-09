@@ -14,7 +14,7 @@ function StateIcon({ state }: { state: JobStateLabel }) {
   if (state === "quarantined") return <XCircle className="h-4 w-4 text-rose-400" />;
   if (state === "aborted")
     return <CircleOff className="h-4 w-4 text-slate-400" />;
-  if (state === "pending_co_sign")
+  if (state === "pending_destruction")
     return <FileSignature className="h-4 w-4 text-indigo-300" />;
   return <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />;
 }

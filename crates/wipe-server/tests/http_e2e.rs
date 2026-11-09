@@ -225,7 +225,7 @@ async fn destroy_path_via_manifest_cosign_produces_two_signatures() {
     let base = spawn_server().await;
     let client = reqwest::Client::new();
 
-    // Create + start a Job we'll escalate to destruction.
+    // Create + start a Job we'll record for destruction.
     let create_resp: serde_json::Value = client
         .post(format!("{base}/api/jobs"))
         .json(&json!({
@@ -252,8 +252,8 @@ async fn destroy_path_via_manifest_cosign_produces_two_signatures() {
         .await
         .unwrap();
 
-    // Wait briefly for the Job to be in_progress, then immediately escalate.
-    // We don't need the erasure to complete — the model allows escalation
+    // Wait briefly for the Job to be in_progress, then immediately record it for destruction.
+    // We don't need the erasure to complete — the model allows recording for destruction
     // at any non-terminal point.
     let mut started = false;
     for _ in 0..50 {
@@ -281,28 +281,24 @@ async fn destroy_path_via_manifest_cosign_produces_two_signatures() {
         "job did not reach in_progress with an erasure activity"
     );
 
-    // Escalate to destroy.
+    // Record for destruction.
     let resp = client
-        .post(format!("{base}/api/jobs/{job_id}/escalate-to-destroy"))
-        .json(&json!({
-            "method": "disintegrate",
-            "operator": {
-                "id": "op-1",
-                "display_name": "Alice",
-                "email": "alice@example.com"
-            },
-            "notes": "drive bricked mid-wipe"
-        }))
+        .post(format!("{base}/api/jobs/{job_id}/record-for-destruction"))
+        .json(&{
+            let mut body = attested("disintegrate", http_op());
+            body["notes"] = json!("drive bricked mid-wipe");
+            body
+        })
         .send()
         .await
         .unwrap();
     assert!(
         resp.status().is_success(),
-        "escalate failed: {}",
+        "record for destruction failed: {}",
         resp.status()
     );
 
-    // Job should now be in pending_co_sign and a cert should be generated.
+    // Job should now be in pending_destruction and a cert should be generated.
     let mut pending = false;
     for _ in 0..50 {
         let job: serde_json::Value = client
@@ -313,13 +309,13 @@ async fn destroy_path_via_manifest_cosign_produces_two_signatures() {
             .json()
             .await
             .unwrap();
-        if job["state"]["state"] == "pending_co_sign" {
+        if job["state"]["state"] == "pending_destruction" {
             pending = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(pending, "job did not reach pending_co_sign");
+    assert!(pending, "job did not reach pending_destruction");
 
     // Cert should be available with disposition Destroyed.
     let mut signed_json: Option<serde_json::Value> = None;
@@ -336,7 +332,7 @@ async fn destroy_path_via_manifest_cosign_produces_two_signatures() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let signed_json =
-        signed_json.expect("destroy-path cert should be generated at pending_co_sign");
+        signed_json.expect("destroy-path cert should be generated at pending_destruction");
     assert_eq!(signed_json["certificate"]["disposition"], "destroyed");
     // `co_signatures` is omitted from JSON when empty (skip_serializing_if).
     let pre_cosigs = signed_json["co_signatures"]
@@ -375,7 +371,7 @@ async fn destroy_path_via_manifest_cosign_produces_two_signatures() {
         .json()
         .await
         .unwrap();
-    assert_eq!(job["state"]["state"], "pending_co_sign");
+    assert_eq!(job["state"]["state"], "pending_destruction");
     assert_eq!(job["manifest_id"], manifest_id);
     assert_eq!(latest_destruction(&job)["manifest_ref"], manifest_id);
     let after_link: serde_json::Value = client
@@ -521,7 +517,7 @@ async fn unsaved_topology_resolves_as_a_dry_run() {
     );
 }
 
-/// A Job escalated before any erasure activity exists has nothing for the
+/// A Job recorded for destruction before any erasure activity exists has nothing for the
 /// cert generator to certify. Co-signing must refuse to finalise it as
 /// Destroyed — an uncertified destruction is the failure this product
 /// exists to prevent — and the refusal must leave the Job untouched.
@@ -547,10 +543,10 @@ async fn cosign_refuses_to_destroy_a_job_with_no_certificate() {
         .unwrap();
     let job_id = created["job_id"].as_str().unwrap().to_string();
 
-    // Escalate while still Queued: no erasure activity, so no cert.
+    // Record while still Queued: no erasure activity, so no cert.
     let resp = client
-        .post(format!("{base}/api/jobs/{job_id}/escalate-to-destroy"))
-        .json(&json!({ "method": "disintegrate", "operator": op }))
+        .post(format!("{base}/api/jobs/{job_id}/record-for-destruction"))
+        .json(&attested("disintegrate", op.clone()))
         .send()
         .await
         .unwrap();
@@ -585,7 +581,7 @@ async fn cosign_refuses_to_destroy_a_job_with_no_certificate() {
         .json()
         .await
         .unwrap();
-    assert_eq!(job["state"]["state"], "pending_co_sign");
+    assert_eq!(job["state"]["state"], "pending_destruction");
 
     let m: serde_json::Value = client
         .get(format!("{base}/api/manifests/{manifest_id}"))
@@ -622,8 +618,8 @@ async fn a_job_cannot_be_on_two_manifests() {
         .unwrap();
     let job_id = created["job_id"].as_str().unwrap().to_string();
     client
-        .post(format!("{base}/api/jobs/{job_id}/escalate-to-destroy"))
-        .json(&json!({ "method": "disintegrate", "operator": op }))
+        .post(format!("{base}/api/jobs/{job_id}/record-for-destruction"))
+        .json(&attested("disintegrate", op.clone()))
         .send()
         .await
         .unwrap();
@@ -672,7 +668,7 @@ async fn a_job_cannot_be_on_two_manifests() {
     assert_eq!(dup.status(), 422);
 }
 
-/// A refused manifest stamps nothing: one PendingCoSign Job alongside a
+/// A refused manifest stamps nothing: one PendingDestruction Job alongside a
 /// Queued one is a 409, neither Job carries a manifest id, and no manifest
 /// is stored.
 #[tokio::test]
@@ -701,8 +697,8 @@ async fn a_refused_manifest_links_no_job() {
     }
     let (pending, queued) = (&ids[0], &ids[1]);
     let resp = client
-        .post(format!("{base}/api/jobs/{pending}/escalate-to-destroy"))
-        .json(&json!({ "method": "shred", "operator": op }))
+        .post(format!("{base}/api/jobs/{pending}/record-for-destruction"))
+        .json(&attested("shred", op.clone()))
         .send()
         .await
         .unwrap();
@@ -748,10 +744,10 @@ async fn a_refused_manifest_links_no_job() {
 }
 
 /// Once a Job is on a manifest, the record the supervisor will co-sign is
-/// fixed: escalating it again is refused, appends no DestructionEvent and
+/// fixed: recording it again is refused, appends no DestructionEvent and
 /// leaves the stored certificate in place.
 #[tokio::test]
-async fn re_escalating_a_job_on_a_manifest_is_refused() {
+async fn re_recording_a_job_on_a_manifest_is_refused() {
     let base = spawn_server().await;
     let client = reqwest::Client::new();
     let op = json!({ "id": "op-1", "display_name": "Alice", "email": "alice@example.com" });
@@ -799,8 +795,8 @@ async fn re_escalating_a_job_on_a_manifest_is_refused() {
     assert!(has_erasure, "job never gained an erasure activity");
 
     let resp = client
-        .post(format!("{base}/api/jobs/{job_id}/escalate-to-destroy"))
-        .json(&json!({ "method": "disintegrate", "operator": op }))
+        .post(format!("{base}/api/jobs/{job_id}/record-for-destruction"))
+        .json(&attested("disintegrate", op.clone()))
         .send()
         .await
         .unwrap();
@@ -819,7 +815,7 @@ async fn re_escalating_a_job_on_a_manifest_is_refused() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let cert = cert.expect("certificate generated at pending_co_sign");
+    let cert = cert.expect("certificate generated at pending_destruction");
 
     let resp = client
         .post(format!("{base}/api/manifests"))
@@ -838,15 +834,15 @@ async fn re_escalating_a_job_on_a_manifest_is_refused() {
         .unwrap();
 
     let resp = client
-        .post(format!("{base}/api/jobs/{job_id}/escalate-to-destroy"))
-        .json(&json!({ "method": "shred", "operator": op }))
+        .post(format!("{base}/api/jobs/{job_id}/record-for-destruction"))
+        .json(&attested("shred", op.clone()))
         .send()
         .await
         .unwrap();
     assert_eq!(
         resp.status(),
         409,
-        "re-escalation of a linked job must be a conflict"
+        "re-recording a linked job must be a conflict"
     );
     let body: serde_json::Value = resp.json().await.unwrap();
     let manifest_id = before["manifest_id"].as_str().unwrap();
@@ -944,8 +940,8 @@ async fn a_manifest_assembled_before_the_certificate_is_signed_stays_out_of_it()
     assert!(has_erasure, "job never gained an erasure activity");
 
     let resp = client
-        .post(format!("{base}/api/jobs/{job_id}/escalate-to-destroy"))
-        .json(&json!({ "method": "shred", "operator": op }))
+        .post(format!("{base}/api/jobs/{job_id}/record-for-destruction"))
+        .json(&attested("shred", op.clone()))
         .send()
         .await
         .unwrap();
@@ -978,7 +974,7 @@ async fn a_manifest_assembled_before_the_certificate_is_signed_stays_out_of_it()
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let cert = cert.expect("certificate generated at pending_co_sign");
+    let cert = cert.expect("certificate generated at pending_destruction");
     let signed_destructions: Vec<&serde_json::Value> = cert["certificate"]["activities"]
         .as_array()
         .expect("certificate has activities")
@@ -1014,7 +1010,9 @@ async fn a_manifest_assembled_before_the_certificate_is_signed_stays_out_of_it()
 #[tokio::test]
 async fn certificate_signed_after_linking_still_omits_the_manifest() {
     use wipe_common::{
-        Classification, DestructMethod, DestructionEvent, DeviceId, Intent, JobSpec, OperatorRef,
+        AttestationSigner, Classification, DestructMethod, DestructionAttestation,
+        DestructionEvent, DeviceId, IdentifierSource, Intent, JobSpec, OperatorRef,
+        RecordedIdentifiers,
     };
 
     let backend = Arc::new(MockBackend::with_catalog(
@@ -1060,20 +1058,35 @@ async fn certificate_signed_after_linking_still_omits_the_manifest() {
     // No await between these two calls: the generator sees the linked Job.
     state
         .runner
-        .escalate_to_destroy(
+        .record_for_destruction(
             job_id,
             DestructionEvent {
                 id: uuid::Uuid::new_v4(),
                 device_id: device,
                 at: time::OffsetDateTime::now_utc(),
                 method: DestructMethod::Shred,
-                operator: op,
+                operator: op.clone(),
                 supervisor: None,
                 manifest_ref: None,
                 photo_refs: Vec::new(),
                 notes: None,
                 station_id: None,
-                attestation: None,
+                attestation: Some(
+                    DestructionAttestation::new(
+                        DestructMethod::Shred,
+                        time::OffsetDateTime::now_utc(),
+                        "SHR-2",
+                        "Bay 3",
+                        RecordedIdentifiers {
+                            asset_tag: None,
+                            serial: Some("S6ABNX0W123456".into()),
+                            source: IdentifierSource::Device,
+                        },
+                        AttestationSigner::self_asserted(op.clone(), "Alice", "Bench lead")
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                ),
             },
         )
         .unwrap();
@@ -1113,6 +1126,21 @@ async fn certificate_signed_after_linking_still_omits_the_manifest() {
 
 fn http_op() -> serde_json::Value {
     json!({ "id": "op-1", "display_name": "Alice", "email": "alice@example.com" })
+}
+
+/// An attested record-for-destruction body (ADR-0011 §1): every required
+/// field filled, "I attest" ticked, identifiers read from the device.
+fn attested(method: &str, operator: serde_json::Value) -> serde_json::Value {
+    json!({
+        "method": method,
+        "equipment_id": "SHR-2",
+        "location": "Bay 3",
+        "operator": operator,
+        "full_name": "Alice Erasure",
+        "title": "Bench lead",
+        "attest": true,
+        "notes": null,
+    })
 }
 
 async fn http_create_job(client: &reqwest::Client, base: &str, device: &str) -> String {
@@ -1184,7 +1212,7 @@ fn count_activities(job: &serde_json::Value, kind: &str) -> usize {
 }
 
 #[tokio::test]
-async fn unknown_job_id_is_404_on_start_abort_and_escalate() {
+async fn unknown_job_id_is_404_on_start_abort_and_record() {
     let base = spawn_server().await;
     let client = reqwest::Client::new();
     let unknown = uuid::Uuid::new_v4();
@@ -1192,10 +1220,7 @@ async fn unknown_job_id_is_404_on_start_abort_and_escalate() {
     for (path, body) in [
         ("start", None),
         ("abort", None),
-        (
-            "escalate-to-destroy",
-            Some(json!({ "method": "shred", "operator": http_op() })),
-        ),
+        ("record-for-destruction", Some(attested("shred", http_op()))),
     ] {
         let (status, body) =
             http_post(&client, format!("{base}/api/jobs/{unknown}/{path}"), body).await;
@@ -1236,14 +1261,14 @@ async fn starting_a_job_twice_is_200_then_409_with_one_erasure() {
 }
 
 #[tokio::test]
-async fn starting_an_escalated_job_is_409_and_it_stays_pending_co_sign() {
+async fn starting_a_job_recorded_for_destruction_is_409_and_it_stays_pending_destruction() {
     let base = spawn_server().await;
     let client = reqwest::Client::new();
     let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
     let (status, _) = http_post(
         &client,
-        format!("{base}/api/jobs/{job_id}/escalate-to-destroy"),
-        Some(json!({ "method": "shred", "operator": http_op() })),
+        format!("{base}/api/jobs/{job_id}/record-for-destruction"),
+        Some(attested("shred", http_op())),
     )
     .await;
     assert_eq!(status, 200);
@@ -1252,12 +1277,12 @@ async fn starting_an_escalated_job_is_409_and_it_stays_pending_co_sign() {
     assert_eq!(status, 409, "{body}");
     tokio::time::sleep(Duration::from_millis(100)).await;
     let job = http_get_job(&client, &base, &job_id).await;
-    assert_eq!(job["state"]["state"], "pending_co_sign");
+    assert_eq!(job["state"]["state"], "pending_destruction");
     assert_eq!(count_activities(&job, "erasure"), 0);
 }
 
 #[tokio::test]
-async fn escalating_an_aborted_job_is_409_and_appends_nothing() {
+async fn recording_an_aborted_job_is_409_and_appends_nothing() {
     let base = spawn_server().await;
     let client = reqwest::Client::new();
     let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
@@ -1266,8 +1291,8 @@ async fn escalating_an_aborted_job_is_409_and_appends_nothing() {
 
     let (status, body) = http_post(
         &client,
-        format!("{base}/api/jobs/{job_id}/escalate-to-destroy"),
-        Some(json!({ "method": "shred", "operator": http_op() })),
+        format!("{base}/api/jobs/{job_id}/record-for-destruction"),
+        Some(attested("shred", http_op())),
     )
     .await;
     assert_eq!(status, 409, "{body}");
@@ -1339,8 +1364,8 @@ async fn cosigning_a_signed_manifest_again_is_409_and_adds_no_cosignature() {
     assert!(has_erasure, "job never gained an erasure activity");
     let (status, body) = http_post(
         &client,
-        format!("{base}/api/jobs/{job_id}/escalate-to-destroy"),
-        Some(json!({ "method": "shred", "operator": http_op() })),
+        format!("{base}/api/jobs/{job_id}/record-for-destruction"),
+        Some(attested("shred", http_op())),
     )
     .await;
     assert_eq!(status, 200, "{body}");
@@ -1357,7 +1382,7 @@ async fn cosigning_a_signed_manifest_again_is_409_and_adds_no_cosignature() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(has_cert, "certificate generated at pending_co_sign");
+    assert!(has_cert, "certificate generated at pending_destruction");
 
     let (status, manifest) = http_post(
         &client,
@@ -1396,14 +1421,14 @@ async fn cosigning_a_signed_manifest_again_is_409_and_adds_no_cosignature() {
 /// ADR-0011 §5: a technique that is not NIST Destroy is still recorded as
 /// what the bench actually did.
 #[tokio::test]
-async fn escalating_with_a_non_nist_technique_records_it() {
+async fn recording_with_a_non_nist_technique_records_it() {
     let base = spawn_server().await;
     let client = reqwest::Client::new();
     let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
     let (status, body) = http_post(
         &client,
-        format!("{base}/api/jobs/{job_id}/escalate-to-destroy"),
-        Some(json!({ "method": "crush", "operator": http_op() })),
+        format!("{base}/api/jobs/{job_id}/record-for-destruction"),
+        Some(attested("crush", http_op())),
     )
     .await;
     assert_eq!(status, 200, "{body}");
@@ -1416,5 +1441,464 @@ async fn escalating_with_a_non_nist_technique_records_it() {
         .find(|a| a["type"] == "destruction")
         .expect("a destruction activity");
     assert_eq!(destruction["method"], "crush");
-    assert!(destruction.get("attestation").is_none());
+    assert!(destruction["attestation"]["statement"]
+        .as_str()
+        .unwrap()
+        .contains("by Crush using SHR-2"));
+}
+
+// --- Record for destruction (destruction-attestation story 2) -----------------
+
+async fn spawn_server_on(backend: Arc<MockBackend>) -> String {
+    let state = AppState::new(backend, None, Arc::new(SigningKey::generate()));
+    let app = router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+async fn http_create_tagged_job(
+    client: &reqwest::Client,
+    base: &str,
+    device: &str,
+    asset_tag: &str,
+) -> String {
+    let (status, created) = http_post(
+        client,
+        format!("{base}/api/jobs"),
+        Some(json!({
+            "device_id": device,
+            "classification": "moderate",
+            "intent": "destroy",
+            "operator": http_op(),
+            "asset_tag": asset_tag,
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{created}");
+    created["job_id"].as_str().unwrap().to_string()
+}
+
+async fn http_list_jobs(client: &reqwest::Client, base: &str) -> Vec<serde_json::Value> {
+    client
+        .get(format!("{base}/api/jobs"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+fn group_body(drives: serde_json::Value) -> serde_json::Value {
+    let mut body = attested("shred", http_op());
+    body["classification"] = json!("moderate");
+    body["drives"] = drives;
+    body
+}
+
+#[tokio::test]
+async fn recording_a_queued_job_reads_the_identifiers_from_the_device() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_tagged_job(&client, &base, "dev-nvme-0", "A-17").await;
+
+    let (status, preview) = http_post(
+        &client,
+        format!("{base}/api/destruction/statement"),
+        Some(json!({
+            "method": "shred", "equipment_id": "SHR-2", "location": "Bay 3",
+            "full_name": "Alice Erasure", "title": "Bench lead",
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{preview}");
+
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/record-for-destruction"),
+        Some(attested("shred", http_op())),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "pending_destruction");
+    let att = &latest_destruction(&job)["attestation"];
+    assert_eq!(
+        att["identifiers"],
+        json!({"asset_tag": "A-17", "serial": "S6ABNX0W123456", "source": "device"})
+    );
+    assert_eq!(
+        att["signer"]["identity_assurance"]["level"],
+        "self_asserted"
+    );
+    assert_eq!(att["signer"]["full_name"], "Alice Erasure");
+    assert_eq!(att["equipment_id"], "SHR-2");
+    assert_eq!(att["location"], "Bay 3");
+    assert_eq!(att["statement"], preview["statement"]);
+}
+
+#[tokio::test]
+async fn recording_an_in_progress_job_with_scanned_identifiers_marks_them_scanned() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    // The mock's SATA drive fails its erasure, so the Job stays InProgress.
+    let job_id = http_create_job(&client, &base, "dev-sata-0").await;
+    let (status, _) = http_post(&client, format!("{base}/api/jobs/{job_id}/start"), None).await;
+    assert_eq!(status, 200);
+    let mut body = attested("shred", http_op());
+    body["identifiers"] = json!({ "serial": "S1" });
+    let (status, resp) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/record-for-destruction"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, 200, "{resp}");
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "pending_destruction");
+    assert_eq!(
+        latest_destruction(&job)["attestation"]["identifiers"],
+        json!({"asset_tag": null, "serial": "S1", "source": "scanned"})
+    );
+}
+
+#[tokio::test]
+async fn recording_a_job_whose_drive_cannot_be_read_asks_for_a_scan() {
+    use wipe_engine::DeviceSimulator;
+    let backend = Arc::new(MockBackend::with_catalog(
+        wipe_engine_mock::default_devices_public(),
+        MockTiming::fast(),
+    ));
+    let base = spawn_server_on(backend.clone()).await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_tagged_job(&client, &base, "dev-nvme-0", "A-17").await;
+    backend
+        .detach(&wipe_common::DeviceId("dev-nvme-0".into()))
+        .unwrap();
+
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/record-for-destruction"),
+        Some(attested("shred", http_op())),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("scan"),
+        "the refusal should tell the operator to scan, got {body}"
+    );
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "queued");
+    assert_eq!(count_activities(&job, "destruction"), 0);
+}
+
+#[tokio::test]
+async fn recording_without_attesting_or_with_a_blank_field_records_nothing() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
+    let url = format!("{base}/api/jobs/{job_id}/record-for-destruction");
+
+    let mut cases: Vec<(serde_json::Value, &str)> = Vec::new();
+    let mut not_attested = attested("shred", http_op());
+    not_attested["attest"] = json!(false);
+    cases.push((not_attested, "I attest"));
+    let mut missing = attested("shred", http_op());
+    missing.as_object_mut().unwrap().remove("attest");
+    cases.push((missing, "I attest"));
+    for field in ["equipment_id", "location", "full_name", "title"] {
+        let mut blank = attested("shred", http_op());
+        blank[field] = json!("  ");
+        cases.push((blank, field));
+    }
+    for (body, needle) in cases {
+        let (status, resp) = http_post(&client, url.clone(), Some(body)).await;
+        assert_eq!(status, 422, "{needle}: {resp}");
+        assert!(
+            resp["error"].as_str().unwrap().contains(needle),
+            "{needle}: {resp}"
+        );
+    }
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "queued");
+    assert_eq!(count_activities(&job, "destruction"), 0);
+}
+
+#[tokio::test]
+async fn recording_an_erased_job_is_409() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
+    let (status, _) = http_post(&client, format!("{base}/api/jobs/{job_id}/start"), None).await;
+    assert_eq!(status, 200);
+    http_wait_for_state(&client, &base, &job_id, "erased").await;
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/record-for-destruction"),
+        Some(attested("shred", http_op())),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "erased");
+    assert_eq!(count_activities(&job, "destruction"), 0);
+}
+
+#[tokio::test]
+async fn the_removed_escalation_route_is_404_and_changes_nothing() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/escalate-to-destroy"),
+        Some(json!({ "method": "shred", "operator": http_op() })),
+    )
+    .await;
+    assert_eq!(status, 404, "{body}");
+    assert!(body["error"].is_string(), "{body}");
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "queued");
+    assert_eq!(count_activities(&job, "destruction"), 0);
+}
+
+#[tokio::test]
+async fn recording_a_scanned_group_creates_one_pending_job_per_drive() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/destruction/records"),
+        Some(group_body(json!([
+            { "asset_tag": "A-1", "serial": "S1" },
+            { "serial": "S2" },
+            { "asset_tag": "A-3", "serial": null },
+        ]))),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let ids: Vec<String> = body["job_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids.len(), 3);
+
+    let jobs = http_list_jobs(&client, &base).await;
+    assert_eq!(jobs.len(), 3);
+    let expected = [
+        ("scanned:S1", json!("A-1"), json!("S1")),
+        ("scanned:S2", json!(null), json!("S2")),
+        ("scanned:A-3", json!("A-3"), json!(null)),
+    ];
+    let mut statements = Vec::new();
+    for (id, (device_id, tag, serial)) in ids.iter().zip(expected) {
+        let job = http_get_job(&client, &base, id).await;
+        assert_eq!(job["state"]["state"], "pending_destruction");
+        assert_eq!(job["spec"]["intent"], "destroy");
+        assert_eq!(job["spec"]["classification"], "moderate");
+        assert_eq!(job["spec"]["device_id"], device_id);
+        let att = &latest_destruction(&job)["attestation"];
+        assert_eq!(
+            att["identifiers"],
+            json!({"asset_tag": tag, "serial": serial, "source": "scanned"})
+        );
+        statements.push((att["statement"].clone(), att["at"].clone()));
+    }
+    assert!(
+        statements.windows(2).all(|w| w[0] == w[1]),
+        "a group shares one statement and one time"
+    );
+}
+
+#[tokio::test]
+async fn a_scanned_group_that_cannot_all_be_recorded_creates_nothing() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let url = format!("{base}/api/destruction/records");
+    for (drives, needle) in [
+        (json!([]), "at least one"),
+        (
+            json!([{ "serial": "S1" }, { "asset_tag": "A-2", "serial": "S1" }]),
+            "S1",
+        ),
+        (
+            json!([{ "asset_tag": "A-1" }, { "asset_tag": "a-1" }]),
+            "listed twice",
+        ),
+        (
+            json!([{ "serial": "S1" }, { "asset_tag": " ", "serial": "" }]),
+            "drive 2",
+        ),
+    ] {
+        let (status, body) = http_post(&client, url.clone(), Some(group_body(drives))).await;
+        assert_eq!(status, 422, "{needle}: {body}");
+        assert!(body["error"].as_str().unwrap().contains(needle), "{body}");
+    }
+    let mut not_attested = group_body(json!([{ "serial": "S1" }]));
+    not_attested["attest"] = json!(false);
+    let (status, _) = http_post(&client, url.clone(), Some(not_attested)).await;
+    assert_eq!(status, 422);
+    let mut blank = group_body(json!([{ "serial": "S1" }]));
+    blank["location"] = json!("");
+    let (status, body) = http_post(&client, url.clone(), Some(blank)).await;
+    assert_eq!(status, 422);
+    assert!(body["error"].as_str().unwrap().contains("location"));
+    assert!(http_list_jobs(&client, &base).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_scanned_group_matching_an_open_job_is_409_naming_it() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let url = format!("{base}/api/destruction/records");
+    // An open Job on an attached drive, with an asset tag.
+    let open = http_create_tagged_job(&client, &base, "dev-nvme-0", "A-17").await;
+    // An open Job recorded from scanned identifiers.
+    let scanned = http_create_job(&client, &base, "dev-sata-0").await;
+    let mut body = attested("shred", http_op());
+    body["identifiers"] = json!({ "serial": "SCAN-9" });
+    let (status, resp) = http_post(
+        &client,
+        format!("{base}/api/jobs/{scanned}/record-for-destruction"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, 200, "{resp}");
+
+    for (drive, job) in [
+        (json!({ "asset_tag": "A-17" }), &open),
+        (json!({ "serial": "S6ABNX0W123456" }), &open),
+        (json!({ "serial": "SCAN-9" }), &scanned),
+    ] {
+        let (status, body) = http_post(
+            &client,
+            url.clone(),
+            Some(group_body(json!([{ "serial": "NEW-1" }, drive]))),
+        )
+        .await;
+        assert_eq!(status, 409, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains(job.as_str()),
+            "the refusal should name job {job}, got {body}"
+        );
+    }
+    assert_eq!(http_list_jobs(&client, &base).await.len(), 2);
+}
+
+#[tokio::test]
+async fn the_statement_preview_refuses_blank_fields() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/destruction/statement"),
+        Some(json!({
+            "method": "pulverize", "equipment_id": "PUL-1", "location": "Bay 3",
+            "full_name": "Ana Ruiz", "title": "",
+        })),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("title"));
+}
+
+/// Wait until the Job's latest erasure has failed (the mock's SATA drive).
+async fn http_wait_for_failed_erasure(
+    client: &reqwest::Client,
+    base: &str,
+    job_id: &str,
+) -> serde_json::Value {
+    for _ in 0..200 {
+        let job = http_get_job(client, base, job_id).await;
+        let failed = job["activities"].as_array().is_some_and(|a| {
+            a.iter()
+                .any(|x| x["type"] == "erasure" && x["state"]["state"] == "failed")
+        });
+        if failed {
+            return job;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("job {job_id} never had a failed erasure");
+}
+
+#[tokio::test]
+async fn a_device_record_reads_the_serial_from_the_erasure_snapshot_once_detached() {
+    use wipe_engine::DeviceSimulator;
+    let backend = Arc::new(MockBackend::with_catalog(
+        wipe_engine_mock::default_devices_public(),
+        MockTiming::fast(),
+    ));
+    let base = spawn_server_on(backend.clone()).await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_tagged_job(&client, &base, "dev-sata-0", "A-9").await;
+    let (status, _) = http_post(&client, format!("{base}/api/jobs/{job_id}/start"), None).await;
+    assert_eq!(status, 200);
+    http_wait_for_failed_erasure(&client, &base, &job_id).await;
+    backend
+        .detach(&wipe_common::DeviceId("dev-sata-0".into()))
+        .unwrap();
+
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/record-for-destruction"),
+        Some(attested("shred", http_op())),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(
+        latest_destruction(&job)["attestation"]["identifiers"],
+        json!({"asset_tag": "A-9", "serial": "203440FAILSIM", "source": "device"})
+    );
+}
+
+#[tokio::test]
+async fn the_api_catch_all_keeps_method_not_allowed() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
+    let resp = client
+        .get(format!("{base}/api/jobs/{job_id}/record-for-destruction"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 405);
+}
+
+#[tokio::test]
+async fn a_scanned_groups_statement_is_the_previewed_one() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (status, preview) = http_post(
+        &client,
+        format!("{base}/api/destruction/statement"),
+        Some(json!({
+            "method": "shred", "equipment_id": "SHR-2", "location": "Bay 3",
+            "full_name": "Alice Erasure", "title": "Bench lead",
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{preview}");
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/destruction/records"),
+        Some(group_body(json!([{ "serial": "S1" }, { "serial": "S2" }]))),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    for id in body["job_ids"].as_array().unwrap() {
+        let job = http_get_job(&client, &base, id.as_str().unwrap()).await;
+        assert_eq!(
+            latest_destruction(&job)["attestation"]["statement"],
+            preview["statement"]
+        );
+    }
 }

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { FileSignature, HardDrive, LogOut, Network, ScrollText, Shield, ShieldCheck, SlidersHorizontal, UserCircle2 } from "lucide-react";
+import { FileSignature, HardDrive, LogOut, Network, ScanLine, ScrollText, Shield, ShieldCheck, SlidersHorizontal, UserCircle2 } from "lucide-react";
 
 import { api, classNames } from "@/api/client";
 import { useEventStream } from "@/api/ws";
@@ -170,6 +170,7 @@ function NavBar() {
     <nav className="flex items-center gap-1">
       <Item to="/" icon={<HardDrive className="h-4 w-4" />} label="Devices" />
       <Item to="/jobs" icon={<ScrollText className="h-4 w-4" />} label="Jobs" />
+      <Item to="/destruction/record" icon={<ScanLine className="h-4 w-4" />} label="Record for destruction" />
       <Item to="/manifests" icon={<FileSignature className="h-4 w-4" />} label="Manifests" />
       <Item to="/fleet" icon={<Network className="h-4 w-4" />} label="Fleet" />
       <Item to="/bench-setup" icon={<SlidersHorizontal className="h-4 w-4" />} label="Bench setup" />

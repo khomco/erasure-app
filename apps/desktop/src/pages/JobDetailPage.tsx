@@ -13,18 +13,17 @@ import {
 
 import { api, classNames, formatBytes } from "@/api/client";
 import { latestErasure, useJobLiveState } from "@/api/ws";
+import { identityAssuranceLabel, techniqueName, techniqueStandardLabel } from "@/api/destruction";
+import { toRecordRequest, type RecordForm } from "@/api/recordForDestruction";
 import {
-  DESTRUCTION_TECHNIQUES,
-  identityAssuranceLabel,
-  isNistDestroy,
-  techniqueCaution,
-  techniqueName,
-  techniqueStandardLabel,
-} from "@/api/destruction";
+  AttestationInputs,
+  readyToRecord,
+  StatementReview,
+  type ReviewedStatement,
+} from "@/components/AttestationFields";
 import { useOperator } from "@/operator/context";
 import type {
   Classification,
-  DestructMethod,
   ErasureEvent,
   Job,
   JobActivity,
@@ -61,6 +60,13 @@ function JobBody({
 }) {
   const erasure = latestErasure(job);
   const device = erasure?.device_snapshot;
+  const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
+  // The serial a device-sourced record would store, as far as the UI knows:
+  // the latest erasure snapshot's, else the attached device's.
+  const knownSerial =
+    device?.serial?.trim() ||
+    devices.data?.find((d) => d.id === job.spec.device_id)?.serial?.trim() ||
+    null;
   const pct = Math.round((erasure?.progress?.fraction ?? 0) * 100);
   const outerTerminal =
     job.state.state === "erased" ||
@@ -70,7 +76,7 @@ function JobBody({
   const showCert =
     job.state.state === "erased" ||
     job.state.state === "destroyed" ||
-    job.state.state === "pending_co_sign";
+    job.state.state === "pending_destruction";
 
   return (
     <div className="space-y-4">
@@ -128,7 +134,7 @@ function JobBody({
         )}
 
         <div className="mt-4 flex items-center justify-end gap-2">
-          {!outerTerminal && job.state.state !== "pending_co_sign" && (
+          {!outerTerminal && job.state.state !== "pending_destruction" && (
             <button
               className="btn btn-danger"
               onClick={onAbort}
@@ -137,8 +143,13 @@ function JobBody({
               {aborting ? "Aborting…" : "Abort"}
             </button>
           )}
-          {!outerTerminal && erasure?.state.state === "failed" && (
-            <EscalateButton jobId={job.id} classification={job.spec.classification} />
+          {(job.state.state === "queued" || job.state.state === "in_progress") && (
+            <RecordForDestructionButton
+              jobId={job.id}
+              classification={job.spec.classification}
+              knownSerial={knownSerial}
+              assetTag={job.spec.asset_tag}
+            />
           )}
           {showCert && (
             <Link
@@ -149,7 +160,7 @@ function JobBody({
               <ShieldCheck className="h-4 w-4" /> View certificate
             </Link>
           )}
-          {job.state.state === "pending_co_sign" && (
+          {job.state.state === "pending_destruction" && (
             <Link to="/manifests" className="btn btn-secondary">
               <ActivitySquare className="h-4 w-4" /> Manifest co-sign
             </Link>
@@ -176,106 +187,135 @@ function OuterStatePill({ state }: { state: Job["state"]["state"] }) {
   return <span className={classNames("pill", tone)}>{state.replace(/_/g, " ")}</span>;
 }
 
-function EscalateButton({
+function RecordForDestructionButton({
   jobId,
   classification,
+  knownSerial,
+  assetTag,
 }: {
   jobId: string;
   classification: Classification;
+  knownSerial: string | null;
+  assetTag: string | null;
 }) {
   const { operator } = useOperator();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [method, setMethod] = useState<DestructMethod>("disintegrate");
-  const [notes, setNotes] = useState("");
+  const [form, setForm] = useState<RecordForm>(() => ({
+    method: "shred",
+    equipment_id: "",
+    location: "",
+    full_name: operator?.display_name ?? "",
+    title: "",
+    notes: "",
+    identifiers: { from: "device" },
+  }));
+  const [reviewed, setReviewed] = useState<ReviewedStatement | null>(null);
+  const [attested, setAttested] = useState(false);
 
-  const escalate = useMutation({
+  const record = useMutation({
     mutationFn: () => {
       if (!operator) throw new Error("operator not signed in");
-      return api.escalateToDestroy(jobId, {
-        method,
-        operator,
-        notes: notes || null,
-      });
+      return api.recordForDestruction(jobId, toRecordRequest(form, operator, attested));
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["job", jobId] });
       setOpen(false);
+      setAttested(false);
     },
   });
 
+  const ids = form.identifiers;
   return (
     <>
       <button className="btn btn-warning" onClick={() => setOpen(true)}>
-        <Trash2 className="h-4 w-4" /> Escalate to destroy
+        <Trash2 className="h-4 w-4" /> Record for destruction
       </button>
       {open && (
         <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/70 p-4">
-          <div className="w-full max-w-md space-y-4 rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
+          <div className="max-h-full w-full max-w-lg space-y-4 overflow-auto rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
             <div>
-              <h3 className="text-base font-semibold">Escalate to physical destruction</h3>
+              <h3 className="text-base font-semibold">Record for destruction</h3>
               <p className="mt-1 text-xs text-slate-400">
-                The Job moves to <span className="font-mono">pending_co_sign</span> and a
-                cert is generated. Supervisor co-sign on a manifest finalises the
-                Destroyed disposition.
+                You attest that this drive is being placed into the destruction process
+                now. The Job becomes <strong>pending destruction</strong>; it is not
+                destroyed until the destruction run is completed on a manifest.
               </p>
             </div>
+            <AttestationInputs form={form} onChange={setForm} classification={classification} />
             <div className="space-y-2">
-              <div className="label">Destruction technique</div>
-              {[true, false].map((nist) => {
-                const group = DESTRUCTION_TECHNIQUES.filter((m) => isNistDestroy(m) === nist);
-                return (
-                  <div key={String(nist)}>
-                    <div className="mb-1 text-[11px] text-slate-500">
-                      {techniqueStandardLabel(group[0])}
+              <div className="label">Identifiers</div>
+              <div className="flex gap-4 text-sm">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    checked={ids.from === "device"}
+                    onChange={() => setForm({ ...form, identifiers: { from: "device" } })}
+                  />
+                  From the device
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    checked={ids.from === "scanned"}
+                    onChange={() =>
+                      setForm({
+                        ...form,
+                        identifiers: { from: "scanned", asset_tag: "", serial: "" },
+                      })
+                    }
+                  />
+                  Scanned
+                </label>
+              </div>
+              {ids.from === "device" ? (
+                knownSerial ? (
+                  <div className="rounded-md border border-slate-800 p-2 text-xs text-slate-300">
+                    <div className="mb-1 text-slate-500">Will be recorded (read from the device):</div>
+                    <div>
+                      Serial: <span className="font-mono">{knownSerial}</span>
                     </div>
-                    <div className="grid grid-cols-3 gap-1">
-                      {group.map((m) => (
-                        <button
-                          key={m}
-                          onClick={() => setMethod(m)}
-                          className={classNames(
-                            "btn text-xs",
-                            method === m
-                              ? "bg-indigo-500 text-white"
-                              : "bg-slate-800 text-slate-300 hover:bg-slate-700"
-                          )}
-                        >
-                          {techniqueName(m)}
-                        </button>
-                      ))}
+                    <div>
+                      Asset tag: <span className="font-mono">{assetTag?.trim() || "—"}</span>
                     </div>
                   </div>
-                );
-              })}
-              <div
-                className={classNames(
-                  "text-xs",
-                  isNistDestroy(method) ? "text-slate-300" : "text-amber-300"
-                )}
-              >
-                {techniqueName(method)}: {techniqueStandardLabel(method)}
-              </div>
-              {techniqueCaution(method, classification) && (
-                <div className="flex gap-2 rounded-md bg-amber-950/40 p-2 text-xs text-amber-300">
-                  <AlertTriangle className="h-4 w-4 shrink-0" />
-                  {techniqueCaution(method, classification)}
+                ) : (
+                  <p className="rounded-md bg-amber-950/40 p-2 text-xs text-amber-300">
+                    This drive cannot be read, so its serial is unknown. Choose Scanned and
+                    scan the drive&apos;s asset tag or serial.
+                  </p>
+                )
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    className="field"
+                    placeholder="Asset tag"
+                    value={ids.asset_tag}
+                    onChange={(e) =>
+                      setForm({ ...form, identifiers: { ...ids, asset_tag: e.target.value } })
+                    }
+                  />
+                  <input
+                    className="field"
+                    placeholder="Serial"
+                    value={ids.serial}
+                    onChange={(e) =>
+                      setForm({ ...form, identifiers: { ...ids, serial: e.target.value } })
+                    }
+                  />
                 </div>
               )}
             </div>
-            <div>
-              <div className="label">Notes</div>
-              <textarea
-                className="field"
-                rows={3}
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="optional — e.g. drive bricked mid-wipe"
-              />
-            </div>
-            {escalate.isError && (
+            <StatementReview
+              form={form}
+              reviewed={reviewed}
+              onReviewed={setReviewed}
+              attested={attested}
+              onAttested={setAttested}
+            />
+            {record.isError && (
               <div className="rounded-md bg-rose-950/40 p-2 text-xs text-rose-300">
-                {(escalate.error as Error).message}
+                {(record.error as Error).message}
               </div>
             )}
             <div className="flex justify-end gap-2 pt-2">
@@ -284,10 +324,12 @@ function EscalateButton({
               </button>
               <button
                 className="btn btn-warning"
-                onClick={() => escalate.mutate()}
-                disabled={escalate.isPending || !operator}
+                onClick={() => record.mutate()}
+                disabled={
+                  record.isPending || !operator || !readyToRecord(form, reviewed, attested)
+                }
               >
-                {escalate.isPending ? "Escalating…" : "Confirm escalate"}
+                {record.isPending ? "Recording…" : "Record for destruction"}
               </button>
             </div>
           </div>
@@ -375,10 +417,25 @@ function ActivityCard({ activity, index }: { activity: JobActivity; index: numbe
               Operator: {activity.operator.display_name}
             </div>
             {activity.attestation && (
-              <div className="text-xs text-slate-400">
-                Identity:{" "}
-                {identityAssuranceLabel(activity.attestation.signer.identity_assurance)}
-              </div>
+              <>
+                <div className="text-xs text-slate-400">
+                  Recorded for destruction by {activity.attestation.signer.full_name},{" "}
+                  {activity.attestation.signer.title} · equipment{" "}
+                  {activity.attestation.equipment_id} · {activity.attestation.location}
+                </div>
+                <div className="text-xs text-slate-400">
+                  Identifiers ({activity.attestation.identifiers.source}): asset tag{" "}
+                  {activity.attestation.identifiers.asset_tag ?? "—"} · serial{" "}
+                  {activity.attestation.identifiers.serial ?? "—"}
+                </div>
+                <div className="text-xs text-slate-400">
+                  Identity:{" "}
+                  {identityAssuranceLabel(activity.attestation.signer.identity_assurance)}
+                </div>
+                <blockquote className="rounded-md border border-slate-800 p-2 text-xs text-slate-300">
+                  {activity.attestation.statement}
+                </blockquote>
+              </>
             )}
             {activity.notes && (
               <div className="text-xs text-slate-400">Notes: {activity.notes}</div>

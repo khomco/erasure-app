@@ -8,9 +8,12 @@
 //! The runner has two levels:
 //!  * `JobRunner` — outer orchestrator. Owns the outer-Job state machine
 //!    and decides when to emit each typed activity. Cert generation +
-//!    signing happens when the Job reaches Erased; for Destroyed, the
-//!    cert is generated at PendingCoSign and the supervisor co-signature
-//!    is attached when the manifest is signed.
+//!    signing happens when the Job reaches Erased; on the Destroy path the
+//!    cert is generated at PendingDestruction (when the Job has an erasure
+//!    to certify) and the supervisor co-signature is attached when the
+//!    manifest is signed. A Job enters PendingDestruction only through
+//!    `record_for_destruction` / `record_scanned_for_destruction`, each
+//!    carrying the operator's `DestructionAttestation` (ADR-0011 §1).
 //!  * inner `run_erasure_event` — drives one ErasureEvent through its
 //!    inner state machine (Queued → Probing → … → Completed/Failed).
 //!    Today's v0.1 `run_job` logic, minus the cert/sign tail.
@@ -25,7 +28,7 @@ use uuid::Uuid;
 
 use wipe_common::{
     select_method, AssetDisposition, DestructionEvent, ErasureEvent, ErasureEventSpec,
-    ErasureEventState, Job, JobActivity, JobSpec, JobUpdate, JobUpdateKind, Progress,
+    ErasureEventState, Job, JobActivity, JobSpec, JobState, JobUpdate, JobUpdateKind, Progress,
     VerificationEvent, VerificationMethod, VerificationReport, WipeError, WipeResult,
 };
 
@@ -122,15 +125,15 @@ impl JobRunner {
     /// is refused), broadcasts that change, then spawns an async task that
     /// drives the Job through one ErasureEvent (with verification if
     /// requested) to a terminal disposition. If the Job has left
-    /// `InProgress` (aborted or escalated) before the task begins, the task
+    /// `InProgress` (aborted or recorded for destruction) before the task begins, the task
     /// does nothing.
     ///
     /// Refused with `JobNotFound` for an unknown id and `InvalidState` if
-    /// the Job is not `Queued` (already started, escalated, aborted or
+    /// the Job is not `Queued` (already started, recorded for destruction, aborted or
     /// finished).
     ///
-    /// Retries and escalation-to-destroy are explicit operator actions
-    /// in v0.2 (`retry_erasure`, `escalate_to_destroy`) — automatic
+    /// Retries and recording for destruction are explicit operator actions
+    /// in v0.2 (`retry_erasure`, `record_for_destruction`) — automatic
     /// policy is deferred to SanitizationProfile in v0.2 #3.
     pub fn start(&self, id: Uuid) -> WipeResult<()> {
         {
@@ -156,7 +159,7 @@ impl JobRunner {
             if let Err(e) = runner.run_job(id).await {
                 // Inner ErasureEvent failed. The outer Job stays
                 // InProgress so the operator can decide next step
-                // (retry, escalate to destroy, or abort). The failure
+                // (retry, record for destruction, or abort). The failure
                 // is visible on the latest ErasureEvent's state and
                 // event log.
                 debug!(?e, %id, "job run returned error; outer Job awaits operator action");
@@ -200,12 +203,14 @@ impl JobRunner {
         Ok(())
     }
 
-    /// Append an operator-supplied `DestructionEvent` to a Job and move
-    /// it to `PendingCoSign`. Used when erasure is exhausted and the
-    /// Asset must be physically destroyed; the Job awaits supervisor
-    /// co-sign on the linked `DestructionManifest`. Refused if the Job is
-    /// unknown, terminal, or already on a DestructionManifest.
-    pub fn escalate_to_destroy(
+    /// Record a Job for destruction (ADR-0011 §1, first step): append the
+    /// operator's `DestructionEvent`, which must carry a
+    /// `DestructionAttestation`, and move the Job to `PendingDestruction`.
+    /// Refused with `JobNotFound` for an unknown id, and `InvalidState` if
+    /// the event has no attestation or the Job is terminal or already on a
+    /// DestructionManifest. A pending Job not yet on a manifest may be
+    /// recorded again; the latest DestructionEvent is the one that counts.
+    pub fn record_for_destruction(
         &self,
         id: Uuid,
         destruction: DestructionEvent,
@@ -215,6 +220,11 @@ impl JobRunner {
         let from = {
             let mut inner = self.inner.write();
             let job = inner.jobs.get_mut(&id).ok_or(WipeError::JobNotFound(id))?;
+            if destruction.attestation.is_none() {
+                return Err(WipeError::InvalidState(format!(
+                    "job {id}: a destruction record needs the operator's attestation"
+                )));
+            }
             if job.state.is_terminal() {
                 return Err(WipeError::InvalidState(format!(
                     "job {id} already terminal"
@@ -225,15 +235,120 @@ impl JobRunner {
             // certificate and would not carry the manifest reference.
             if let Some(mid) = job.manifest_id {
                 return Err(WipeError::InvalidState(format!(
-                    "job {id} is on destruction manifest {mid}; it cannot be escalated again"
+                    "job {id} is on destruction manifest {mid}; it cannot be recorded again"
                 )));
             }
             let from = job.state;
             job.activities
                 .push(JobActivity::Destruction(destruction.clone()));
-            job.state = wipe_common::JobState::PendingCoSign;
+            job.state = JobState::PendingDestruction;
             from
         };
+        self.broadcast_recorded(id, from, destruction);
+        Ok(())
+    }
+
+    /// Record a scanned group of drives for destruction, one new Job per
+    /// drive, each created directly in `PendingDestruction` with its
+    /// attested `DestructionEvent`. Used for drives that never enumerate
+    /// (dead drives) or that are meant for destruction from the start; the
+    /// `JobSpec::device_id` is the caller's synthetic `scanned:…` id and is
+    /// not checked against the backend.
+    ///
+    /// All-or-nothing, refused with `InvalidState` (creating nothing) when
+    /// the list is empty, any event lacks an attestation, two drives share
+    /// an asset tag or serial, or a drive matches the asset tag or serial of
+    /// a non-terminal Job. That last message names the Job so the operator
+    /// can record from it instead. An open Job's serial is its latest
+    /// erasure snapshot's, else the enumerated device's (read best-effort),
+    /// plus any identifiers already recorded on its destruction events.
+    pub async fn record_scanned_for_destruction(
+        &self,
+        drives: Vec<(JobSpec, DestructionEvent)>,
+    ) -> WipeResult<Vec<Uuid>> {
+        if drives.is_empty() {
+            return Err(WipeError::InvalidState(
+                "no drives to record for destruction".into(),
+            ));
+        }
+        let mut wanted: Vec<(Option<String>, Option<String>)> = Vec::new();
+        for (spec, ev) in &drives {
+            let Some(att) = &ev.attestation else {
+                return Err(WipeError::InvalidState(
+                    "a destruction record needs the operator's attestation".into(),
+                ));
+            };
+            let tag = nonblank(att.identifiers.asset_tag.as_deref())
+                .or_else(|| nonblank(spec.asset_tag.as_deref()));
+            let serial = nonblank(att.identifiers.serial.as_deref());
+            for (other_tag, other_serial) in &wanted {
+                if same(&tag, other_tag) || same(&serial, other_serial) {
+                    return Err(WipeError::InvalidState(format!(
+                        "drive {} is listed twice",
+                        describe(&tag, &serial)
+                    )));
+                }
+            }
+            wanted.push((tag, serial));
+        }
+
+        // Best-effort: a backend that cannot enumerate must not block
+        // recording dead drives; erasure snapshots and recorded identifiers
+        // still guard against duplicates.
+        let attached: HashMap<wipe_common::DeviceId, String> = match self.backend.enumerate().await
+        {
+            Ok(devices) => devices.into_iter().map(|d| (d.id, d.serial)).collect(),
+            Err(e) => {
+                debug!(
+                    ?e,
+                    "enumeration failed; open-Job serials come from snapshots only"
+                );
+                HashMap::new()
+            }
+        };
+
+        let now = OffsetDateTime::now_utc();
+        let ids = {
+            let mut inner = self.inner.write();
+            for job in inner.jobs.values().filter(|j| !j.state.is_terminal()) {
+                let (tags, serials) = open_job_identifiers(job, &attached);
+                for (tag, serial) in &wanted {
+                    let hit = tag
+                        .as_ref()
+                        .is_some_and(|t| tags.iter().any(|o| o.eq_ignore_ascii_case(t)))
+                        || serial
+                            .as_ref()
+                            .is_some_and(|s| serials.iter().any(|o| o.eq_ignore_ascii_case(s)));
+                    if hit {
+                        return Err(WipeError::InvalidState(format!(
+                            "drive {} matches open job {}; record it for destruction from \
+                             that job instead",
+                            describe(tag, serial),
+                            job.id
+                        )));
+                    }
+                }
+            }
+            let mut ids = Vec::with_capacity(drives.len());
+            for (spec, ev) in &drives {
+                let mut job = Job::new(spec.clone());
+                job.created_at = now;
+                job.state = JobState::PendingDestruction;
+                job.activities.push(JobActivity::Destruction(ev.clone()));
+                ids.push(job.id);
+                inner.jobs.insert(job.id, job);
+            }
+            ids
+        };
+        for (id, (_, ev)) in ids.iter().zip(drives) {
+            self.broadcast_recorded(*id, JobState::Queued, ev);
+        }
+        Ok(ids)
+    }
+
+    /// Every entry into `PendingDestruction` announces the attested
+    /// DestructionEvent and the state change.
+    fn broadcast_recorded(&self, id: Uuid, from: JobState, destruction: DestructionEvent) {
         let _ = self.events.send(JobBroadcast::ActivityAdded {
             job_id: id,
             activity: JobActivity::Destruction(destruction),
@@ -241,20 +356,19 @@ impl JobRunner {
         let _ = self.events.send(JobBroadcast::JobStateChanged {
             job_id: id,
             from,
-            to: wipe_common::JobState::PendingCoSign,
+            to: JobState::PendingDestruction,
             at: OffsetDateTime::now_utc(),
         });
-        Ok(())
     }
 
-    /// Move a `PendingCoSign` Job to `Destroyed`. Called by the manifest
+    /// Move a `PendingDestruction` Job to `Destroyed`. Called by the manifest
     /// signing flow once the supervisor has co-signed the manifest
     /// (and, transitively, every cert it groups).
     pub fn mark_destroyed(&self, id: Uuid) -> WipeResult<()> {
         let job = self.get(id).ok_or(WipeError::JobNotFound(id))?;
-        if job.state != wipe_common::JobState::PendingCoSign {
+        if job.state != JobState::PendingDestruction {
             return Err(WipeError::InvalidState(format!(
-                "job {id} not in PendingCoSign (got {:?})",
+                "job {id} not in PendingDestruction (got {:?})",
                 job.state
             )));
         }
@@ -264,7 +378,7 @@ impl JobRunner {
         });
         let _ = self.events.send(JobBroadcast::JobStateChanged {
             job_id: id,
-            from: wipe_common::JobState::PendingCoSign,
+            from: JobState::PendingDestruction,
             to: wipe_common::JobState::Destroyed,
             at: OffsetDateTime::now_utc(),
         });
@@ -277,7 +391,7 @@ impl JobRunner {
     ///
     /// All-or-nothing: every Job is validated under one write lock before
     /// any is changed, and the call refuses (changing nothing) if any Job is
-    /// missing, listed more than once, not in `PendingCoSign`, already on a
+    /// missing, listed more than once, not in `PendingDestruction`, already on a
     /// manifest, or has no DestructionEvent. The link changes no Job state
     /// and emits no broadcast — a `JobStateChanged` would re-sign the
     /// certificate.
@@ -288,9 +402,9 @@ impl JobRunner {
                 return Err(WipeError::InvalidState(format!("job {id} is listed twice")));
             }
             let job = inner.jobs.get(id).ok_or(WipeError::JobNotFound(*id))?;
-            if job.state != wipe_common::JobState::PendingCoSign {
+            if job.state != JobState::PendingDestruction {
                 return Err(WipeError::InvalidState(format!(
-                    "job {id} not in PendingCoSign (got {:?})",
+                    "job {id} not in PendingDestruction (got {:?})",
                     job.state
                 )));
             }
@@ -383,11 +497,11 @@ impl JobRunner {
     /// one ErasureEvent + Verification to `Erased` (happy path). On
     /// verification failure or wipe failure, the inner ErasureEvent
     /// terminates as `Failed` and the outer Job stays `InProgress` — the
-    /// operator can call `retry_erasure` or `escalate_to_destroy` to drive
+    /// operator can call `retry_erasure` or `record_for_destruction` to drive
     /// it further.
     async fn run_job(&self, id: Uuid) -> WipeResult<()> {
         let job = self.get(id).ok_or(WipeError::JobNotFound(id))?;
-        // An `abort` or `escalate_to_destroy` may land between `start`
+        // An `abort` or `record_for_destruction` may land between `start`
         // returning and this task running; those take precedence, so no
         // erasure is attempted.
         if job.state != wipe_common::JobState::InProgress {
@@ -413,7 +527,7 @@ impl JobRunner {
             Ok(()) => {
                 // Erased — but only if the outer Job hasn't been moved
                 // out from under us. The operator may have called
-                // `abort` or `escalate_to_destroy` while the inner
+                // `abort` or `record_for_destruction` while the inner
                 // ErasureEvent was running; in either case those
                 // explicit transitions take precedence over the
                 // implicit success path.
@@ -437,8 +551,8 @@ impl JobRunner {
             }
             Err(e) => {
                 // Inner ErasureEvent failed. The outer Job stays
-                // InProgress so the operator can decide: retry, escalate
-                // to destroy, or abort.
+                // InProgress so the operator can decide: retry, record
+                // for destruction, or abort.
                 debug!(?e, %id, "erasure failed; awaiting operator action");
                 Err(e)
             }
@@ -635,6 +749,53 @@ impl JobRunner {
 
         Ok(())
     }
+}
+
+fn nonblank(v: Option<&str>) -> Option<String> {
+    v.map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+}
+
+fn same(a: &Option<String>, b: &Option<String>) -> bool {
+    matches!((a, b), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b))
+}
+
+fn describe(tag: &Option<String>, serial: &Option<String>) -> String {
+    match (tag, serial) {
+        (Some(t), Some(s)) => format!("with asset tag {t} and serial {s}"),
+        (Some(t), None) => format!("with asset tag {t}"),
+        (None, Some(s)) => format!("with serial {s}"),
+        (None, None) => "with no identifiers".into(),
+    }
+}
+
+/// The asset tags and serials an open Job already stands for: its spec's
+/// asset tag, its device serial (latest erasure snapshot, else the attached
+/// device), and every identifier recorded on its destruction events.
+fn open_job_identifiers(
+    job: &Job,
+    attached: &HashMap<wipe_common::DeviceId, String>,
+) -> (Vec<String>, Vec<String>) {
+    let mut tags: Vec<String> = nonblank(job.spec.asset_tag.as_deref())
+        .into_iter()
+        .collect();
+    let device_serial = job
+        .latest_erasure()
+        .and_then(|e| nonblank(Some(&e.device_snapshot.serial)))
+        .or_else(|| nonblank(attached.get(&job.spec.device_id).map(String::as_str)));
+    let mut serials: Vec<String> = device_serial.into_iter().collect();
+    for a in &job.activities {
+        if let JobActivity::Destruction(DestructionEvent {
+            attestation: Some(att),
+            ..
+        }) = a
+        {
+            tags.extend(nonblank(att.identifiers.asset_tag.as_deref()));
+            serials.extend(nonblank(att.identifiers.serial.as_deref()));
+        }
+    }
+    (tags, serials)
 }
 
 fn pick_verification_method(method: &wipe_common::Method) -> VerificationMethod {

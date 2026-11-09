@@ -250,41 +250,48 @@ the hardware in front of them. See ADR-0002.
   disposition. Composes one or more typed events and signs one
   **Certificate** covering the full evidence chain. *Avoid: erasure,
   wipe, "the run".* **Today:** only a Job reaching `Erased` or
-  `PendingCoSign` with at least one erasure activity gets a
-  certificate; an Aborted Job, or one escalated before any erasure,
-  gets none.
+  `PendingDestruction` with at least one erasure activity gets a
+  certificate; an Aborted Job, or one recorded for destruction before
+  any erasure (including every Job created from a scanned group), gets
+  none.
 - **JobState** — outer state machine: `Queued → InProgress →
-  (Erased | PendingCoSign → Destroyed | Quarantined | Aborted)`.
+  (Erased | PendingDestruction → Destroyed | Quarantined | Aborted)`.
   Reflects the Asset's terminal disposition, not the progress of any
   single attempt. **Today:** `Quarantined` is declared (and counts as
   terminal) but nothing ever moves a Job into it. The diagram also
-  omits two real paths: `Queued → PendingCoSign` (escalation before
-  the Job starts) and `→ Aborted` from any non-terminal state,
-  `PendingCoSign` included. `start` moves `Queued → InProgress` itself,
+  omits three real paths: `Queued → PendingDestruction` (recorded for
+  destruction before the Job starts), a Job created directly in
+  `PendingDestruction` from a scanned group, and `→ Aborted` from any
+  non-terminal state, `PendingDestruction` included. `start` moves `Queued → InProgress` itself,
   before the erasure task runs, so a second `start` is refused. Aborting a
   Job in any terminal state other than `Aborted` (`Erased`, `Destroyed`,
   `Quarantined`) is refused;
   aborting an already `Aborted` Job is a no-op that succeeds.
-- **PendingCoSign** — the waypoint on the Destroy path: the
-  Asset has been physically destroyed (or scheduled for it), a
-  **DestructionEvent** has captured the evidence, and the Job is waiting
-  for supervisor co-sign on its **DestructionManifest**. Not a terminal
-  state. *Avoid: "pending", "awaiting approval" — the co-signature is
-  the specific thing being waited on.* **Today:** the certificate is
-  signed the moment the Job enters PendingCoSign, with
-  `media_status.operational = false` and a disposition already reading
-  `Destroyed`, before any supervisor has acted; it is servable in that
-  form even if the manifest is never co-signed. Co-sign adds a second
-  signature block, but it is made with the same station signing key and
-  the supervisor is only a recorded name (`OperatorRef`), so it is not
-  an independent signature. A Job escalated before any erasure activity
-  gets no certificate at all, and co-signing a manifest containing it is
-  refused. The co-signature's signer and role sit outside the signed
-  bytes, and `verify-cert` never checks co-signatures. Aborting a
-  PendingCoSign Job is allowed, and its already-signed certificate
-  claiming `Destroyed` stays servable. ADR-0011 (destruction by operator attestation: optional
-  concurrence, one certificate signed when destruction is complete) is
-  accepted and replaces this flow, but is not built.
+- **Pending destruction** (`PendingDestruction`) — the waypoint on
+  the Destroy path: the operator has **Recorded for destruction** the
+  drive, and the Job waits for destruction to be completed on its
+  **DestructionManifest**. Not a terminal state, and nothing in it claims
+  the drive is destroyed: the UI says "pending destruction", never
+  "destroyed". Serialized `pending_destruction`; the pre-ADR-0011 name
+  `pending_co_sign` (`PendingCoSign`) is still accepted on input, and the
+  ADRs keep the old name. The only ways in are the two attested record
+  routes; the runner refuses a DestructionEvent with no attestation.
+  *Avoid: "pending", "awaiting approval", "destroyed".* **Today:** the
+  certificate is signed the moment a Job with an erasure activity
+  enters PendingDestruction, with `media_status.operational = false`
+  and a disposition already reading `Destroyed`, before anyone has
+  completed the destruction; it is servable in that form even if the
+  manifest is never co-signed. Co-sign adds a second signature block,
+  but it is made with the same station signing key and the supervisor is
+  only a recorded name (`OperatorRef`), so it is not an independent
+  signature. A Job recorded before any erasure activity gets no
+  certificate at all, and co-signing a manifest containing it is
+  refused (ADR-0011 story 4 certifies it at `Destroyed`). The
+  co-signature's signer and role sit outside the signed bytes, and
+  `verify-cert` never checks co-signatures. Aborting a
+  PendingDestruction Job is allowed, and its already-signed certificate
+  claiming `Destroyed` stays servable. ADR-0011's second step and
+  single certificate signed at completion are not built yet.
 - **AssetDisposition** — the resolved terminal outcome
   (`Erased | Destroyed | Quarantined`) stated explicitly on the
   certificate so an auditor never re-derives it from the activity chain.
@@ -305,7 +312,7 @@ the hardware in front of them. See ADR-0002.
   and signing are not inner states: they happen on the outer Job. A
   `Failed` ErasureEvent does **not** fail the Job — the Job stays
   `InProgress` awaiting an operator decision. **Today** that decision
-  is escalate to Destroy or abort; retrying or falling back to another
+  is record for destruction or abort; retrying or falling back to another
   Method is not built. A backend error mid-attempt leaves the
   ErasureEvent stuck in whatever state it had reached, never `Failed`.
 - **JobActivity** — the sum type of everything a Job composes:
@@ -326,27 +333,29 @@ the hardware in front of them. See ADR-0002.
 - **DestructionEvent** — chain-of-custody record for physical
   destruction: method (the **Destruction technique**), operator, optional
   supervisor, manifest reference, optional photo references, notes, and
-  an optional `attestation` slot for the operator's **Recorded for
+  an `attestation` slot for the operator's **Recorded for
   destruction** attestation, omitted from the JSON when empty so
   certificates signed before it existed keep their bytes. **Live** — appended by
-  `escalate_to_destroy`; it is what permits a Job to reach `Destroyed`.
-  Escalation is allowed from any non-terminal Job state, including
-  `Queued` with no erasure attempted, not only once erasure attempts
-  are exhausted. `photo_refs` is a schema slot with no capture UX
+  the runner's `record_for_destruction` (an existing Job) or
+  `record_scanned_for_destruction` (a scanned group), both of which
+  refuse an event with no attestation; it is what permits a Job to reach
+  `Destroyed`. Recording is allowed from any non-terminal Job state,
+  including `Queued` with no erasure attempted, not only once erasure
+  attempts are exhausted. `photo_refs` is a schema slot with no capture UX
   (v0.3 #12), and `station_id` is never filled in. The manifest
   reference (`manifest_ref`) is stamped on the Job's latest
   DestructionEvent when the Job is assembled onto a DestructionManifest;
   earlier, superseded DestructionEvents keep it empty, and the signed
   certificate's copy is always empty, regardless of how soon after
-  escalation the manifest is assembled: the certificate generator strips
+  recording the manifest is assembled: the certificate generator strips
   the link before signing.
-  **Today:** escalating while an erasure is Running does not
-  cancel it — the certificate is signed at PendingCoSign while the
-  drive is still being written, and a VerificationEvent may be appended
-  afterwards. Escalating a Job already in PendingCoSign appends another
-  DestructionEvent and re-signs, replacing the stored certificate —
-  unless the Job is already on a DestructionManifest, in which case the
-  escalation is refused so a new DestructionEvent cannot replace the
+  **Today:** recording for destruction while an erasure is Running does
+  not cancel it — the certificate is signed at PendingDestruction while
+  the drive is still being written, and a VerificationEvent may be
+  appended afterwards. Recording a Job already in PendingDestruction
+  appends another DestructionEvent and re-signs, replacing the stored
+  certificate — unless the Job is already on a DestructionManifest, in
+  which case the record is refused so a new DestructionEvent cannot replace the
   record after assembly (aborting a linked Job is still allowed).
 - **DiagnosticEvent / HealthCheckEvent** — pre-flight typed events.
   **Schema-only**: the types and `JobActivity` variants exist and
@@ -354,7 +363,7 @@ the hardware in front of them. See ADR-0002.
   they run always or only when a SanitizationProfile asks is still
   open (§12).
 - **DestructionManifest** — an auditor-facing grouping of N
-  `PendingCoSign` Jobs assembled for a single supervisor co-sign
+  `PendingDestruction` Jobs assembled for a single supervisor co-sign
   action, matching paper-shredder convention. Carries
   `assembled_by`, `job_ids`, `state`
   (`Pending | Signed | Rejected`), the co-signing `supervisor` and
@@ -370,13 +379,13 @@ the hardware in front of them. See ADR-0002.
   assembly stamps no Job. The stored certificate is not re-signed, and
   its copy of the DestructionEvent never carries `manifest_ref`; each
   co-signature block the manifest adds carries it as `manifest_ref`.
-  A Job on a manifest cannot be escalated to destroy again. The
-  Manifests page offers for assembly only `PendingCoSign` Jobs with no
+  A Job on a manifest cannot be recorded for destruction again. The
+  Manifests page offers for assembly only `PendingDestruction` Jobs with no
   `manifest_id` that are on no pending or signed manifest, and submits
   only ticked Jobs it still offers; the server remains the authority.
   Co-sign happens on that same station with its own key; the signer
   and role sit outside the signed bytes and `verify-cert` never checks
-  co-signatures (see **PendingCoSign**). There is no reject route
+  co-signatures (see **Pending destruction**). There is no reject route
   (`Rejected` is never set), so a manifest whose co-sign is refused stays `Pending`, and its
   Jobs cannot join another manifest until the station restarts. Under ADR-0011 (accepted, not built) the manifest
   stays as the batch record but co-sign becomes optional. It carries
@@ -390,7 +399,33 @@ the hardware in front of them. See ADR-0002.
   rendered only by `DestructionAttestation::new`, which refuses blank
   fields or a drive with neither identifier. Held on the
   DestructionEvent's `attestation`. *Avoid: "destroyed" for a drive in
-  this state.* **Today:** schema only; nothing produces it.
+  this state; "escalate to destroy", the unattested route it replaced.*
+  **Live**, two ways, each moving the Job to **Pending destruction**:
+  - *From a Job* (`POST /api/jobs/:id/record-for-destruction`, the
+    "Record for destruction" dialog on a Queued or InProgress Job's
+    page). The server decides the identifier source: `scanned` when the
+    operator typed or scanned identifiers, otherwise `device` — the
+    serial from the latest erasure snapshot, else from the attached
+    device with the Job's `device_id`, beside the Job's asset tag. A
+    device-sourced record with no readable serial is refused (422,
+    telling the operator to scan), never recorded on the asset tag
+    alone.
+  - *From a scanned group* (`POST /api/destruction/records`, the
+    "Record for destruction" scan screen), for dead drives or drives
+    meant for destruction from the start: one new Job per drive, intent
+    `destroy`, device id `scanned:<serial, else asset tag>`, each with
+    its own attestation sharing one statement and one time.
+    All-or-nothing: a blank field, a drive with no identifier or a
+    repeated asset tag or serial is 422; a drive matching the asset tag
+    or serial of a non-terminal Job is 409 naming that Job, so the
+    operator records from it instead.
+
+  Both need `"attest": true`; without it nothing is recorded (422). The
+  operator first reads the statement from `POST
+  /api/destruction/statement` (`attestation_statement`, the same
+  function `DestructionAttestation::new` uses), then ticks "I attest".
+  The certificate trigger is unchanged, so a never-erased drive in
+  pending destruction has no certificate until ADR-0011 story 4.
 - **Destruction completed** — the second attested step, per
   DestructionManifest (one destruction run): completion time,
   verification (remnants inspected against a named criterion, the
@@ -408,21 +443,21 @@ the hardware in front of them. See ADR-0002.
   or `witness`. Held on the manifest's `concurrence`. **Today:** schema
   only; nothing produces it, and the policy is not yet a station
   setting. *Avoid: "co-sign" for this; "co-sign" names today's
-  PendingCoSign flow.*
+  manifest supervisor flow.*
 - **Identity assurance** — how sure a destruction record is of who
   signed it: `self_asserted` (the typed full name and title, with an
   explicit "I attest", is the signature) or `verified` (issuer and
   subject from the customer's identity provider, once the licence has
   the `operator_sso` Feature and SSO sign-in exists). Shown as
-  "Self-asserted" or "Verified by {issuer}". **Today:** schema only;
-  nothing produces a record, only `self_asserted` can be constructed,
-  and `operator_sso` gates nothing.
+  "Self-asserted" or "Verified by {issuer}". **Today:** every
+  **Recorded for destruction** attestation is `self_asserted`; only that
+  level can be constructed, and `operator_sso` gates nothing.
 - **Destruction technique** — what the bench physically did
   (`DestructMethod`): shred, disintegrate, incinerate, pulverize and
   melt are labelled `NIST SP 800-88 Destroy`; crush, punch, degauss and
   drill are labelled `physical damage — not NIST Destroy`. Shred and
   pulverize carry NIST Rev. 2's caution when the Job's classification
-  is above Low. **Today:** the escalate dialog offers all nine, grouped
+  is above Low. **Today:** both record-for-destruction screens offer all nine, grouped
   by label, and shows the caution; the Job and certificate pages show
   the technique's name and label. Automatic method selection for a
   Destroy intent still picks only disintegrate.
@@ -815,9 +850,10 @@ folder or in `.scratch/DECISIONS.md`.
 | Surface | Ref | State | As-built gaps |
 | --- | --- | --- | --- |
 | Outer-Job composition — `Job` → `ErasureEvent`, new outer `Job` + `JobState`, `JobActivity` sum type, `JobEvent` → `JobUpdate` | §11 #2 / ADR-0001 | ✅ partial | One ErasureEvent per Job (no retries/fallback); `Quarantined` never entered; `station_id` never recorded |
-| Destroy path — `DestructionEvent`, `PendingCoSign`, `DestructionManifest`, supervisor co-sign | ADR-0001 | ✅ partial | Co-sign uses the **station** key, and signer/role sit outside the signed bytes — it is a second signature, not an independent one; `verify-cert` ignores co-signatures. `manifest_id` / `manifest_ref` are stamped on assembly (not inside the signed cert), and a Job on a manifest cannot be re-escalated. A never-erased Job can no longer be finalised uncertified (c779361), but how to certify it is open |
+| Destroy path — `DestructionEvent`, `PendingDestruction` (was `PendingCoSign`), `DestructionManifest`, supervisor co-sign | ADR-0001 / ADR-0011 | ✅ partial | Co-sign uses the **station** key, and signer/role sit outside the signed bytes — it is a second signature, not an independent one; `verify-cert` ignores co-signatures. `manifest_id` / `manifest_ref` are stamped on assembly (not inside the signed cert), and a Job on a manifest cannot be recorded for destruction again. A never-erased Job can no longer be finalised uncertified (c779361); ADR-0011 story 4 certifies it |
+| Recorded for destruction (ADR-0011 §1, first step) — `POST /api/jobs/:id/record-for-destruction` (an existing Job; identifiers read from the device unless scanned), `POST /api/destruction/records` (a scanned group, one new Job per drive, all-or-nothing, 409 naming a matching open Job), `POST /api/destruction/statement` (the statement preview); the runner refuses a DestructionEvent with no attestation; `escalate-to-destroy` removed (now a JSON 404, as is every unknown `/api/*` path); Job-page "Record for destruction" dialog and the "Record for destruction" scan screen (`/destruction/record`), both reviewing the server-rendered statement and requiring "I attest" | ADR-0011 / destruction-attestation story 2 | ✅ partial | Self-asserted identity only (no SSO); a never-erased drive in pending destruction has no certificate until story 4; "Destruction completed" and concurrence are still schema only (story 3); scanned-group duplicate detection only sees Jobs in this station's RAM |
 | Certificate schema v2 — `activities` chain and explicit `AssetDisposition` | ADR-0001 | ✅ partial | v1 certs do **not** verify under v2 (see the ADR-0001 addendum) |
-| REST: escalate-to-destroy, manifests, co-sign | ADR-0001 | ✅ | As built: on start, abort and escalate-to-destroy an unknown Job is 404 and a transition its state does not allow is 409; on co-sign an unknown manifest is 404, and a manifest that is not pending or has a member Job not in `PendingCoSign` is 409 (all `{"error": …}`); other runner failures stay 500 |
+| REST: record-for-destruction, manifests, co-sign | ADR-0001 | ✅ | As built: on start, abort and record-for-destruction an unknown Job is 404 and a transition its state does not allow is 409; a record request that is not attested, has a blank field or (device-sourced) no readable serial is 422; on co-sign an unknown manifest is 404, and a manifest that is not pending or has a member Job not in `PendingDestruction` is 409 (all `{"error": …}`); other runner failures stay 500 |
 | React UI: activity timeline on Job Detail + Manifests page | ADR-0001 | ✅ | |
 | At-a-glance bench status overlay on the Devices page | §11 #3 | ✅ | |
 | Configurable bay topology + generated SVG bay map | §11 #10 / ADR-0002 | ✅ | UI templates differ from the Rust presets |
@@ -866,7 +902,8 @@ keep resolving.
    synthesises the very command evidence the product's value rests on.**
 2. ~~**Job as outcome-bearing composition** (ADR-0001)~~ — **SHIPPED**
    (see §10.2). Renamed `Job` → `ErasureEvent`, introduced the outer
-   `Job` + `JobState` with `PendingCoSign` on the Destroy path,
+   `Job` + `JobState` with `PendingCoSign` (since renamed
+   `PendingDestruction`, ADR-0011) on the Destroy path,
    introduced `JobActivity` composition, renamed `JobEvent` →
    `JobUpdate`, moved the cert schema to v2, and added the
    `DestructionManifest` supervisor co-sign flow. Diagnostic and
@@ -1012,7 +1049,8 @@ and resolve. None of these have a decided answer.
   pending-Destroy state for supervisor sign-off, or always require an
   explicit supervisor action to escalate? *Code today takes the
   explicit path: a failed ErasureEvent leaves the Job `InProgress` and
-  escalation happens only via `POST /api/jobs/:id/escalate-to-destroy`.
+  the operator records it for destruction only via `POST
+  /api/jobs/:id/record-for-destruction`.
   There is no auto-routing and no N-failure counter — v0.3 #13.*
 - ~~**Verification** — first-class `VerificationEvent`, or embedded in
   each ErasureEvent's state machine?~~ **RESOLVED in code (ADR-0001):
@@ -1179,8 +1217,8 @@ and resolve. None of these have a decided answer.
 - **Job** — the outcome-bearing unit of processing one Asset to a
   terminal disposition (Erased / Destroyed / Quarantined / Aborted);
   composes one or more typed events; signs one Certificate (today only
-  on reaching Erased or PendingCoSign with an erasure activity, so an
-  Aborted Job or one escalated before any erasure gets none).
+  on reaching Erased or PendingDestruction with an erasure activity, so an
+  Aborted Job or one recorded for destruction before any erasure gets none).
 - **ErasureEvent** — one attempted wipe within a Job. The model allows
   several per Job (retry, method fallback), but today a Job holds at
   most one: retry is not built. This is what the v0.1 code called
@@ -1190,12 +1228,14 @@ and resolve. None of these have a decided answer.
 - **JobUpdate** — the low-level streamed record of a running event
   (state change, progress, command, warning). Renamed from `JobEvent`
   in v0.2; `JobEvent` no longer exists.
-- **PendingCoSign** — non-terminal Job state on the Destroy path:
-  destruction evidence captured, awaiting supervisor co-sign on the
-  DestructionManifest. Today the cert is already signed on entry,
-  claiming `Destroyed`; a Job with no erasure activity gets none.
-  ADR-0011 (accepted, not built) replaces this.
-- **DestructionManifest** — auditor-facing grouping of N PendingCoSign
+- **Pending destruction** (`PendingDestruction`, serialized
+  `pending_destruction`; old name `PendingCoSign` / `pending_co_sign`
+  still accepted on input) — non-terminal Job state on the Destroy
+  path: recorded for destruction, awaiting completion on the
+  DestructionManifest. Never "destroyed". Today the cert is already
+  signed on entry, claiming `Destroyed`; a Job with no erasure activity
+  gets none.
+- **DestructionManifest** — auditor-facing grouping of N PendingDestruction
   Jobs signed off by one supervisor action; on co-sign each member
   Job's cert gains a second signature block and the Job becomes
   Destroyed. Today that block is signed with the same station key (the
@@ -1205,14 +1245,15 @@ and resolve. None of these have a decided answer.
   Assembly stamps the manifest id on each member Job (`manifest_id`)
   and its latest DestructionEvent (`manifest_ref`). **Not** a Batch.
 - **Recorded for destruction** — the operator's signed attestation that
-  a drive went into the destruction process (ADR-0011). Schema only today.
+  a drive went into the destruction process (ADR-0011), from a Job or for
+  a scanned group of drives; moves the Job to pending destruction.
 - **Destruction completed** — the signed confirmation that a manifest's
   destruction run finished and its remnants were inspected. Schema only today.
 - **Concurrence** — optional second signer per manifest, `review` or
   `witness`; site policy `none` (default) / `review` / `witness`. Schema only today.
 - **Identity assurance** — `self_asserted` or `verified` (identity
   provider, `operator_sso` Feature) on a destruction record's signer.
-  Schema only today.
+  Every record today is `self_asserted`.
 - **Destruction technique** — nine techniques; five are NIST Destroy,
   crush/punch/degauss/drill are "physical damage — not NIST Destroy".
 - **AssetDisposition** — the resolved terminal outcome

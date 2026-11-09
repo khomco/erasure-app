@@ -7,7 +7,7 @@ import type { DestructionManifest, Job } from "@/api/types";
  * Mirrors the refusals of `create_manifest`
  * (`crates/wipe-server/src/handlers.rs`) that an operator can hit from this
  * page: a Job listed on a manifest that is not `rejected`, a Job not in
- * `PendingCoSign`, and a Job that already carries a `manifest_id`. It does
+ * `PendingDestruction`, and a Job that already carries a `manifest_id`. It does
  * not mirror every server refusal (empty, duplicate or unknown ids, a Job
  * with no DestructionEvent). The Jobs and manifests lists are polled
  * separately, so either may be a poll behind; checking both keeps a Job off
@@ -25,7 +25,7 @@ export function assemblableJobs(
   }
   return jobs.filter(
     (j) =>
-      j.state.state === "pending_co_sign" &&
+      j.state.state === "pending_destruction" &&
       !j.manifest_id &&
       !onLiveManifest.has(j.id),
   );

@@ -10,7 +10,7 @@ import { assemblableJobs, offeredSelection } from "./manifestAssembly";
 
 function job(
   id: string,
-  state: JobStateLabel = "pending_co_sign",
+  state: JobStateLabel = "pending_destruction",
   manifest_id: string | null = null,
 ): Job {
   return { id, state: { state }, manifest_id } as Job;
@@ -27,12 +27,12 @@ function manifest(
 const ids = (jobs: Job[]) => jobs.map((j) => j.id);
 
 describe("assemblableJobs", () => {
-  it("offers a PendingCoSign Job with no manifest_id on no manifest", () => {
+  it("offers a PendingDestruction Job with no manifest_id on no manifest", () => {
     expect(ids(assemblableJobs([job("a")], []))).toEqual(["a"]);
   });
 
   it("does not offer a Job already stamped with a manifest_id", () => {
-    expect(assemblableJobs([job("a", "pending_co_sign", "m1")], [])).toEqual([]);
+    expect(assemblableJobs([job("a", "pending_destruction", "m1")], [])).toEqual([]);
   });
 
   it("does not offer a Job listed on a pending manifest before the Jobs poll shows the stamp", () => {
@@ -76,7 +76,7 @@ describe("assemblableJobs", () => {
       job("c"),
       job("b", "erased"),
       job("a"),
-      job("d", "pending_co_sign", "m1"),
+      job("d", "pending_destruction", "m1"),
       job("e"),
     ];
     expect(ids(assemblableJobs(jobs, [manifest("m2", ["e"])]))).toEqual([

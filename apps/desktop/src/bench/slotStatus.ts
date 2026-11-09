@@ -19,7 +19,7 @@ export type SlotStatus =
   | { kind: "wiping"; job: Job; erasure: ErasureEvent | null }
   | { kind: "erased"; job: Job }
   | { kind: "failed"; job: Job; erasure: ErasureEvent }
-  | { kind: "pending_co_sign"; job: Job }
+  | { kind: "pending_destruction"; job: Job }
   | { kind: "destroyed"; job: Job }
   | { kind: "quarantined"; job: Job }
   | { kind: "aborted"; job: Job };
@@ -48,8 +48,8 @@ export function deriveSlotStatus(job: Job | undefined): SlotStatus {
       return { kind: "wiping", job, erasure: erasure ?? null };
     case "erased":
       return { kind: "erased", job };
-    case "pending_co_sign":
-      return { kind: "pending_co_sign", job };
+    case "pending_destruction":
+      return { kind: "pending_destruction", job };
     case "destroyed":
       return { kind: "destroyed", job };
     case "quarantined":
@@ -114,8 +114,8 @@ export const SLOT_TONE: Record<SlotStatusKind, SlotTone> = {
     accent: "#fbbf24",
     text: "#fde68a",
   },
-  pending_co_sign: {
-    label: "co-sign",
+  pending_destruction: {
+    label: "pending destruction",
     stroke: "#818cf8",
     fill: "#181c33",
     accent: "#a5b4fc",
@@ -148,7 +148,7 @@ export const SLOT_TONE: Record<SlotStatusKind, SlotTone> = {
 export const ATTENTION_KINDS: SlotStatusKind[] = [
   "failed",
   "quarantined",
-  "pending_co_sign",
+  "pending_destruction",
 ];
 
 /** Fractional progress 0..1 for a wiping slot, or null when unknown. */

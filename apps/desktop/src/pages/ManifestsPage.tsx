@@ -29,7 +29,7 @@ export function ManifestsPage() {
       <div>
         <h2 className="text-lg font-semibold">Destruction manifests</h2>
         <p className="text-xs text-slate-400">
-          Batched supervisor co-sign for Jobs in <span className="font-mono">pending_co_sign</span>.
+          Batched supervisor co-sign for Jobs in <span className="font-mono">pending_destruction</span>.
           Tier-1: local sync co-sign at the lead station.
         </p>
       </div>
@@ -87,7 +87,7 @@ function PendingJobsCard({ jobs, loading }: { jobs: Job[]; loading: boolean }) {
   if (jobs.length === 0) {
     return (
       <div className="card text-sm text-slate-400">
-        No Jobs awaiting manifest assignment. (Escalate a Job to destroy to see one
+        No Jobs awaiting manifest assignment. (Record a Job for destruction to see one
         here.)
       </div>
     );

@@ -258,7 +258,7 @@ function BayLegend() {
     "wiping",
     "erased",
     "failed",
-    "pending_co_sign",
+    "pending_destruction",
     "destroyed",
     "quarantined",
   ];
@@ -360,7 +360,7 @@ function toneFor(status: SlotStatus): Tone {
         bg: "bg-amber-500/5",
         pill: "pill-warning",
       };
-    case "pending_co_sign":
+    case "pending_destruction":
       return {
         border: "border-indigo-400/60",
         bg: "bg-indigo-400/5",
@@ -412,10 +412,10 @@ function badgeContent(status: SlotStatus): { icon: React.ReactNode; label: strin
         icon: <AlertTriangle className="h-3 w-3" />,
         label: "needs attention",
       };
-    case "pending_co_sign":
+    case "pending_destruction":
       return {
         icon: <FileSignature className="h-3 w-3" />,
-        label: "pending co-sign",
+        label: "pending destruction",
       };
     case "destroyed":
       return { icon: <Trash2 className="h-3 w-3" />, label: "destroyed" };
@@ -471,10 +471,10 @@ function StatusBody({ status }: { status: SlotStatus }) {
           Erasure attempt failed — operator action required.
         </div>
       );
-    case "pending_co_sign":
+    case "pending_destruction":
       return (
         <div className="mt-3 text-xs text-indigo-300">
-          Awaiting supervisor co-sign on a destruction manifest.
+          Recorded for destruction; pending destruction on a manifest.
         </div>
       );
     case "destroyed":
@@ -514,7 +514,7 @@ function Actions({
       );
     case "wiping":
     case "failed":
-    case "pending_co_sign":
+    case "pending_destruction":
       return (
         <Link
           to="/jobs/$jobId"

@@ -124,6 +124,31 @@ pub struct DestructionAttestation {
     pub statement: String,
 }
 
+/// The "recorded for destruction" statement for these inputs, exactly as
+/// [`DestructionAttestation::new`] stores it. Trims and refuses blank fields
+/// the same way, so a preview shown to the operator before "I attest" is the
+/// text a record with the same inputs signs.
+pub fn attestation_statement(
+    technique: DestructMethod,
+    full_name: &str,
+    title: &str,
+    equipment_id: &str,
+    location: &str,
+) -> Result<String, DestructionRecordError> {
+    let full_name = required("full_name", full_name)?;
+    let title = required("title", title)?;
+    let equipment_id = required("equipment_id", equipment_id)?;
+    let location = required("location", location)?;
+    Ok(format!(
+        "I, {full_name}, {title}, recorded the storage device(s) listed above for destruction \
+         by {} using {equipment_id} at {location}. I attest that the identifiers shown were \
+         captured from the devices themselves and that these devices are being placed into \
+         the destruction process now. I attest that the information provided on this \
+         statement is accurate to the best of my knowledge.",
+        technique.human_name(),
+    ))
+}
+
 impl DestructionAttestation {
     /// `technique` is used only to render the statement; it is recorded once,
     /// as `DestructionEvent::method`, so the two cannot disagree.
@@ -146,18 +171,13 @@ impl DestructionAttestation {
         if identifiers.asset_tag.is_none() && identifiers.serial.is_none() {
             return Err(DestructionRecordError::NoIdentifier);
         }
-        let statement = format!(
-            "I, {}, {}, recorded the storage device(s) listed above for destruction by {} \
-             using {} at {}. I attest that the identifiers shown were captured from the \
-             devices themselves and that these devices are being placed into the destruction \
-             process now. I attest that the information provided on this statement is \
-             accurate to the best of my knowledge.",
-            signer.full_name,
-            signer.title,
-            technique.human_name(),
-            equipment_id,
-            location,
-        );
+        let statement = attestation_statement(
+            technique,
+            &signer.full_name,
+            &signer.title,
+            &equipment_id,
+            &location,
+        )?;
         Ok(Self {
             at,
             equipment_id,
@@ -399,6 +419,37 @@ mod tests {
         assert_eq!(v["location"], "Bay 3");
         let back: DestructionAttestation = serde_json::from_value(v).unwrap();
         assert_eq!(back, a);
+    }
+
+    #[test]
+    fn the_statement_function_matches_what_new_stores() {
+        for technique in [
+            DestructMethod::Shred,
+            DestructMethod::Crush,
+            DestructMethod::Degauss,
+        ] {
+            let a = DestructionAttestation::new(
+                technique,
+                datetime!(2026-11-08 10:00 UTC),
+                " SHR-2 ",
+                "Bay 3 ",
+                scanned(Some("AT-1"), None),
+                signer(),
+            )
+            .unwrap();
+            assert_eq!(
+                attestation_statement(technique, " Ana Ruiz ", "Bench lead", " SHR-2 ", "Bay 3 "),
+                Ok(a.statement)
+            );
+        }
+        assert_eq!(
+            attestation_statement(DestructMethod::Shred, "Ana", "Lead", "SHR-2", " "),
+            Err(DestructionRecordError::Blank("location"))
+        );
+        assert_eq!(
+            attestation_statement(DestructMethod::Shred, "", "Lead", "SHR-2", "Bay 3"),
+            Err(DestructionRecordError::Blank("full_name"))
+        );
     }
 
     #[test]

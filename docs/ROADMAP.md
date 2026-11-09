@@ -405,7 +405,7 @@ build.** Three frontends, one engine.
 - **O-R2 Batch work.** Operators process drives in trays, not one at a time.
   Multi-select on the bay map, start N jobs with a shared spec, watch them as a
   queue. Today every job is created individually.
-- **O-R3 An exception inbox.** Failures, quarantine, escalate-to-destroy and
+- **O-R3 An exception inbox.** Failures, quarantine, record-for-destruction and
   co-sign exist as API and as the Manifests page, but nothing tells an operator
   *"these four drives need you"*. This is where a busy bench actually loses
   drives.
@@ -446,7 +446,7 @@ build.** Three frontends, one engine.
   tray in one gesture.
 
 **O2 — Not losing drives**
-- O2.1 Exception inbox: failures, quarantine, escalations, awaiting co-sign.
+- O2.1 Exception inbox: failures, quarantine, pending destruction, awaiting co-sign.
 - O2.2 Failure routing (CONTEXT §11 v0.3 #13) surfaced in the inbox.
 - O2.3 Reboot/session recovery UX (O-R7).
 - O2.4 Label + offline-verifiable QR printing.

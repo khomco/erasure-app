@@ -13,6 +13,7 @@ import { CertificatePage } from "./pages/CertificatePage";
 import { FleetPage } from "./pages/FleetPage";
 import { ManifestsPage } from "./pages/ManifestsPage";
 import { BenchSetupPage } from "./pages/BenchSetupPage";
+import { RecordForDestructionPage } from "./pages/RecordForDestructionPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -67,6 +68,12 @@ const manifestsRoute = createRoute({
   component: ManifestsPage,
 });
 
+const recordForDestructionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/destruction/record",
+  component: RecordForDestructionPage,
+});
+
 const benchSetupRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/bench-setup",
@@ -80,6 +87,7 @@ const routeTree = rootRoute.addChildren([
   certRoute,
   fleetRoute,
   manifestsRoute,
+  recordForDestructionRoute,
   benchSetupRoute,
 ]);
 

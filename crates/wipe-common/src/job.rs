@@ -52,18 +52,20 @@ pub struct JobSpec {
 /// Outer Job state machine: reflects the Asset's terminal disposition,
 /// not any single attempt's progress.
 ///
-/// `PendingCoSign` is the audit-honest state for the Destroy path: the
-/// Asset has been physically destroyed (or scheduled for it), evidence
-/// has been captured, and the Job is waiting for supervisor co-sign on
-/// a `DestructionManifest`. Cryptographically, each cert in a manifest
-/// gets its own supervisor signature attached via `manifest_ref`.
+/// `PendingDestruction` is the audit-honest state for the Destroy path
+/// (ADR-0011): the operator has recorded the Asset for destruction with a
+/// `DestructionAttestation`, and the Job waits for destruction to be
+/// completed on a `DestructionManifest`. Nothing in this state claims the
+/// Asset is destroyed. Serialized `pending_destruction`; the pre-ADR-0011
+/// name `pending_co_sign` is still accepted on input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum JobState {
     Queued,
     InProgress,
-    /// Awaiting supervisor co-sign on the linked DestructionManifest.
-    PendingCoSign,
+    /// Recorded for destruction; awaiting destruction on a DestructionManifest.
+    #[serde(alias = "pending_co_sign")]
+    PendingDestruction,
     Erased,
     Destroyed,
     Quarantined,
@@ -232,7 +234,7 @@ pub struct Job {
     pub state: JobState,
     /// Typed activities in event order. The cert composes these.
     pub activities: Vec<JobActivity>,
-    /// Manifest this Job is rolled into when in `PendingCoSign`.
+    /// Manifest this Job is rolled into when in `PendingDestruction`.
     pub manifest_id: Option<Uuid>,
     /// Set once the outer Job's cert has been generated and signed.
     pub certificate_id: Option<String>,
@@ -293,7 +295,7 @@ pub struct DestructionManifest {
     pub created_at: OffsetDateTime,
     /// Operator who assembled the manifest (typically the floor lead).
     pub assembled_by: OperatorRef,
-    /// Jobs included in this manifest. Each is in `PendingCoSign` until
+    /// Jobs included in this manifest. Each is in `PendingDestruction` until
     /// the manifest is signed.
     pub job_ids: Vec<Uuid>,
     pub state: ManifestState,
@@ -367,6 +369,18 @@ mod tests {
         let again = serde_json::to_value(&e).unwrap();
         assert!(again.get("attestation").is_none());
         assert_eq!(again, old);
+    }
+
+    #[test]
+    fn the_old_pending_co_sign_name_still_deserializes() {
+        let s: JobState = serde_json::from_value(json!({"state": "pending_co_sign"})).unwrap();
+        assert_eq!(s, JobState::PendingDestruction);
+        assert_eq!(
+            serde_json::to_value(s).unwrap(),
+            json!({"state": "pending_destruction"})
+        );
+        let s: JobState = serde_json::from_value(json!({"state": "pending_destruction"})).unwrap();
+        assert_eq!(s, JobState::PendingDestruction);
     }
 
     #[test]

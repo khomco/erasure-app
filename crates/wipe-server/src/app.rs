@@ -2,7 +2,7 @@ use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{
     response::IntoResponse,
-    routing::{get, post},
+    routing::{any, get, post},
     Router,
 };
 use parking_lot::RwLock;
@@ -193,7 +193,7 @@ impl AppState {
     }
 
     /// Watches the job runner's broadcast channel. On `Erased`, generates +
-    /// signs a Certificate. On `PendingCoSign` we generate the cert and
+    /// signs a Certificate. On `PendingDestruction` we generate the cert and
     /// hold it; the supervisor co-signature is attached when the linked
     /// manifest is signed (see `handlers::cosign_manifest`).
     fn spawn_cert_generator(&self) {
@@ -207,7 +207,7 @@ impl AppState {
                 };
                 let needs_cert = matches!(
                     new_state,
-                    wipe_common::JobState::Erased | wipe_common::JobState::PendingCoSign
+                    wipe_common::JobState::Erased | wipe_common::JobState::PendingDestruction
                 );
                 if !needs_cert {
                     continue;
@@ -231,15 +231,15 @@ impl AppState {
                     validation_expires: None,
                 };
                 let media_status = wipe_cert::MediaStatus {
-                    operational: !matches!(new_state, wipe_common::JobState::PendingCoSign),
+                    operational: !matches!(new_state, wipe_common::JobState::PendingDestruction),
                     damaged: false,
                     notes: None,
                 };
-                // For PendingCoSign we temporarily synthesize a Destroyed
+                // For PendingDestruction we temporarily synthesize a Destroyed
                 // disposition on the cert so the document is meaningful;
                 // the manifest cosign flow finalises the Job to Destroyed.
                 let mut job_for_cert = job.clone();
-                if new_state == wipe_common::JobState::PendingCoSign {
+                if new_state == wipe_common::JobState::PendingDestruction {
                     job_for_cert.state = wipe_common::JobState::Destroyed;
                     if job_for_cert.ended_at.is_none() {
                         job_for_cert.ended_at = Some(time::OffsetDateTime::now_utc());
@@ -247,7 +247,7 @@ impl AppState {
                 }
                 // A DestructionEvent's `manifest_ref` is stamped on the live
                 // Job at assembly and never belongs in the signed bytes. The
-                // generator runs after the escalate request has returned, so a
+                // generator runs after the record request has returned, so a
                 // manifest assembled in that gap would otherwise be signed in;
                 // clear it so the certificate does not depend on request timing.
                 for activity in &mut job_for_cert.activities {
@@ -335,8 +335,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/:id/start", post(handlers::start_job))
         .route("/api/jobs/:id/abort", post(handlers::abort_job))
         .route(
-            "/api/jobs/:id/escalate-to-destroy",
-            post(handlers::escalate_to_destroy),
+            "/api/jobs/:id/record-for-destruction",
+            post(handlers::record_for_destruction),
+        )
+        .route("/api/destruction/records", post(handlers::record_scanned))
+        .route(
+            "/api/destruction/statement",
+            post(handlers::preview_attestation_statement),
         )
         .route("/api/jobs/:id/certificate", get(handlers::get_certificate))
         .route(
@@ -348,7 +353,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sim/devices/attach", post(handlers::sim_attach))
         .route("/api/sim/devices/detach", post(handlers::sim_detach))
         .route("/api/sim/devices", get(handlers::sim_detached))
-        .route("/api/events", get(ws::ws_events));
+        .route("/api/events", get(ws::ws_events))
+        // An unknown API path is a JSON 404, never the frontend or the
+        // API-only landing page: a client calling a removed route (such as
+        // the old `escalate-to-destroy`) must see that it is gone.
+        .route("/api/*rest", any(unknown_api_route));
 
     // Mount static frontend at `/` if a dist directory is configured.
     // ServeDir resolves files; for any path it can't resolve (SPA routes
@@ -374,6 +383,13 @@ pub fn router(state: AppState) -> Router {
     api.merge(root)
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+async fn unknown_api_route(uri: axum::http::Uri) -> impl IntoResponse {
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        axum::Json(serde_json::json!({ "error": format!("no API route {}", uri.path()) })),
+    )
 }
 
 /// Friendly response when the binary is run without a frontend bundle attached.

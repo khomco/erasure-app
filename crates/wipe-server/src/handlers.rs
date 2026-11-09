@@ -9,9 +9,10 @@ use serde_json::json;
 use uuid::Uuid;
 
 use wipe_common::{
-    Capabilities, Classification, DestructMethod, DestructionEvent, DestructionManifest, Device,
-    DeviceId, Intent, Job, JobSpec, ManifestState, OperatorRef, ResolvedBayTopology, StationId,
-    StationInfo, WipeError,
+    attestation_statement, AttestationSigner, Capabilities, Classification, DestructMethod,
+    DestructionAttestation, DestructionEvent, DestructionManifest, DestructionRecordError, Device,
+    DeviceId, IdentifierSource, Intent, Job, JobSpec, ManifestState, OperatorRef,
+    RecordedIdentifiers, ResolvedBayTopology, StationId, StationInfo, WipeError,
 };
 
 use crate::app::AppState;
@@ -267,18 +268,148 @@ pub async fn abort_job(
     Ok(Json(json!({"ok": true, "job_id": id})))
 }
 
+// ---- Record for destruction (ADR-0011 §1, first step) ------------------
+
+/// Identifiers the operator scanned (bar code or typed) from a drive.
+#[derive(Debug, Default, Deserialize)]
+pub struct ScannedIdentifiers {
+    #[serde(default)]
+    pub asset_tag: Option<String>,
+    #[serde(default)]
+    pub serial: Option<String>,
+}
+
+/// What the operator attests to when recording for destruction. Text
+/// fields default to empty so a missing one is refused by the
+/// `DestructionAttestation` constructors with the field's name.
 #[derive(Debug, Deserialize)]
-pub struct EscalateRequest {
+pub struct AttestationFields {
     pub method: DestructMethod,
+    #[serde(default)]
+    pub equipment_id: String,
+    #[serde(default)]
+    pub location: String,
     pub operator: OperatorRef,
+    #[serde(default)]
+    pub full_name: String,
+    #[serde(default)]
+    pub title: String,
+    /// The operator ticked "I attest" against the displayed statement.
+    #[serde(default)]
+    pub attest: bool,
+    #[serde(default)]
     pub notes: Option<String>,
 }
 
-pub async fn escalate_to_destroy(
+#[derive(Debug, Deserialize)]
+pub struct RecordForDestructionRequest {
+    #[serde(flatten)]
+    pub fields: AttestationFields,
+    /// Present when the operator scanned the identifiers; the record's
+    /// source is then `scanned`. Absent, the server reads them from the
+    /// device (`source: device`).
+    #[serde(default)]
+    pub identifiers: Option<ScannedIdentifiers>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecordScannedRequest {
+    #[serde(flatten)]
+    pub fields: AttestationFields,
+    pub classification: Classification,
+    #[serde(default)]
+    pub drives: Vec<ScannedIdentifiers>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecordScannedResponse {
+    pub job_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StatementPreviewRequest {
+    pub method: DestructMethod,
+    #[serde(default)]
+    pub equipment_id: String,
+    #[serde(default)]
+    pub location: String,
+    #[serde(default)]
+    pub full_name: String,
+    #[serde(default)]
+    pub title: String,
+}
+
+fn unprocessable(msg: impl Into<String>) -> ApiError {
+    ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg.into())
+}
+
+fn record_err(e: DestructionRecordError) -> ApiError {
+    unprocessable(e.to_string())
+}
+
+fn require_attest(fields: &AttestationFields) -> Result<(), ApiError> {
+    if fields.attest {
+        Ok(())
+    } else {
+        Err(unprocessable(
+            "the operator must confirm \"I attest\" against the statement; nothing was recorded",
+        ))
+    }
+}
+
+fn nonblank(v: Option<&str>) -> Option<String> {
+    v.map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+}
+
+/// Build the attested `DestructionEvent` through the story-1 constructors,
+/// so blank fields and missing identifiers are refused with their names.
+fn attested_event(
+    fields: &AttestationFields,
+    device_id: DeviceId,
+    identifiers: RecordedIdentifiers,
+    at: time::OffsetDateTime,
+) -> Result<DestructionEvent, ApiError> {
+    let signer =
+        AttestationSigner::self_asserted(fields.operator.clone(), &fields.full_name, &fields.title)
+            .map_err(record_err)?;
+    let attestation = DestructionAttestation::new(
+        fields.method,
+        at,
+        &fields.equipment_id,
+        &fields.location,
+        identifiers,
+        signer,
+    )
+    .map_err(record_err)?;
+    Ok(DestructionEvent {
+        id: Uuid::new_v4(),
+        device_id,
+        at,
+        method: fields.method,
+        operator: fields.operator.clone(),
+        supervisor: None,
+        manifest_ref: None,
+        photo_refs: Vec::new(),
+        notes: nonblank(fields.notes.as_deref()),
+        station_id: None,
+        attestation: Some(attestation),
+    })
+}
+
+/// Record an existing Job for destruction. The identifier source is decided
+/// here, never claimed by the client: scanned when the request carries
+/// `identifiers`, otherwise read from the device (the latest erasure
+/// snapshot, else the attached device with the Job's `device_id`) beside
+/// the Job's asset tag. A device-sourced record needs a device serial; an
+/// asset tag alone is not "read from the device".
+pub async fn record_for_destruction(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Json(req): Json<EscalateRequest>,
+    Json(req): Json<RecordForDestructionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    require_attest(&req.fields)?;
     let job = state
         .runner
         .get(id)
@@ -287,24 +418,135 @@ pub async fn escalate_to_destroy(
         .latest_erasure()
         .map(|e| e.device_id_from_spec())
         .unwrap_or_else(|| job.spec.device_id.clone());
-    let dest = DestructionEvent {
-        id: Uuid::new_v4(),
-        device_id,
-        at: time::OffsetDateTime::now_utc(),
-        method: req.method,
-        operator: req.operator,
-        supervisor: None,
-        manifest_ref: None,
-        photo_refs: Vec::new(),
-        notes: req.notes,
-        station_id: None,
-        attestation: None,
+    let identifiers = match req.identifiers {
+        Some(scanned) => RecordedIdentifiers {
+            asset_tag: scanned.asset_tag,
+            serial: scanned.serial,
+            source: IdentifierSource::Scanned,
+        },
+        None => {
+            let mut serial = job
+                .latest_erasure()
+                .and_then(|e| nonblank(Some(&e.device_snapshot.serial)));
+            if serial.is_none() {
+                serial = state
+                    .runner
+                    .backend()
+                    .enumerate()
+                    .await
+                    .ok()
+                    .and_then(|devs| devs.into_iter().find(|d| d.id == job.spec.device_id))
+                    .and_then(|d| nonblank(Some(&d.serial)));
+            }
+            let Some(serial) = serial else {
+                return Err(unprocessable(format!(
+                    "the serial of job {id}'s drive cannot be read from the device; scan the \
+                     drive's asset tag or serial to record it"
+                )));
+            };
+            RecordedIdentifiers {
+                asset_tag: job.spec.asset_tag.clone(),
+                serial: Some(serial),
+                source: IdentifierSource::Device,
+            }
+        }
     };
+    let dest = attested_event(
+        &req.fields,
+        device_id,
+        identifiers,
+        time::OffsetDateTime::now_utc(),
+    )?;
     state
         .runner
-        .escalate_to_destroy(id, dest)
+        .record_for_destruction(id, dest)
         .map_err(runner_err)?;
     Ok(Json(json!({"ok": true, "job_id": id})))
+}
+
+/// Record a scanned group of drives for destruction: one new Job per
+/// drive (intent `destroy`, device id `scanned:<serial, else asset tag>`),
+/// each with its own attestation, sharing one statement and one time.
+/// All-or-nothing: a blank field, a drive with no identifier or a repeated
+/// identifier is 422; a drive matching an open Job is 409 naming that Job.
+pub async fn record_scanned(
+    State(state): State<AppState>,
+    Json(req): Json<RecordScannedRequest>,
+) -> Result<Json<RecordScannedResponse>, ApiError> {
+    require_attest(&req.fields)?;
+    if req.drives.is_empty() {
+        return Err(unprocessable("scan at least one drive to record"));
+    }
+    let at = time::OffsetDateTime::now_utc();
+    let mut seen_tags: Vec<String> = Vec::new();
+    let mut seen_serials: Vec<String> = Vec::new();
+    let mut drives = Vec::with_capacity(req.drives.len());
+    for (i, scanned) in req.drives.iter().enumerate() {
+        let tag = nonblank(scanned.asset_tag.as_deref());
+        let serial = nonblank(scanned.serial.as_deref());
+        if let Some(t) = &tag {
+            if seen_tags.iter().any(|o| o.eq_ignore_ascii_case(t)) {
+                return Err(unprocessable(format!("asset tag {t} is listed twice")));
+            }
+            seen_tags.push(t.clone());
+        }
+        if let Some(s) = &serial {
+            if seen_serials.iter().any(|o| o.eq_ignore_ascii_case(s)) {
+                return Err(unprocessable(format!("serial {s} is listed twice")));
+            }
+            seen_serials.push(s.clone());
+        }
+        let Some(key) = serial.clone().or_else(|| tag.clone()) else {
+            return Err(unprocessable(format!(
+                "drive {}: an asset tag or a serial is required",
+                i + 1
+            )));
+        };
+        let device_id = DeviceId(format!("scanned:{key}"));
+        let identifiers = RecordedIdentifiers {
+            asset_tag: tag.clone(),
+            serial,
+            source: IdentifierSource::Scanned,
+        };
+        let ev = attested_event(&req.fields, device_id.clone(), identifiers, at)?;
+        let spec = JobSpec {
+            device_id,
+            classification: req.classification,
+            intent: Intent::Destroy,
+            operator: req.fields.operator.clone(),
+            asset_tag: tag,
+            site_label: None,
+            ticket_ref: None,
+            work_order_ref: None,
+            customer_ref: None,
+            contract_ref: None,
+            sanitization_profile_ref: None,
+        };
+        drives.push((spec, ev));
+    }
+    let job_ids = state
+        .runner
+        .record_scanned_for_destruction(drives)
+        .await
+        .map_err(runner_err)?;
+    Ok(Json(RecordScannedResponse { job_ids }))
+}
+
+/// Render the "recorded for destruction" statement for the operator to read
+/// before ticking "I attest". The text is rendered only in Rust; a record
+/// with the same inputs stores exactly this.
+pub async fn preview_attestation_statement(
+    Json(req): Json<StatementPreviewRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let statement = attestation_statement(
+        req.method,
+        &req.full_name,
+        &req.title,
+        &req.equipment_id,
+        &req.location,
+    )
+    .map_err(record_err)?;
+    Ok(Json(json!({ "statement": statement })))
 }
 
 pub async fn get_certificate(
@@ -351,8 +593,8 @@ pub async fn get_manifest(
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("manifest {id} not found")))
 }
 
-/// Assemble a destruction manifest from N PendingCoSign Jobs. Every Job
-/// in `job_ids` must currently be in `PendingCoSign` and on no other
+/// Assemble a destruction manifest from N PendingDestruction Jobs. Every Job
+/// in `job_ids` must currently be in `PendingDestruction` and on no other
 /// manifest. On success each Job's `manifest_id` and its latest
 /// DestructionEvent's `manifest_ref` carry the manifest's id; the stored
 /// certificates are untouched (the co-signature block records the manifest).
@@ -390,16 +632,16 @@ pub async fn create_manifest(
             }
         }
     }
-    // Validate every job is PendingCoSign.
+    // Validate every job is PendingDestruction.
     for jid in &req.job_ids {
         let job = state
             .runner
             .get(*jid)
             .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("job {jid} not found")))?;
-        if job.state != wipe_common::JobState::PendingCoSign {
+        if job.state != wipe_common::JobState::PendingDestruction {
             return Err(ApiError(
                 StatusCode::CONFLICT,
-                format!("job {jid} is not in PendingCoSign"),
+                format!("job {jid} is not pending destruction"),
             ));
         }
     }
@@ -453,7 +695,7 @@ pub async fn cosign_manifest(
     //
     // A Job with no certificate must never be finalised as Destroyed: that
     // would record a destruction the station cannot attest to. This happens
-    // when a Job is escalated before any erasure activity existed (the cert
+    // when a Job is recorded for destruction before any erasure activity existed (the cert
     // generator has no device snapshot to certify). Refuse, and leave the
     // manifest pending so the gap stays visible rather than silent.
     {
@@ -462,8 +704,8 @@ pub async fn cosign_manifest(
         for jid in &manifest.job_ids {
             match state.runner.get(*jid) {
                 None => problems.push(format!("job {jid} not found")),
-                Some(job) if job.state != wipe_common::JobState::PendingCoSign => {
-                    problems.push(format!("job {jid} is not in PendingCoSign"))
+                Some(job) if job.state != wipe_common::JobState::PendingDestruction => {
+                    problems.push(format!("job {jid} is not pending destruction"))
                 }
                 Some(_) if !certs.contains_key(jid) => problems.push(format!(
                     "job {jid} has no certificate; it cannot be certified as destroyed"
