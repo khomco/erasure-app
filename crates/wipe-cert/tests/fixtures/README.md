@@ -1,6 +1,13 @@
 # Certificate fixtures
 
-Pinned by `../fixtures_verify.rs` and `crates/wipe-cli` tests. **Never edit or
+Pinned by `../fixtures_verify.rs` and `crates/wipe-cli` tests. No test reads
+this file: `fixtures_verify.rs`
+(`the_v2_erased_fixture_verifies_with_the_published_station_key`) and
+`crates/wipe-cli/tests/verify_cert_fixture.rs` carry the station and
+supervisor public keys below as their own literals, which must equal this
+table. The first verifies `v2-erased.json` with that literal; the second runs
+the built `wipestation verify-cert --public-key-b64 <station key>` on both v2
+files and expects the supervisor key to be refused. **Never edit or
 regenerate the v2 files**: they are the only proof that certificates signed
 before schema v3 still verify.
 

@@ -551,6 +551,10 @@ it: three tiers a customer can buy, activate, renew and outgrow.
   enum and consumed by the website (W3.3), the vendor console (A1.3) and the
   station. A test asserts the matrix covers every `Feature` variant, so adding
   a feature to the enum without pricing it fails CI.
+  *Partial 2026-11-09: the code-derived feature catalog
+  `docs/generated/entitlements.txt` exists and a test fails when a `Feature`
+  variant is missing from it (drift-tests story 3). The tier → feature matrix
+  is still open: what each tier grants is a pricing decision.*
 - **L-R9 Metering that reconciles.** The station's counter and the hub's view
   must be comparable, and the honor-system stance in CONTEXT §9 stays: the
   audit log is the truth-of-volume artifact.
@@ -588,6 +592,8 @@ distribution and expiry behaviour).
 **L1 — Evaluation and per-machine, joined up**
 - ~~L1.1 Decide and document the evaluation stance (L-R1).~~ Decided by ADR-0012 (2026-11-08).
 - L1.2 Entitlement matrix generator + CI coverage test (L-R8).
+  *Partial 2026-11-09: feature catalog golden + coverage test shipped (drift-tests
+  story 3); the tier → feature matrix waits on pricing.*
 - L1.3 Activation UX in the operator portal (file-based, offline).
   *Hub side shipped 2026-11-08: the customer portal's Stations page issues the
   licence file and shows the `wipestation serve --license … --vendor-root-b64 …`

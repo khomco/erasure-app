@@ -6,15 +6,19 @@ mod support;
 
 use std::path::PathBuf;
 
+use base64::{engine::general_purpose::STANDARD_NO_PAD as B64, Engine as _};
 use sha2::{Digest, Sha256};
 use wipe_cert::{
     canonical::canonical_bytes, verify, verify_co_signatures, SignedCertificate, SigningKey,
+    VerifyingKey,
 };
 use wipe_common::{AssetDisposition, Classification, ConcurrenceKind, DestructMethod};
 
 const V2_ERASED_SHA256: &str = "39ba35a6311607a89188dee013179c8a7ba1d7e52c3c152ca76f96e5332f3bb2";
 const V2_DESTROYED_SHA256: &str =
     "d2e38419cc6fdb3721ff6e8dd4d9442393bc0e004ae970be311580186ee5ccfa";
+/// The station public key as published in `fixtures/README.md`.
+const STATION_KEY_B64: &str = "GX9rI+FshTLGq8g4+s1ep4m+DHaykgM0A5v6iz02jWE";
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -60,6 +64,26 @@ fn the_v2_erased_fixture_verifies() {
     let station = support::station_key();
     let id = verify(&signed, &[station.verifying_key()]).unwrap();
     assert_eq!(id, station.public_key_id());
+}
+
+/// Verifies against the committed key literal, not only the seed, so a
+/// change to seed derivation cannot mask a key mismatch.
+#[test]
+fn the_v2_erased_fixture_verifies_with_the_published_station_key() {
+    let bytes: [u8; 32] = B64
+        .decode(STATION_KEY_B64)
+        .unwrap()
+        .try_into()
+        .expect("32-byte key");
+    let published = VerifyingKey::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        published.0.to_bytes(),
+        support::station_key().verifying_key().0.to_bytes(),
+        "fixtures/README.md's station key no longer matches seed [42; 32]"
+    );
+    let (_, signed) = load("v2-erased.json");
+    let id = verify(&signed, &[published]).unwrap();
+    assert_eq!(id, support::station_key().public_key_id());
 }
 
 #[test]
