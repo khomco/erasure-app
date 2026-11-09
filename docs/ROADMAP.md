@@ -384,7 +384,7 @@ and **0008** (station ↔ hub protocol and the reconciliation contract).
 ## 3. O — Operator portal
 
 The most mature surface and, per the user, the one that matters most: erasure
-is operator-heavy. Devices, Jobs, Job detail, Certificates, Fleet, Manifests,
+is operator-heavy. Devices, Jobs, Job detail, Certificates, Fleet, Destruction runs,
 Bench setup, bay map and identify mode all exist and work.
 
 **Architecture position: this stays `apps/desktop`.** One React app, served by
@@ -398,15 +398,17 @@ build.** Three frontends, one engine.
   explicitly a placeholder (CONTEXT §11 v0.2 #6/#7). Certificates carry an
   operator email that NIST R2 requires and that nothing currently proves. Needs
   real authentication and the four roles (`loader`, `operator`, `supervisor`,
-  `auditor`), with supervisor co-sign already modelled by ADR-0001's
-  `DestructionManifest`.
+  `auditor`). ADR-0011 replaced the supervisor co-sign with an optional
+  concurrence on a destruction run (`DestructionManifest`); the concurrence
+  policy is set at station startup until roles can gate editing it.
   **Unresolved and blocking (CONTEXT §12): how does an operator authenticate at
   a PXE station with no display and no local key?**
 - **O-R2 Batch work.** Operators process drives in trays, not one at a time.
   Multi-select on the bay map, start N jobs with a shared spec, watch them as a
   queue. Today every job is created individually.
 - **O-R3 An exception inbox.** Failures, quarantine, record-for-destruction and
-  co-sign exist as API and as the Manifests page, but nothing tells an operator
+  destruction runs (completion, concurrence) exist as API and as the Destruction
+  runs page, but nothing tells an operator
   *"these four drives need you"*. This is where a busy bench actually loses
   drives.
 - **O-R4 Bench ergonomics.** Gloves, poor warehouse lighting, noise, distance.
@@ -446,7 +448,7 @@ build.** Three frontends, one engine.
   tray in one gesture.
 
 **O2 — Not losing drives**
-- O2.1 Exception inbox: failures, quarantine, pending destruction, awaiting co-sign.
+- O2.1 Exception inbox: failures, quarantine, pending destruction, runs awaiting completion or concurrence.
 - O2.2 Failure routing (CONTEXT §11 v0.3 #13) surfaced in the inbox.
 - O2.3 Reboot/session recovery UX (O-R7).
 - O2.4 Label + offline-verifiable QR printing.

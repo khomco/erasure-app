@@ -280,14 +280,17 @@ impl Job {
     }
 }
 
-/// A manifest grouping N pending Destroy Jobs for one supervisor co-sign
-/// action. Distinct from the operator-UX `Batch` concept in CONTEXT §5;
-/// the manifest is auditor-facing and matches paper-shredder convention.
+/// A destruction run: N Jobs recorded for destruction, grouped so one
+/// completion (and, when the site requires it, one concurrence) covers them
+/// all (ADR-0011 §1, §3). Distinct from the operator-UX `Batch` concept in
+/// CONTEXT §5; the manifest is auditor-facing and matches paper-shredder
+/// convention.
 ///
-/// Tier-1 ships local-sync co-sign at the lead station (supervisor walks
-/// over with YubiKey/PIV). Tier-2 cloud will add async DocuSign-style
-/// remote co-sign — the schema is the same; only the notification +
-/// signing UX differs.
+/// Lifecycle: `Pending` (assembled, awaiting completion) →
+/// `AwaitingConcurrence` (only when `required_concurrence` is set) →
+/// `Completed`. Move it only through [`DestructionManifest::complete`] and
+/// [`DestructionManifest::concur`]; the caller moves the member Jobs to
+/// `Destroyed` when [`DestructionManifest::destroys_jobs`] says so.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DestructionManifest {
     pub id: Uuid,
@@ -296,16 +299,16 @@ pub struct DestructionManifest {
     /// Operator who assembled the manifest (typically the floor lead).
     pub assembled_by: OperatorRef,
     /// Jobs included in this manifest. Each is in `PendingDestruction` until
-    /// the manifest is signed.
+    /// the run is completed (and concurred with, when that is required).
     pub job_ids: Vec<Uuid>,
     pub state: ManifestState,
     /// Free-form note attached at assembly (e.g. shredder run id, vendor pickup).
     pub note: Option<String>,
-    /// Populated when a supervisor cosigns. Multi-supervisor (two-person
-    /// rule) is a future extension; v0.2 records the single supervisor.
-    pub supervisor: Option<OperatorRef>,
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub signed_at: Option<OffsetDateTime>,
+    /// The concurrence this run needs before its Jobs reach `Destroyed`,
+    /// copied from the station's policy at assembly, so a later policy
+    /// change never re-labels or skips it.
+    #[serde(default)]
+    pub required_concurrence: Option<crate::ConcurrenceKind>,
     /// "Destruction completed" for this run (ADR-0011 §1, second step).
     #[serde(default)]
     pub completion: Option<crate::DestructionCompletion>,
@@ -317,13 +320,75 @@ pub struct DestructionManifest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManifestState {
+    /// Assembled; awaiting the operator's completion.
     Pending,
-    Signed,
+    /// Completion recorded; awaiting the required concurrence.
+    AwaitingConcurrence,
+    /// Done: every member Job is `Destroyed`. Before ADR-0011 this state was
+    /// `signed` (supervisor co-sign); that name is still accepted on input.
+    #[serde(alias = "signed")]
+    Completed,
+    /// Reserved; nothing sets it yet.
     Rejected,
 }
 
+/// Why a destruction run refused a completion or a concurrence. Nothing on
+/// the run changed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ManifestTransitionError {
+    #[error("destruction run {id} is not pending completion (state {state:?})")]
+    NotPending { id: Uuid, state: ManifestState },
+    #[error("destruction run {id} needs no concurrence")]
+    NoConcurrenceRequired { id: Uuid },
+    #[error("destruction run {id} is not awaiting concurrence (state {state:?})")]
+    NotAwaitingConcurrence { id: Uuid, state: ManifestState },
+    #[error("destruction run {id} needs a {required:?} concurrence, not {given:?}")]
+    WrongConcurrenceKind {
+        id: Uuid,
+        required: crate::ConcurrenceKind,
+        given: crate::ConcurrenceKind,
+    },
+    #[error("the concurrence names destruction run {given}, not {id}")]
+    WrongManifest { id: Uuid, given: Uuid },
+    #[error(
+        "the concurrence must come from someone other than the operator who confirmed \
+         completion"
+    )]
+    SameSigner,
+    #[error(
+        "the completion time {at} is out of range: it must be no earlier than when the run \
+         was assembled ({created_at}) and not in the future"
+    )]
+    CompletionTimeOutOfRange {
+        at: OffsetDateTime,
+        created_at: OffsetDateTime,
+    },
+}
+
+impl ManifestTransitionError {
+    /// A refusal caused by the run's state (a conflict), as opposed to the
+    /// request's content.
+    pub fn is_conflict(&self) -> bool {
+        matches!(
+            self,
+            Self::NotPending { .. }
+                | Self::NoConcurrenceRequired { .. }
+                | Self::NotAwaitingConcurrence { .. }
+                | Self::WrongConcurrenceKind { .. }
+        )
+    }
+}
+
+/// How far ahead of the station clock a completion time may be.
+pub const COMPLETION_CLOCK_SKEW: time::Duration = time::Duration::seconds(60);
+
 impl DestructionManifest {
-    pub fn new(assembled_by: OperatorRef, job_ids: Vec<Uuid>, note: Option<String>) -> Self {
+    pub fn new(
+        assembled_by: OperatorRef,
+        job_ids: Vec<Uuid>,
+        note: Option<String>,
+        required_concurrence: Option<crate::ConcurrenceKind>,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
             created_at: OffsetDateTime::now_utc(),
@@ -331,12 +396,126 @@ impl DestructionManifest {
             job_ids,
             state: ManifestState::Pending,
             note,
-            supervisor: None,
-            signed_at: None,
+            required_concurrence,
             completion: None,
             concurrence: None,
         }
     }
+
+    /// Refuse a completion time before the run was assembled (to the
+    /// second, as the statement prints it) or more than
+    /// [`COMPLETION_CLOCK_SKEW`] after `now`.
+    pub fn check_completion_time(
+        &self,
+        at: OffsetDateTime,
+        now: OffsetDateTime,
+    ) -> Result<(), ManifestTransitionError> {
+        let assembled = self.assembled_to_the_second();
+        if at < assembled || at > now + COMPLETION_CLOCK_SKEW {
+            return Err(ManifestTransitionError::CompletionTimeOutOfRange {
+                at,
+                created_at: self.created_at,
+            });
+        }
+        Ok(())
+    }
+
+    /// Record the run's completion. Only a `Pending` run accepts it; the run
+    /// then awaits its required concurrence, or is `Completed` when none is
+    /// required. Refuses a completion time before assembly.
+    pub fn complete(
+        &mut self,
+        completion: crate::DestructionCompletion,
+    ) -> Result<(), ManifestTransitionError> {
+        if self.state != ManifestState::Pending {
+            return Err(ManifestTransitionError::NotPending {
+                id: self.id,
+                state: self.state,
+            });
+        }
+        let assembled = self.assembled_to_the_second();
+        if completion.completed_at < assembled {
+            return Err(ManifestTransitionError::CompletionTimeOutOfRange {
+                at: completion.completed_at,
+                created_at: self.created_at,
+            });
+        }
+        self.state = if self.required_concurrence.is_some() {
+            ManifestState::AwaitingConcurrence
+        } else {
+            ManifestState::Completed
+        };
+        self.completion = Some(completion);
+        Ok(())
+    }
+
+    /// Record the required concurrence. Only a run `AwaitingConcurrence`
+    /// accepts it, of exactly the required kind, for this run, from someone
+    /// other than the completion's signer (a different operator id and a
+    /// different full name, ignoring case and whitespace).
+    pub fn concur(
+        &mut self,
+        concurrence: crate::Concurrence,
+    ) -> Result<(), ManifestTransitionError> {
+        let Some(required) = self.required_concurrence else {
+            return Err(ManifestTransitionError::NoConcurrenceRequired { id: self.id });
+        };
+        if self.state != ManifestState::AwaitingConcurrence {
+            return Err(ManifestTransitionError::NotAwaitingConcurrence {
+                id: self.id,
+                state: self.state,
+            });
+        }
+        if concurrence.kind != required {
+            return Err(ManifestTransitionError::WrongConcurrenceKind {
+                id: self.id,
+                required,
+                given: concurrence.kind,
+            });
+        }
+        if concurrence.manifest_id != self.id {
+            return Err(ManifestTransitionError::WrongManifest {
+                id: self.id,
+                given: concurrence.manifest_id,
+            });
+        }
+        let completer = &self
+            .completion
+            .as_ref()
+            .expect("an AwaitingConcurrence run has a completion")
+            .signer;
+        if completer.operator.id == concurrence.signer.operator.id
+            || same_name(&completer.full_name, &concurrence.signer.full_name)
+        {
+            return Err(ManifestTransitionError::SameSigner);
+        }
+        self.state = ManifestState::Completed;
+        self.concurrence = Some(concurrence);
+        Ok(())
+    }
+
+    /// `created_at` as the statement prints it, so a completion in the same
+    /// second as assembly is not "before" it.
+    fn assembled_to_the_second(&self) -> OffsetDateTime {
+        self.created_at
+            .replace_nanosecond(0)
+            .expect("0 is a valid nanosecond")
+    }
+
+    /// Whether the run is done, so its member Jobs belong in `Destroyed`.
+    pub fn destroys_jobs(&self) -> bool {
+        self.state == ManifestState::Completed
+    }
+}
+
+fn same_name(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        s.split_whitespace()
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    norm(a) == norm(b)
 }
 
 #[cfg(test)]
@@ -406,7 +585,7 @@ mod tests {
         let signer =
             AttestationSigner::self_asserted(op.clone(), "Ana Ruiz", "Bench lead").unwrap();
         let at = OffsetDateTime::from_unix_timestamp(1_794_000_000).unwrap();
-        let mut m = DestructionManifest::new(op, vec![Uuid::new_v4()], None);
+        let mut m = DestructionManifest::new(op, vec![Uuid::new_v4()], None, None);
         m.completion = Some(
             DestructionCompletion::new(
                 at,
@@ -438,6 +617,7 @@ mod tests {
             },
             vec![],
             None,
+            None,
         );
         let mut v = serde_json::to_value(&m).unwrap();
         assert_eq!(v["completion"], json!(null));
@@ -445,7 +625,225 @@ mod tests {
         let obj = v.as_object_mut().unwrap();
         obj.remove("completion");
         obj.remove("concurrence");
+        obj.remove("required_concurrence");
+        // A pre-ADR-0011 manifest also carried these; they are ignored.
+        obj.insert("supervisor".into(), json!(null));
+        obj.insert("signed_at".into(), json!(null));
         let back: DestructionManifest = serde_json::from_value(v).unwrap();
         assert!(back.completion.is_none() && back.concurrence.is_none());
+        assert_eq!(back.required_concurrence, None);
+    }
+
+    #[test]
+    fn the_old_signed_state_name_reads_as_completed() {
+        let s: ManifestState = serde_json::from_value(json!("signed")).unwrap();
+        assert_eq!(s, ManifestState::Completed);
+        assert_eq!(serde_json::to_value(s).unwrap(), json!("completed"));
+        assert_eq!(
+            serde_json::to_value(ManifestState::AwaitingConcurrence).unwrap(),
+            json!("awaiting_concurrence")
+        );
+    }
+
+    // ---- run transitions (destruction-attestation story 3) ----
+
+    use crate::{
+        AttestationSigner, Concurrence, ConcurrenceKind, DestructionCompletion,
+        DestructionVerification,
+    };
+
+    fn operator(id: &str, name: &str) -> OperatorRef {
+        OperatorRef {
+            id: id.into(),
+            display_name: name.into(),
+            email: format!("{id}@example.com"),
+        }
+    }
+
+    fn signer(id: &str, full_name: &str) -> AttestationSigner {
+        AttestationSigner::self_asserted(operator(id, full_name), full_name, "Bench lead").unwrap()
+    }
+
+    fn run(required: Option<ConcurrenceKind>) -> DestructionManifest {
+        DestructionManifest::new(
+            operator("op-1", "Ana"),
+            vec![Uuid::new_v4(), Uuid::new_v4()],
+            None,
+            required,
+        )
+    }
+
+    fn completion_at(at: OffsetDateTime) -> DestructionCompletion {
+        DestructionCompletion::new(
+            at,
+            DestructionVerification {
+                remnants_inspected: true,
+                equipment_cycle_completed: true,
+                equipment_id: "SHR-2".into(),
+                criterion: "particles ≤ 2 mm".into(),
+            },
+            None,
+            signer("op-1", "Ana Ruiz"),
+        )
+        .unwrap()
+    }
+
+    fn completion() -> DestructionCompletion {
+        completion_at(OffsetDateTime::now_utc())
+    }
+
+    fn concurrence(
+        m: &DestructionManifest,
+        kind: ConcurrenceKind,
+        s: AttestationSigner,
+    ) -> Concurrence {
+        Concurrence::new(kind, m.id, OffsetDateTime::now_utc(), s).unwrap()
+    }
+
+    #[test]
+    fn completing_with_no_concurrence_required_completes_the_run() {
+        let mut m = run(None);
+        assert!(!m.destroys_jobs());
+        m.complete(completion()).unwrap();
+        assert_eq!(m.state, ManifestState::Completed);
+        assert!(m.completion.is_some() && m.destroys_jobs());
+    }
+
+    #[test]
+    fn completing_with_a_concurrence_required_awaits_it() {
+        for kind in [ConcurrenceKind::Review, ConcurrenceKind::Witness] {
+            let mut m = run(Some(kind));
+            m.complete(completion()).unwrap();
+            assert_eq!(m.state, ManifestState::AwaitingConcurrence);
+            assert!(!m.destroys_jobs());
+            let c = concurrence(&m, kind, signer("op-2", "Ben Ode"));
+            m.concur(c.clone()).unwrap();
+            assert_eq!(m.state, ManifestState::Completed);
+            assert_eq!(m.concurrence, Some(c));
+            assert!(m.destroys_jobs());
+        }
+    }
+
+    #[test]
+    fn a_run_completes_once() {
+        let mut m = run(Some(ConcurrenceKind::Review));
+        m.complete(completion()).unwrap();
+        let before = m.clone();
+        assert!(matches!(
+            m.complete(completion()),
+            Err(ManifestTransitionError::NotPending {
+                state: ManifestState::AwaitingConcurrence,
+                ..
+            })
+        ));
+        assert_eq!(m.completion, before.completion);
+        let mut done = run(None);
+        done.complete(completion()).unwrap();
+        let err = done.complete(completion()).unwrap_err();
+        assert!(err.is_conflict());
+        assert_eq!(done.state, ManifestState::Completed);
+    }
+
+    #[test]
+    fn concurrence_is_refused_when_not_needed_too_early_or_twice() {
+        let other = || signer("op-2", "Ben Ode");
+        let mut none = run(None);
+        let c = concurrence(&none, ConcurrenceKind::Review, other());
+        assert!(matches!(
+            none.concur(c.clone()),
+            Err(ManifestTransitionError::NoConcurrenceRequired { .. })
+        ));
+        none.complete(completion()).unwrap();
+        assert!(none.concur(c).unwrap_err().is_conflict());
+        assert!(none.concurrence.is_none());
+
+        let mut early = run(Some(ConcurrenceKind::Witness));
+        let c = concurrence(&early, ConcurrenceKind::Witness, other());
+        let err = early.concur(c.clone()).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestTransitionError::NotAwaitingConcurrence {
+                state: ManifestState::Pending,
+                ..
+            }
+        ));
+        assert!(err.is_conflict());
+        assert_eq!(early.state, ManifestState::Pending);
+
+        early.complete(completion()).unwrap();
+        early.concur(c.clone()).unwrap();
+        let first = early.concurrence.clone();
+        let again = concurrence(&early, ConcurrenceKind::Witness, signer("op-3", "Cy Dee"));
+        assert!(early.concur(again).unwrap_err().is_conflict());
+        assert_eq!(early.concurrence, first);
+    }
+
+    #[test]
+    fn a_concurrence_of_the_wrong_kind_or_run_is_refused() {
+        let mut m = run(Some(ConcurrenceKind::Review));
+        m.complete(completion()).unwrap();
+        let witness = concurrence(&m, ConcurrenceKind::Witness, signer("op-2", "Ben Ode"));
+        assert!(matches!(
+            m.concur(witness),
+            Err(ManifestTransitionError::WrongConcurrenceKind { .. })
+        ));
+        let elsewhere = Concurrence::new(
+            ConcurrenceKind::Review,
+            Uuid::new_v4(),
+            OffsetDateTime::now_utc(),
+            signer("op-2", "Ben Ode"),
+        )
+        .unwrap();
+        assert!(matches!(
+            m.concur(elsewhere),
+            Err(ManifestTransitionError::WrongManifest { .. })
+        ));
+        assert_eq!(m.state, ManifestState::AwaitingConcurrence);
+        assert!(m.concurrence.is_none());
+    }
+
+    #[test]
+    fn the_completion_signer_cannot_concur() {
+        let mut m = run(Some(ConcurrenceKind::Review));
+        m.complete(completion()).unwrap();
+        for s in [
+            signer("op-1", "Somebody Else"),
+            signer("op-9", "  ana   RUIZ "),
+        ] {
+            let c = concurrence(&m, ConcurrenceKind::Review, s);
+            let err = m.concur(c).unwrap_err();
+            assert_eq!(err, ManifestTransitionError::SameSigner);
+            assert!(!err.is_conflict());
+        }
+        assert_eq!(m.state, ManifestState::AwaitingConcurrence);
+        assert!(m.concurrence.is_none());
+    }
+
+    #[test]
+    fn the_completion_time_must_fall_between_assembly_and_now() {
+        let m = run(None);
+        let now = m.created_at + time::Duration::minutes(5);
+        assert!(m.check_completion_time(now, now).is_ok());
+        assert!(m
+            .check_completion_time(now + time::Duration::seconds(60), now)
+            .is_ok());
+        assert!(m
+            .check_completion_time(now + time::Duration::seconds(61), now)
+            .is_err());
+        // The same second as assembly is not "before" it.
+        let second = m.created_at.replace_nanosecond(0).unwrap();
+        assert!(m.check_completion_time(second, now).is_ok());
+        let before = second - time::Duration::seconds(1);
+        let err = m.check_completion_time(before, now).unwrap_err();
+        assert!(!err.is_conflict());
+
+        let mut early = run(None);
+        let err = early.complete(completion_at(before)).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestTransitionError::CompletionTimeOutOfRange { .. }
+        ));
+        assert_eq!(early.state, ManifestState::Pending);
+        assert!(early.completion.is_none());
     }
 }

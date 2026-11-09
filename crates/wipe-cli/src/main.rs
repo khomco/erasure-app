@@ -86,6 +86,16 @@ enum Cmd {
         /// --license: a licence is only meaningful if we check who signed it.
         #[arg(long)]
         vendor_root_b64: Vec<String>,
+        /// Whether destruction runs need a second signer before their Jobs
+        /// are destroyed (ADR-0011 §3): `none` (the standards' default),
+        /// `review` or `witness`. Set here, never edited from the bench.
+        #[arg(
+            long,
+            env = "WIPESTATION_CONCURRENCE_POLICY",
+            default_value = "none",
+            value_parser = parse_concurrence_policy
+        )]
+        concurrence_policy: wipe_common::ConcurrencePolicy,
     },
     /// List built-in bay-topology presets and known enclosure models, or dump
     /// one as JSON to use as a starting point for a station config file.
@@ -201,6 +211,7 @@ async fn main() -> Result<()> {
             ephemeral_config,
             license,
             vendor_root_b64,
+            concurrence_policy,
         } => {
             cmd_serve(ServeArgs {
                 addr,
@@ -215,6 +226,7 @@ async fn main() -> Result<()> {
                 ephemeral_config,
                 license,
                 vendor_root_b64,
+                concurrence_policy,
             })
             .await
         }
@@ -391,6 +403,13 @@ struct ServeArgs {
     ephemeral_config: bool,
     license: Option<PathBuf>,
     vendor_root_b64: Vec<String>,
+    concurrence_policy: wipe_common::ConcurrencePolicy,
+}
+
+/// `none`, `review` or `witness`, the policy's serde names.
+fn parse_concurrence_policy(s: &str) -> Result<wipe_common::ConcurrencePolicy, String> {
+    serde_json::from_value(serde_json::Value::String(s.to_owned()))
+        .map_err(|_| format!("unknown concurrence policy `{s}`; expected none, review or witness"))
 }
 
 async fn cmd_serve(args: ServeArgs) -> Result<()> {
@@ -407,6 +426,7 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         ephemeral_config: force_ephemeral,
         license: license_path,
         vendor_root_b64,
+        concurrence_policy,
     } = args;
     let seed_topology = load_bay_topology(bay_topology_path.clone(), bay_profile)?;
     let signing_key = Arc::new(load_or_create_signing_key(key_path)?);
@@ -492,6 +512,7 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     let mut state = AppState::with_static_dir(backend.clone(), fleet, signing_key, resolved_dist)
         .with_license(Arc::new(license_ctx))
         .with_topology_store(store)
+        .with_concurrence_policy(concurrence_policy)
         // The mock can fake hot-plug, which is what identify mode is driven
         // by. The /api/sim/* routes are always mounted; without this call
         // they answer 404.
@@ -501,6 +522,12 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     if state.bay_topology.read().is_none() {
         state = state.with_bay_topology(seed_topology);
     }
+    println!(
+        "destruction concurrence policy: {}",
+        serde_json::to_value(concurrence_policy)?
+            .as_str()
+            .unwrap_or_default()
+    );
     println!("API listening on http://{addr}");
     serve(state, addr).await?;
     Ok(())
@@ -943,5 +970,36 @@ mod tests {
             assert_eq!(parse_feature(name).unwrap(), f, "{name}");
         }
         assert!(parse_feature("no_such_feature").is_err());
+    }
+
+    fn serve_policy(args: &[&str]) -> Result<wipe_common::ConcurrencePolicy, clap::Error> {
+        let argv = ["wipestation", "serve"].iter().chain(args).copied();
+        match Cli::try_parse_from(argv)?.cmd {
+            Cmd::Serve {
+                concurrence_policy, ..
+            } => Ok(concurrence_policy),
+            other => panic!("parsed {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_concurrence_policy_flag_parses_and_defaults_to_none() {
+        use wipe_common::ConcurrencePolicy;
+        // The env twin would override the default; keep this test hermetic.
+        if std::env::var_os("WIPESTATION_CONCURRENCE_POLICY").is_none() {
+            assert_eq!(serve_policy(&[]).unwrap(), ConcurrencePolicy::None);
+        }
+        for (name, policy) in [
+            ("none", ConcurrencePolicy::None),
+            ("review", ConcurrencePolicy::Review),
+            ("witness", ConcurrencePolicy::Witness),
+        ] {
+            assert_eq!(
+                serve_policy(&["--concurrence-policy", name]).unwrap(),
+                policy
+            );
+        }
+        let err = serve_policy(&["--concurrence-policy", "supervisor"]).unwrap_err();
+        assert!(err.to_string().contains("expected none, review or witness"));
     }
 }

@@ -10,10 +10,11 @@
 //!    and decides when to emit each typed activity. Cert generation +
 //!    signing happens when the Job reaches Erased; on the Destroy path the
 //!    cert is generated at PendingDestruction (when the Job has an erasure
-//!    to certify) and the supervisor co-signature is attached when the
-//!    manifest is signed. A Job enters PendingDestruction only through
+//!    to certify). A Job enters PendingDestruction only through
 //!    `record_for_destruction` / `record_scanned_for_destruction`, each
-//!    carrying the operator's `DestructionAttestation` (ADR-0011 §1).
+//!    carrying the operator's `DestructionAttestation` (ADR-0011 §1), and
+//!    leaves it for Destroyed only through `mark_destroyed`, once its
+//!    destruction run is completed (and concurred with, when required).
 //!  * inner `run_erasure_event` — drives one ErasureEvent through its
 //!    inner state machine (Queued → Probing → … → Completed/Failed).
 //!    Today's v0.1 `run_job` logic, minus the cert/sign tail.
@@ -361,27 +362,45 @@ impl JobRunner {
         });
     }
 
-    /// Move a `PendingDestruction` Job to `Destroyed`. Called by the manifest
-    /// signing flow once the supervisor has co-signed the manifest
-    /// (and, transitively, every cert it groups).
-    pub fn mark_destroyed(&self, id: Uuid) -> WipeResult<()> {
-        let job = self.get(id).ok_or(WipeError::JobNotFound(id))?;
-        if job.state != JobState::PendingDestruction {
-            return Err(WipeError::InvalidState(format!(
-                "job {id} not in PendingDestruction (got {:?})",
-                job.state
-            )));
+    /// Move every Job of a completed destruction run from
+    /// `PendingDestruction` to `Destroyed`. Called once the run's completion
+    /// (and any required concurrence) is recorded (ADR-0011).
+    ///
+    /// All-or-nothing: every Job is validated under one write lock before
+    /// any is changed, and the call refuses (changing nothing, broadcasting
+    /// nothing) if any Job is missing, listed more than once or not in
+    /// `PendingDestruction`. Each moved Job then gets its own
+    /// `JobStateChanged`.
+    pub fn mark_destroyed(&self, ids: &[Uuid]) -> WipeResult<()> {
+        let now = OffsetDateTime::now_utc();
+        {
+            let mut inner = self.inner.write();
+            for (i, id) in ids.iter().enumerate() {
+                if ids[..i].contains(id) {
+                    return Err(WipeError::InvalidState(format!("job {id} is listed twice")));
+                }
+                let job = inner.jobs.get(id).ok_or(WipeError::JobNotFound(*id))?;
+                if job.state != JobState::PendingDestruction {
+                    return Err(WipeError::InvalidState(format!(
+                        "job {id} not in PendingDestruction (got {:?})",
+                        job.state
+                    )));
+                }
+            }
+            for id in ids {
+                let job = inner.jobs.get_mut(id).expect("validated above");
+                job.state = JobState::Destroyed;
+                job.ended_at = Some(now);
+            }
         }
-        self.mutate_job(id, |j| {
-            j.state = wipe_common::JobState::Destroyed;
-            j.ended_at = Some(OffsetDateTime::now_utc());
-        });
-        let _ = self.events.send(JobBroadcast::JobStateChanged {
-            job_id: id,
-            from: JobState::PendingDestruction,
-            to: wipe_common::JobState::Destroyed,
-            at: OffsetDateTime::now_utc(),
-        });
+        for id in ids {
+            let _ = self.events.send(JobBroadcast::JobStateChanged {
+                job_id: *id,
+                from: JobState::PendingDestruction,
+                to: JobState::Destroyed,
+                at: now,
+            });
+        }
         Ok(())
     }
 

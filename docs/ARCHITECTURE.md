@@ -30,7 +30,9 @@ Station side (one `wipestation` process per bench):
 |   • /api/jobs[/:id], …/start, …/abort,                         |
 |     …/record-for-destruction, …/certificate                    |
 |   • /api/destruction/records, /api/destruction/statement       |
-|   • /api/manifests[/:id], /api/manifests/:id/cosign            |
+|   • /api/manifests[/:id] (destruction runs), …/completion,     |
+|     …/concurrence, each with …/statement                       |
+|   • /api/destruction/policy (read-only)                        |
 |   • /api/sim/devices[/attach|/detach] — always routed, 404     |
 |     unless the backend simulates hot-plug                      |
 |   • /api/events (WS) — JobBroadcast + FleetEvent fan-out       |
@@ -126,8 +128,9 @@ Outer — `JobState`:
 Queued ─▶ InProgress ─┬─▶ Erased
                       │
                       ├─▶ PendingDestruction ─▶ Destroyed
-                      │     (recorded for destruction; supervisor
-                      │      co-sign on a manifest finalises it)
+                      │     (recorded for destruction; completing
+                      │      its destruction run, plus any required
+                      │      concurrence, finalises it)
                       ├─▶ Quarantined                 (declared; nothing
                       │                                  transitions into it)
                       └─▶ Aborted                       (operator)
@@ -195,33 +198,35 @@ attempt) — which flow channel → WebSocket → frontend.
    `activities` chain into a JSON-LD payload (schema v2), stamping
    `media_status.operational = false` on the `PendingDestruction` path and
    recording the resolved `AssetDisposition`. A Job with no erasure activity
-   (recorded from `Queued`, or created from a scanned group) is skipped and gets no certificate; co-sign
-   then refuses to destroy it.
+   (recorded from `Queued`, or created from a scanned group) is skipped and gets no certificate, so
+   assembly refuses it and no destruction run can move it to `Destroyed`.
 4. `wipe_cert::sign(cert, signing_key)` canonicalizes the JSON (BTreeMap key
    sorting at every depth, finite-number check), hashes it with SHA-256,
    signs with Ed25519, and emits a `SignedCertificate { certificate,
    signature }`.
 5. The signed cert is stashed in `AppState::certs` and served by
    `GET /api/jobs/:id/certificate`.
-6. **Destroy path only.** When the linked `DestructionManifest` is
-   co-signed, `wipe_cert::co_sign(...)` appends a `CoSignatureBlock`
-   over the *same* canonical bytes the primary signer used. As built, the
-   handler signs it with the **station's own signing key**; the supervisor
-   is recorded only as an `OperatorRef` label on the block. The block's
-   signer, role, `manifest_ref` and timestamp sit outside the signed
-   bytes, so they can be edited without breaking any signature, and the
-   co-signature proves nothing beyond the station's primary signature.
-   Assembling the manifest stamps its id on each member Job
+6. **Destroy path only.** Assembling a destruction run
+   (`DestructionManifest`) stamps its id on each member Job
    (`manifest_id`) and that Job's latest DestructionEvent
    (`manifest_ref`), but never inside the signed certificate: the cert
-   generator strips the link from the copy it signs, and a Job already
-   on a manifest cannot be recorded for destruction again, so a new
-   DestructionEvent cannot replace the record after assembly (aborting
-   a linked Job is still allowed).
-   [ADR-0011](adr/0011-destruction-by-operator-attestation.md) replaces
-   this destroy path with one certificate signed once at completion,
-   carrying the attestation inside the signed bytes; it is accepted but
-   not yet built. `co_signatures` is empty on Erased certs.
+   generator strips the link from the copy it signs, assembly refuses a
+   Job with no certificate yet, and a Job already on a run cannot be
+   recorded for destruction again, so a new DestructionEvent cannot
+   replace the record after assembly (aborting a linked Job is still
+   allowed). Confirming the run's completion (and, when the station's
+   concurrence policy requires it, a concurrence from a different signer)
+   moves every member Job to `Destroyed` in one runner call, all or
+   nothing, with a `JobStateChanged` per Job. The generator ignores
+   `Destroyed`, so no certificate changes and no co-signature is
+   appended; the supervisor co-sign route is gone. Certificates co-signed
+   before ADR-0011 keep their `CoSignatureBlock`s (station key, signer
+   and role outside the signed bytes), and `co_signatures` stays in the
+   schema so they still verify.
+   [ADR-0011](adr/0011-destruction-by-operator-attestation.md) ends with
+   one certificate signed once at `Destroyed`, carrying the attestation,
+   completion and concurrence inside the signed bytes (story 4, not yet
+   built). `co_signatures` is empty on Erased certs.
 
 `wipe_cert::verify(signed, &[trusted_keys])`:
 - Re-canonicalizes the embedded certificate to compute the actual
@@ -340,7 +345,8 @@ Replace, add, or extend:
 4. `wipe-pdf` — render the signed JSON-LD into a PDF/A-3 with the JSON
    embedded as an attachment, for audit-friendly delivery.
 5. Operator RBAC inside `wipe-server` — SSO via OIDC, audit attribution.
-   Destruction moves to ADR-0011's operator attestation (accepted, not
-   yet built), replacing the appended co-signature.
+   Destruction runs on ADR-0011's operator attestation (recording,
+   completion and a startup-set concurrence policy are built; role-gated
+   policy editing waits for RBAC, and signing at `Destroyed` for story 4).
 6. `wipe-iso` — bootable image build (Alpine + signed shim + GRUB +
    the binary).

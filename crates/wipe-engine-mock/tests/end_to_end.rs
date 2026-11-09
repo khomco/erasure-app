@@ -451,6 +451,76 @@ async fn link_to_manifest_refuses_a_job_listed_twice_and_stamps_nothing() {
         .all(|d| d.manifest_ref.is_none()));
 }
 
+// ---- Destroying a completed run (destruction-attestation story 3) -------
+
+#[tokio::test]
+async fn mark_destroyed_moves_every_job_and_broadcasts_each() {
+    let runner = mock_runner();
+    let mut ids = Vec::new();
+    for device in ["dev-nvme-0", "dev-sata-0"] {
+        let id = runner.create_job(job_spec(device)).await.unwrap();
+        runner
+            .record_for_destruction(id, destruction(device))
+            .unwrap();
+        ids.push(id);
+    }
+    let mut rx = runner.subscribe();
+
+    runner.mark_destroyed(&ids).unwrap();
+
+    for id in &ids {
+        let job = runner.get(*id).unwrap();
+        assert_eq!(job.state, JobState::Destroyed);
+        assert!(job.ended_at.is_some());
+    }
+    let mut changed = Vec::new();
+    while let Ok(b) = rx.try_recv() {
+        if let JobBroadcast::JobStateChanged {
+            job_id, from, to, ..
+        } = b
+        {
+            assert_eq!(
+                (from, to),
+                (JobState::PendingDestruction, JobState::Destroyed)
+            );
+            changed.push(job_id);
+        }
+    }
+    assert_eq!(changed, ids);
+}
+
+/// One bad id refuses the whole run: nothing moves and nothing broadcasts.
+#[tokio::test]
+async fn mark_destroyed_is_all_or_nothing() {
+    let runner = mock_runner();
+    let pending = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    runner
+        .record_for_destruction(pending, destruction("dev-nvme-0"))
+        .unwrap();
+    let queued = runner.create_job(job_spec("dev-sata-0")).await.unwrap();
+    let mut rx = runner.subscribe();
+
+    let err = runner.mark_destroyed(&[pending, queued]).unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+    let err = runner
+        .mark_destroyed(&[pending, uuid::Uuid::new_v4()])
+        .unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::JobNotFound(_)));
+    let err = runner.mark_destroyed(&[pending, pending]).unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+
+    let job = runner.get(pending).unwrap();
+    assert_eq!(job.state, JobState::PendingDestruction);
+    assert_eq!(job.ended_at, None);
+    assert_eq!(runner.get(queued).unwrap().state, JobState::Queued);
+    assert!(rx.try_recv().is_err(), "a refused batch must not broadcast");
+
+    // Destroying twice is refused the same way.
+    runner.mark_destroyed(&[pending]).unwrap();
+    let err = runner.mark_destroyed(&[pending]).unwrap_err();
+    assert!(matches!(err, wipe_common::WipeError::InvalidState(_)));
+}
+
 // A PendingDestruction Job with no DestructionEvent is not constructible through
 // the runner (only `record_for_destruction` enters PendingDestruction, and it
 // appends one), so that refusal has no test here.
@@ -579,7 +649,7 @@ async fn unknown_job_ids_are_job_not_found() {
         .unwrap_err();
     assert!(matches!(err, wipe_common::WipeError::JobNotFound(id) if id == unknown));
 
-    let err = runner.mark_destroyed(unknown).unwrap_err();
+    let err = runner.mark_destroyed(&[unknown]).unwrap_err();
     assert!(matches!(err, wipe_common::WipeError::JobNotFound(id) if id == unknown));
 }
 

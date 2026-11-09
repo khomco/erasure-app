@@ -215,6 +215,31 @@ pub struct DestructionCompletion {
     pub statement: String,
 }
 
+/// The "destruction completed" statement for these inputs, exactly as
+/// [`DestructionCompletion::new`] stores it. Trims and refuses blank fields
+/// the same way (a blank `video_ref` is no video), so a preview shown before
+/// "I attest" is the text a completion with the same inputs signs. It does
+/// not check the verification flags; the constructor refuses those.
+pub fn completion_statement(
+    completed_at: OffsetDateTime,
+    equipment_id: &str,
+    criterion: &str,
+    video_ref: Option<&str>,
+) -> Result<String, DestructionRecordError> {
+    let equipment_id = required("equipment_id", equipment_id)?;
+    let criterion = required("criterion", criterion)?;
+    let mut statement = format!(
+        "Destruction of the device(s) listed above was completed on {}. Verification: \
+         the remnants were inspected and the equipment {equipment_id} completed its cycle; \
+         the result meets {criterion}.",
+        rfc3339_utc(completed_at),
+    );
+    if let Some(video) = optional(video_ref) {
+        statement.push_str(&format!(" Video reference: {video}."));
+    }
+    Ok(statement)
+}
+
 impl DestructionCompletion {
     pub fn new(
         completed_at: OffsetDateTime,
@@ -235,17 +260,12 @@ impl DestructionCompletion {
             ..verification
         };
         let video_ref = optional(video_ref);
-        let mut statement = format!(
-            "Destruction of the device(s) listed above was completed on {}. Verification: \
-             the remnants were inspected and the equipment {} completed its cycle; the result \
-             meets {}.",
-            rfc3339_utc(completed_at),
-            verification.equipment_id,
-            verification.criterion,
-        );
-        if let Some(video) = &video_ref {
-            statement.push_str(&format!(" Video reference: {video}."));
-        }
+        let statement = completion_statement(
+            completed_at,
+            &verification.equipment_id,
+            &verification.criterion,
+            video_ref.as_deref(),
+        )?;
         Ok(Self {
             completed_at,
             verification,
@@ -299,6 +319,27 @@ pub struct Concurrence {
     pub statement: String,
 }
 
+/// The concurrence statement for these inputs, exactly as
+/// [`Concurrence::new`] stores it. Trims and refuses a blank name or title
+/// the same way, so a preview is the text a concurrence signs.
+pub fn concurrence_statement(
+    kind: ConcurrenceKind,
+    manifest_id: Uuid,
+    full_name: &str,
+    title: &str,
+) -> Result<String, DestructionRecordError> {
+    let full_name = required("full_name", full_name)?;
+    let title = required("title", title)?;
+    let act = match kind {
+        ConcurrenceKind::Review => "reviewed the destruction records and verification evidence",
+        ConcurrenceKind::Witness => "witnessed the destruction",
+    };
+    Ok(format!(
+        "I, {full_name}, {title}, {act} for manifest {manifest_id} and concur that the devices \
+         listed were destroyed as stated."
+    ))
+}
+
 impl Concurrence {
     pub fn new(
         kind: ConcurrenceKind,
@@ -307,15 +348,7 @@ impl Concurrence {
         signer: AttestationSigner,
     ) -> Result<Self, DestructionRecordError> {
         let signer = signer.checked()?;
-        let act = match kind {
-            ConcurrenceKind::Review => "reviewed the destruction records and verification evidence",
-            ConcurrenceKind::Witness => "witnessed the destruction",
-        };
-        let statement = format!(
-            "I, {}, {}, {act} for manifest {manifest_id} and concur that the devices listed \
-             were destroyed as stated.",
-            signer.full_name, signer.title,
-        );
+        let statement = concurrence_statement(kind, manifest_id, &signer.full_name, &signer.title)?;
         Ok(Self {
             kind,
             manifest_id,
@@ -565,6 +598,49 @@ mod tests {
              destroyed as stated."
         );
         assert_eq!(serde_json::to_value(&witness).unwrap()["kind"], "witness");
+    }
+
+    #[test]
+    fn the_completion_statement_function_matches_what_new_stores() {
+        let at = datetime!(2026-11-08 12:30:00 +2);
+        for video in [Some(" CAM-3 14:02 "), Some("  "), None] {
+            let mut v = verification(true, true, " particles ≤ 2 mm ");
+            v.equipment_id = " SHR-2 ".into();
+            let c = DestructionCompletion::new(at, v, video, signer()).unwrap();
+            assert_eq!(
+                completion_statement(at, " SHR-2 ", " particles ≤ 2 mm ", video),
+                Ok(c.statement)
+            );
+        }
+        assert_eq!(
+            completion_statement(at, " ", "c", None),
+            Err(DestructionRecordError::Blank("equipment_id"))
+        );
+        assert_eq!(
+            completion_statement(at, "SHR-2", "", None),
+            Err(DestructionRecordError::Blank("criterion"))
+        );
+    }
+
+    #[test]
+    fn the_concurrence_statement_function_matches_what_new_stores() {
+        let id = Uuid::new_v4();
+        let at = datetime!(2026-11-08 10:00 UTC);
+        for kind in [ConcurrenceKind::Review, ConcurrenceKind::Witness] {
+            let c = Concurrence::new(kind, id, at, signer()).unwrap();
+            assert_eq!(
+                concurrence_statement(kind, id, " Ana Ruiz ", "Bench lead "),
+                Ok(c.statement)
+            );
+        }
+        assert_eq!(
+            concurrence_statement(ConcurrenceKind::Review, id, "", "Lead"),
+            Err(DestructionRecordError::Blank("full_name"))
+        );
+        assert_eq!(
+            concurrence_statement(ConcurrenceKind::Witness, id, "Ana", " "),
+            Err(DestructionRecordError::Blank("title"))
+        );
     }
 
     #[test]

@@ -349,8 +349,15 @@ export interface Job {
   ended_at: string | null;
 }
 
-export type ManifestStateLabel = "pending" | "signed" | "rejected";
+/**
+ * A destruction run's state: `pending` (assembled, awaiting completion) →
+ * `awaiting_concurrence` (only when one is required) → `completed`.
+ * `rejected` is reserved; nothing sets it. The server reads the pre-ADR-0011
+ * `signed` as `completed` but never sends it.
+ */
+export type ManifestStateLabel = "pending" | "awaiting_concurrence" | "completed" | "rejected";
 
+/** A destruction run (mirrors `wipe_common::DestructionManifest`). */
 export interface DestructionManifest {
   id: string;
   created_at: string;
@@ -358,8 +365,8 @@ export interface DestructionManifest {
   job_ids: string[];
   state: ManifestStateLabel;
   note: string | null;
-  supervisor: OperatorRef | null;
-  signed_at: string | null;
+  /** The concurrence the station's policy required when the run was assembled. */
+  required_concurrence: ConcurrenceKind | null;
   completion: DestructionCompletion | null;
   concurrence: Concurrence | null;
 }

@@ -162,7 +162,7 @@ function JobBody({
           )}
           {job.state.state === "pending_destruction" && (
             <Link to="/manifests" className="btn btn-secondary">
-              <ActivitySquare className="h-4 w-4" /> Manifest co-sign
+              <ActivitySquare className="h-4 w-4" /> Destruction runs
             </Link>
           )}
         </div>

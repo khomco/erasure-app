@@ -60,6 +60,12 @@ pub struct AppState {
     /// exactly the bug that shipped the first time round: the station logged
     /// "Licensed" and then emitted evaluation certificates.
     pub license: Arc<RwLock<Arc<crate::licensing::LicenseContext>>>,
+    /// Whether destruction runs need a review or a witness before their Jobs
+    /// reach `Destroyed` (ADR-0011 §3). Set at startup and read-only over the
+    /// API: with no sign-in or roles, a setting editable from the bench could
+    /// be switched off by the operator it is meant to check. Each run copies
+    /// the required kind at assembly. Never depends on licence state.
+    pub concurrence_policy: wipe_common::ConcurrencePolicy,
 }
 
 impl AppState {
@@ -105,6 +111,7 @@ impl AppState {
                     time::OffsetDateTime::now_utc(),
                 ),
             ))),
+            concurrence_policy: wipe_common::ConcurrencePolicy::None,
         };
         state.spawn_cert_generator();
         state
@@ -158,6 +165,13 @@ impl AppState {
         self
     }
 
+    /// Set the station's concurrence policy (default `none`). Runs
+    /// assembled from now on require the policy's concurrence kind.
+    pub fn with_concurrence_policy(mut self, policy: wipe_common::ConcurrencePolicy) -> Self {
+        self.concurrence_policy = policy;
+        self
+    }
+
     /// Current licensing state.
     pub fn license(&self) -> Arc<crate::licensing::LicenseContext> {
         self.license.read().clone()
@@ -194,8 +208,9 @@ impl AppState {
 
     /// Watches the job runner's broadcast channel. On `Erased`, generates +
     /// signs a Certificate. On `PendingDestruction` we generate the cert and
-    /// hold it; the supervisor co-signature is attached when the linked
-    /// manifest is signed (see `handlers::cosign_manifest`).
+    /// hold it; completing the destruction run (and any required
+    /// concurrence) later moves the Job to `Destroyed` without touching the
+    /// cert (see `handlers::complete_manifest`). No co-signature is appended.
     fn spawn_cert_generator(&self) {
         let mut rx = self.runner.subscribe();
         let state = self.clone();
@@ -237,7 +252,7 @@ impl AppState {
                 };
                 // For PendingDestruction we temporarily synthesize a Destroyed
                 // disposition on the cert so the document is meaningful;
-                // the manifest cosign flow finalises the Job to Destroyed.
+                // completing the destruction run finalises the Job to Destroyed.
                 let mut job_for_cert = job.clone();
                 if new_state == wipe_common::JobState::PendingDestruction {
                     job_for_cert.state = wipe_common::JobState::Destroyed;
@@ -349,7 +364,23 @@ pub fn router(state: AppState) -> Router {
             get(handlers::list_manifests).post(handlers::create_manifest),
         )
         .route("/api/manifests/:id", get(handlers::get_manifest))
-        .route("/api/manifests/:id/cosign", post(handlers::cosign_manifest))
+        .route(
+            "/api/manifests/:id/completion",
+            post(handlers::complete_manifest),
+        )
+        .route(
+            "/api/manifests/:id/completion/statement",
+            post(handlers::preview_completion_statement),
+        )
+        .route(
+            "/api/manifests/:id/concurrence",
+            post(handlers::concur_manifest),
+        )
+        .route(
+            "/api/manifests/:id/concurrence/statement",
+            post(handlers::preview_concurrence_statement),
+        )
+        .route("/api/destruction/policy", get(handlers::destruction_policy))
         .route("/api/sim/devices/attach", post(handlers::sim_attach))
         .route("/api/sim/devices/detach", post(handlers::sim_detach))
         .route("/api/sim/devices", get(handlers::sim_detached))

@@ -1,5 +1,6 @@
 import type {
   Capabilities,
+  ConcurrencePolicy,
   DestructMethod,
   DestructionManifest,
   Device,
@@ -96,6 +97,41 @@ export interface CreateManifestRequest {
   note?: string | null;
 }
 
+/** Who signs a completion or concurrence; mirrors `handlers::SignerFields`. */
+export interface SignerFields {
+  operator: OperatorRef;
+  full_name: string;
+  title: string;
+  /** The signer ticked "I attest" against the previewed statement. */
+  attest: boolean;
+}
+
+/** Mirrors `handlers::CompletionRequest`. */
+export interface CompletionRequest extends SignerFields {
+  /** The time the previewed statement names; null lets the server use now. */
+  completed_at: string | null;
+  remnants_inspected: boolean;
+  equipment_cycle_completed: boolean;
+  equipment_id: string;
+  criterion: string;
+  video_ref: string | null;
+}
+
+export interface CompletionPreviewRequest {
+  completed_at?: string | null;
+  equipment_id: string;
+  criterion: string;
+  video_ref: string | null;
+}
+
+export interface ConcurrencePreviewRequest {
+  full_name: string;
+  title: string;
+}
+
+/** The concurrence kind comes from the run, never from this request. */
+export type ConcurrenceRequest = SignerFields;
+
 export const api = {
   health: () => jsonFetch<{ ok: boolean }>("/api/health"),
   station: () => jsonFetch<StationInfo>("/api/station"),
@@ -175,11 +211,30 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  cosignManifest: (id: string, supervisor: OperatorRef) =>
-    jsonFetch<DestructionManifest>(`/api/manifests/${id}/cosign`, {
+  // Destruction runs (ADR-0011): completion, then any required concurrence.
+  // Statements are rendered only in Rust; the UI shows them verbatim.
+  completeRun: (id: string, body: CompletionRequest) =>
+    jsonFetch<DestructionManifest>(`/api/manifests/${id}/completion`, {
       method: "POST",
-      body: JSON.stringify({ supervisor }),
+      body: JSON.stringify(body),
     }),
+  concurRun: (id: string, body: ConcurrenceRequest) =>
+    jsonFetch<DestructionManifest>(`/api/manifests/${id}/concurrence`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  previewCompletion: (id: string, body: CompletionPreviewRequest) =>
+    jsonFetch<{ statement: string; completed_at: string }>(
+      `/api/manifests/${id}/completion/statement`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  previewConcurrence: (id: string, body: ConcurrencePreviewRequest) =>
+    jsonFetch<{ statement: string }>(`/api/manifests/${id}/concurrence/statement`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  destructionPolicy: () =>
+    jsonFetch<{ concurrence_policy: ConcurrencePolicy }>("/api/destruction/policy"),
 };
 
 export function formatBytes(n: number): string {

@@ -171,7 +171,7 @@ function NavBar() {
       <Item to="/" icon={<HardDrive className="h-4 w-4" />} label="Devices" />
       <Item to="/jobs" icon={<ScrollText className="h-4 w-4" />} label="Jobs" />
       <Item to="/destruction/record" icon={<ScanLine className="h-4 w-4" />} label="Record for destruction" />
-      <Item to="/manifests" icon={<FileSignature className="h-4 w-4" />} label="Manifests" />
+      <Item to="/manifests" icon={<FileSignature className="h-4 w-4" />} label="Destruction runs" />
       <Item to="/fleet" icon={<Network className="h-4 w-4" />} label="Fleet" />
       <Item to="/bench-setup" icon={<SlidersHorizontal className="h-4 w-4" />} label="Bench setup" />
     </nav>

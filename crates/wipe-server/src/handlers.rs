@@ -9,10 +9,12 @@ use serde_json::json;
 use uuid::Uuid;
 
 use wipe_common::{
-    attestation_statement, AttestationSigner, Capabilities, Classification, DestructMethod,
-    DestructionAttestation, DestructionEvent, DestructionManifest, DestructionRecordError, Device,
-    DeviceId, IdentifierSource, Intent, Job, JobSpec, ManifestState, OperatorRef,
-    RecordedIdentifiers, ResolvedBayTopology, StationId, StationInfo, WipeError,
+    attestation_statement, completion_statement, concurrence_statement, AttestationSigner,
+    Capabilities, Classification, Concurrence, ConcurrenceKind, DestructMethod,
+    DestructionAttestation, DestructionCompletion, DestructionEvent, DestructionManifest,
+    DestructionRecordError, DestructionVerification, Device, DeviceId, IdentifierSource, Intent,
+    Job, JobSpec, ManifestState, ManifestTransitionError, OperatorRef, RecordedIdentifiers,
+    ResolvedBayTopology, StationId, StationInfo, WipeError,
 };
 
 use crate::app::AppState;
@@ -347,8 +349,8 @@ fn record_err(e: DestructionRecordError) -> ApiError {
     unprocessable(e.to_string())
 }
 
-fn require_attest(fields: &AttestationFields) -> Result<(), ApiError> {
-    if fields.attest {
+fn require_attest(attest: bool) -> Result<(), ApiError> {
+    if attest {
         Ok(())
     } else {
         Err(unprocessable(
@@ -409,7 +411,7 @@ pub async fn record_for_destruction(
     Path(id): Path<Uuid>,
     Json(req): Json<RecordForDestructionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_attest(&req.fields)?;
+    require_attest(req.fields.attest)?;
     let job = state
         .runner
         .get(id)
@@ -473,7 +475,7 @@ pub async fn record_scanned(
     State(state): State<AppState>,
     Json(req): Json<RecordScannedRequest>,
 ) -> Result<Json<RecordScannedResponse>, ApiError> {
-    require_attest(&req.fields)?;
+    require_attest(req.fields.attest)?;
     if req.drives.is_empty() {
         return Err(unprocessable("scan at least one drive to record"));
     }
@@ -593,11 +595,37 @@ pub async fn get_manifest(
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("manifest {id} not found")))
 }
 
-/// Assemble a destruction manifest from N PendingDestruction Jobs. Every Job
-/// in `job_ids` must currently be in `PendingDestruction` and on no other
-/// manifest. On success each Job's `manifest_id` and its latest
-/// DestructionEvent's `manifest_ref` carry the manifest's id; the stored
-/// certificates are untouched (the co-signature block records the manifest).
+/// Jobs in `ids` with no stored certificate. A Job never reaches
+/// `Destroyed` uncertified (c779361), so assembly refuses these and
+/// completion re-checks them. Story 4 replaces this when it certifies at
+/// `Destroyed`: change it here, once.
+fn uncertified(state: &AppState, ids: &[Uuid]) -> Vec<Uuid> {
+    let certs = state.certs.read();
+    ids.iter()
+        .filter(|id| !certs.contains_key(id))
+        .copied()
+        .collect()
+}
+
+fn uncertified_err(ids: &[Uuid]) -> ApiError {
+    let names: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+    ApiError(
+        StatusCode::CONFLICT,
+        format!(
+            "job(s) {} have no certificate yet: a drive erased moments ago may still be \
+             being certified, so retry; a drive recorded for destruction before any erasure \
+             cannot be certified as destroyed yet",
+            names.join(", ")
+        ),
+    )
+}
+
+/// Assemble a destruction run from N PendingDestruction Jobs. Every Job in
+/// `job_ids` must currently be in `PendingDestruction`, have a certificate
+/// and be on no other run. The run records the concurrence the station's
+/// policy requires now (`required_concurrence`). On success each Job's
+/// `manifest_id` and its latest DestructionEvent's `manifest_ref` carry the
+/// run's id; the stored certificates are untouched.
 pub async fn create_manifest(
     State(state): State<AppState>,
     Json(req): Json<CreateManifestRequest>,
@@ -615,9 +643,8 @@ pub async fn create_manifest(
             format!("job {dup} is listed twice"),
         ));
     }
-    // A Job belongs to at most one live manifest. Without this, the second
-    // co-sign appends a second supervisor signature to an already-final cert
-    // and then fails half-way through `mark_destroyed`.
+    // A Job belongs to at most one live manifest, so one completion
+    // decides its destruction.
     {
         let manifests = state.manifests.read();
         for jid in &req.job_ids {
@@ -645,7 +672,17 @@ pub async fn create_manifest(
             ));
         }
     }
-    let manifest = DestructionManifest::new(req.assembled_by, req.job_ids.clone(), req.note);
+    // A run containing a Job with no certificate could never complete.
+    let missing = uncertified(&state, &req.job_ids);
+    if !missing.is_empty() {
+        return Err(uncertified_err(&missing));
+    }
+    let manifest = DestructionManifest::new(
+        req.assembled_by,
+        req.job_ids.clone(),
+        req.note,
+        state.concurrence_policy.required_kind(),
+    );
     let mid = manifest.id;
     // Stamp the manifest on each Job and its latest DestructionEvent before
     // storing the manifest. The preflight above scans stored manifests while
@@ -662,85 +699,274 @@ pub async fn create_manifest(
     Ok(Json(manifest))
 }
 
+/// Who signs a completion or a concurrence, as story 2's attestation
+/// request names them. Text fields default to empty so a missing one is
+/// refused by the constructors with the field's name.
 #[derive(Debug, Deserialize)]
-pub struct CosignManifestRequest {
-    pub supervisor: OperatorRef,
+pub struct SignerFields {
+    pub operator: OperatorRef,
+    #[serde(default)]
+    pub full_name: String,
+    #[serde(default)]
+    pub title: String,
+    /// The signer ticked "I attest" against the displayed statement.
+    #[serde(default)]
+    pub attest: bool,
 }
 
-/// Supervisor co-signs every cert in the manifest. v0.2 Tier-1 baseline:
-/// the supervisor's signature uses the same station signing key (real
-/// per-operator signing keys land with operator-auth, v0.2 #5). The
-/// supervisor's identity is captured as an `OperatorRef` on the
-/// `CoSignatureBlock`.
-pub async fn cosign_manifest(
+#[derive(Debug, Deserialize)]
+pub struct CompletionRequest {
+    /// The time the statement names, as the preview returned it. Omitted,
+    /// the server uses now.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub completed_at: Option<time::OffsetDateTime>,
+    #[serde(default)]
+    pub remnants_inspected: bool,
+    #[serde(default)]
+    pub equipment_cycle_completed: bool,
+    #[serde(default)]
+    pub equipment_id: String,
+    #[serde(default)]
+    pub criterion: String,
+    #[serde(default)]
+    pub video_ref: Option<String>,
+    #[serde(flatten)]
+    pub signer: SignerFields,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompletionPreviewRequest {
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub completed_at: Option<time::OffsetDateTime>,
+    #[serde(default)]
+    pub equipment_id: String,
+    #[serde(default)]
+    pub criterion: String,
+    #[serde(default)]
+    pub video_ref: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConcurrencePreviewRequest {
+    #[serde(default)]
+    pub full_name: String,
+    #[serde(default)]
+    pub title: String,
+}
+
+fn manifest_not_found(id: Uuid) -> ApiError {
+    ApiError(StatusCode::NOT_FOUND, format!("manifest {id} not found"))
+}
+
+fn transition_err(e: ManifestTransitionError) -> ApiError {
+    let status = if e.is_conflict() {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::UNPROCESSABLE_ENTITY
+    };
+    ApiError(status, e.to_string())
+}
+
+/// Now, to the second: the statement prints whole seconds, so a server-chosen
+/// time reads back exactly as signed.
+fn now_to_the_second() -> time::OffsetDateTime {
+    time::OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .expect("0 is a valid nanosecond")
+}
+
+/// Every member Job must still be `PendingDestruction` and certified before
+/// the run is completed or concurred with. Refusals name the Jobs.
+fn check_members(state: &AppState, ids: &[Uuid]) -> Result<(), ApiError> {
+    let mut problems = Vec::new();
+    for jid in ids {
+        match state.runner.get(*jid) {
+            None => problems.push(format!("job {jid} not found")),
+            Some(job) if job.state != wipe_common::JobState::PendingDestruction => {
+                problems.push(format!("job {jid} is not pending destruction"))
+            }
+            Some(_) => {}
+        }
+    }
+    if !problems.is_empty() {
+        return Err(ApiError(StatusCode::CONFLICT, problems.join("; ")));
+    }
+    let missing = uncertified(state, ids);
+    if !missing.is_empty() {
+        return Err(uncertified_err(&missing));
+    }
+    Ok(())
+}
+
+/// Apply `transition` to a copy of run `id` and commit it only if the
+/// transition, the member checks and (when the run is now done) the
+/// runner's all-or-nothing move to `Destroyed` all succeed. The manifests
+/// lock is held throughout, so two requests cannot both pass validation.
+fn advance_run(
+    state: &AppState,
+    id: Uuid,
+    transition: impl FnOnce(&mut DestructionManifest) -> Result<(), ApiError>,
+) -> Result<DestructionManifest, ApiError> {
+    let mut manifests = state.manifests.write();
+    let mut next = manifests
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| manifest_not_found(id))?;
+    transition(&mut next)?;
+    check_members(state, &next.job_ids)?;
+    if next.destroys_jobs() {
+        state
+            .runner
+            .mark_destroyed(&next.job_ids)
+            .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
+    }
+    manifests.insert(id, next.clone());
+    Ok(next)
+}
+
+/// Confirm a destruction run's completion (ADR-0011 §1, second step). With
+/// no concurrence required every member Job becomes `Destroyed` at once;
+/// otherwise the run awaits its concurrence. Changes no certificate.
+pub async fn complete_manifest(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Json(req): Json<CosignManifestRequest>,
+    Json(req): Json<CompletionRequest>,
 ) -> Result<Json<DestructionManifest>, ApiError> {
-    let manifest = state
+    require_attest(req.signer.attest)?;
+    let signer = AttestationSigner::self_asserted(
+        req.signer.operator.clone(),
+        &req.signer.full_name,
+        &req.signer.title,
+    )
+    .map_err(record_err)?;
+    let now = time::OffsetDateTime::now_utc();
+    // Stored in UTC, so the stored time reads exactly as the statement prints it.
+    let completed_at = req
+        .completed_at
+        .map(|t| t.to_offset(time::UtcOffset::UTC))
+        .unwrap_or_else(now_to_the_second);
+    let completion = DestructionCompletion::new(
+        completed_at,
+        DestructionVerification {
+            remnants_inspected: req.remnants_inspected,
+            equipment_cycle_completed: req.equipment_cycle_completed,
+            equipment_id: req.equipment_id,
+            criterion: req.criterion,
+        },
+        req.video_ref.as_deref(),
+        signer,
+    )
+    .map_err(record_err)?;
+    let run = advance_run(&state, id, |m| {
+        // A run that is not pending is a conflict whatever the time says.
+        if m.state == ManifestState::Pending {
+            m.check_completion_time(completed_at, now)
+                .map_err(transition_err)?;
+        }
+        m.complete(completion).map_err(transition_err)
+    })?;
+    Ok(Json(run))
+}
+
+/// Concur with a completed destruction run. The kind is the run's
+/// `required_concurrence`, never the client's; the signer must differ from
+/// the completion's. Every member Job then becomes `Destroyed`.
+pub async fn concur_manifest(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SignerFields>,
+) -> Result<Json<DestructionManifest>, ApiError> {
+    require_attest(req.attest)?;
+    let signer = AttestationSigner::self_asserted(req.operator, &req.full_name, &req.title)
+        .map_err(record_err)?;
+    let run = advance_run(&state, id, |m| {
+        let kind = required_kind(m)?;
+        let concurrence = Concurrence::new(kind, m.id, time::OffsetDateTime::now_utc(), signer)
+            .map_err(record_err)?;
+        m.concur(concurrence).map_err(transition_err)
+    })?;
+    Ok(Json(run))
+}
+
+fn required_kind(m: &DestructionManifest) -> Result<ConcurrenceKind, ApiError> {
+    m.required_concurrence
+        .ok_or_else(|| transition_err(ManifestTransitionError::NoConcurrenceRequired { id: m.id }))
+}
+
+/// Render the completion statement for the operator to read before ticking
+/// "I attest", with the time it names. Sending that time back with the same
+/// fields stores exactly this statement.
+pub async fn preview_completion_statement(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<CompletionPreviewRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let run = state
         .manifests
         .read()
         .get(&id)
         .cloned()
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("manifest {id} not found")))?;
-    if manifest.state != ManifestState::Pending {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            format!("manifest {id} is not pending (state {:?})", manifest.state),
+        .ok_or_else(|| manifest_not_found(id))?;
+    if run.state != ManifestState::Pending {
+        return Err(transition_err(ManifestTransitionError::NotPending {
+            id,
+            state: run.state,
+        }));
+    }
+    let now = time::OffsetDateTime::now_utc();
+    // Stored in UTC, so the stored time reads exactly as the statement prints it.
+    let completed_at = req
+        .completed_at
+        .map(|t| t.to_offset(time::UtcOffset::UTC))
+        .unwrap_or_else(now_to_the_second);
+    run.check_completion_time(completed_at, now)
+        .map_err(transition_err)?;
+    let statement = completion_statement(
+        completed_at,
+        &req.equipment_id,
+        &req.criterion,
+        req.video_ref.as_deref(),
+    )
+    .map_err(record_err)?;
+    let completed_at = completed_at
+        .to_offset(time::UtcOffset::UTC)
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(api_err)?;
+    Ok(Json(
+        json!({ "statement": statement, "completed_at": completed_at }),
+    ))
+}
+
+/// Render the concurrence statement for the run's required kind. 409 when
+/// the run needs no concurrence or is not awaiting it.
+pub async fn preview_concurrence_statement(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ConcurrencePreviewRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let run = state
+        .manifests
+        .read()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| manifest_not_found(id))?;
+    let kind = required_kind(&run)?;
+    if run.state != ManifestState::AwaitingConcurrence {
+        return Err(transition_err(
+            ManifestTransitionError::NotAwaitingConcurrence {
+                id,
+                state: run.state,
+            },
         ));
     }
+    let statement =
+        concurrence_statement(kind, run.id, &req.full_name, &req.title).map_err(record_err)?;
+    Ok(Json(json!({ "statement": statement })))
+}
 
-    // Validate the whole manifest before mutating anything, so a refusal
-    // leaves every cert and Job exactly as it was.
-    //
-    // A Job with no certificate must never be finalised as Destroyed: that
-    // would record a destruction the station cannot attest to. This happens
-    // when a Job is recorded for destruction before any erasure activity existed (the cert
-    // generator has no device snapshot to certify). Refuse, and leave the
-    // manifest pending so the gap stays visible rather than silent.
-    {
-        let certs = state.certs.read();
-        let mut problems = Vec::new();
-        for jid in &manifest.job_ids {
-            match state.runner.get(*jid) {
-                None => problems.push(format!("job {jid} not found")),
-                Some(job) if job.state != wipe_common::JobState::PendingDestruction => {
-                    problems.push(format!("job {jid} is not pending destruction"))
-                }
-                Some(_) if !certs.contains_key(jid) => problems.push(format!(
-                    "job {jid} has no certificate; it cannot be certified as destroyed"
-                )),
-                Some(_) => {}
-            }
-        }
-        if !problems.is_empty() {
-            return Err(ApiError(StatusCode::CONFLICT, problems.join("; ")));
-        }
-    }
-
-    // Co-sign each linked cert, then mark the Job as Destroyed.
-    for jid in &manifest.job_ids {
-        let mut certs = state.certs.write();
-        if let Some(signed) = certs.get_mut(jid) {
-            wipe_cert::co_sign(
-                signed,
-                &state.signing_key,
-                wipe_cert::CoSignerRole::Supervisor,
-                req.supervisor.clone(),
-                Some(id),
-            )
-            .map_err(api_err)?;
-        }
-        drop(certs);
-        state.runner.mark_destroyed(*jid).map_err(runner_err)?;
-    }
-
-    let mut manifests = state.manifests.write();
-    let m = manifests.get_mut(&id).expect("manifest exists");
-    m.state = ManifestState::Signed;
-    m.supervisor = Some(req.supervisor);
-    m.signed_at = Some(time::OffsetDateTime::now_utc());
-    Ok(Json(m.clone()))
+/// The station's concurrence policy, set at startup and read-only here.
+pub async fn destruction_policy(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({ "concurrence_policy": state.concurrence_policy }))
 }
 
 // ---- Error type ---------------------------------------------------------
