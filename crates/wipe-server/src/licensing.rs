@@ -113,8 +113,9 @@ impl LicenseContext {
     /// Load lease state from `store` and keep saving it there.
     ///
     /// Nothing stored yet: a fresh state at `now`. Stored under a different
-    /// licence: the watermark is kept and the count restarts at 0 for this
-    /// licence. No licence: the stored count and licence id are left alone.
+    /// licence: the licensed count restarts at 0 for this licence, and the
+    /// evaluation count is kept with the watermark. No licence: the stored
+    /// counts and licence id are left alone.
     /// Stored but unreadable: a fresh state in RAM, the file untouched, and
     /// every licensed decision `evaluation` until the file is fixed and the
     /// station restarted.
@@ -273,6 +274,20 @@ impl LicenseContext {
         {
             let mut lease = self.lease.write();
             lease.erasures_used = lease.erasures_used.saturating_add(1);
+        }
+        self.persist();
+    }
+
+    /// Record an erasure certified `evaluation` (ADR-0005 §5), and save.
+    ///
+    /// Kept apart from the licensed count, so it never touches a `Count`
+    /// quota, and kept across licence changes. Best-effort exactly like
+    /// [`record_erasure`](Self::record_erasure): a failed save is logged and
+    /// retried by the next save, and nothing is limited by this count.
+    pub fn record_evaluation_erasure(&self) {
+        {
+            let mut lease = self.lease.write();
+            lease.evaluation_erasures = lease.evaluation_erasures.saturating_add(1);
         }
         self.persist();
     }

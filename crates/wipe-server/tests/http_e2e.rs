@@ -1872,6 +1872,74 @@ async fn the_statement_previews_refuse_blank_fields() {
 /// drives, and a queued Job recorded from its device) assemble onto a run,
 /// complete, and each gets one certificate that verifies, carrying the
 /// recorded identifiers instead of a device snapshot.
+/// The lease counts on the destroy path: erased drives destroyed by a run
+/// count once each as evaluation erasures (the default station is
+/// unlicensed); drives destroyed with no erasure attempt count nothing.
+#[tokio::test]
+async fn a_run_of_erased_drives_counts_one_evaluation_erasure_per_drive() {
+    let (base, state) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;
+    let client = reqwest::Client::new();
+    let mut ids = Vec::new();
+    for device in ["dev-nvme-0", "dev-nvme-1", "dev-hdd-0"] {
+        ids.push(http_pending_job(&client, &base, device).await);
+    }
+    let run = http_assemble(&client, &base, &ids).await;
+    let run_id = run["id"].as_str().unwrap();
+    let (status, done) = http_post(
+        &client,
+        format!("{base}/api/manifests/{run_id}/completion"),
+        Some(completion_body()),
+    )
+    .await;
+    assert_eq!(status, 200, "{done}");
+    for id in &ids {
+        let signed = http_wait_for_certificate(&client, &base, id).await;
+        assert_eq!(signed["certificate"]["disposition"], "destroyed");
+    }
+    // Give a (wrongly repeated) count time to land.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let lease = state.license().lease_state();
+    assert_eq!(lease.evaluation_erasures, ids.len() as u64);
+    assert_eq!(lease.erasures_used, 0);
+}
+
+#[tokio::test]
+async fn a_run_of_never_erased_drives_counts_nothing() {
+    let (base, state) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;
+    let client = reqwest::Client::new();
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/destruction/records"),
+        Some(group_body(
+            json!([{ "serial": "DEAD-1" }, { "serial": "DEAD-2" }]),
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let ids: Vec<String> = body["job_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    let run = http_assemble(&client, &base, &ids).await;
+    let run_id = run["id"].as_str().unwrap();
+    let (status, done) = http_post(
+        &client,
+        format!("{base}/api/manifests/{run_id}/completion"),
+        Some(completion_body()),
+    )
+    .await;
+    assert_eq!(status, 200, "{done}");
+    for id in &ids {
+        http_wait_for_certificate(&client, &base, id).await;
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let lease = state.license().lease_state();
+    assert_eq!(lease.evaluation_erasures, 0);
+    assert_eq!(lease.erasures_used, 0);
+}
+
 #[tokio::test]
 async fn never_erased_jobs_assemble_complete_and_get_verifying_certificates() {
     let (base, _) = spawn_server_with(wipe_common::ConcurrencePolicy::None).await;

@@ -298,6 +298,20 @@ how a certificate is marked when the station is unlicensed.
    `quota: Count { erasures }` like an erasure, although under
    [ADR-0011](0011-destruction-by-operator-attestation.md) a destruction is
    an operator attestation, not an erasure.
+   *Free-tier half resolved 2026-11-08 (licensing-as-built story 3):* the
+   hook now records every `evaluation` certificate of a Job that holds an
+   erasure event as an evaluation erasure (so a drive destroyed after an
+   erasure attempt, even a failed one, counts, and one destroyed with no
+   erasure attempt does not) (`LeaseState::evaluation_erasures`,
+   `LicenseContext::record_evaluation_erasure`), whether the station has no
+   licence or one that was not valid at signing. It is kept apart from the
+   licensed `erasures_used`, so no `Count` quota is touched, persisted in
+   `lease-state.json` through the same store and writer thread, and kept
+   across licence changes like the watermark. A failed save is only logged.
+   It is surfaced only in the `lease counts:` line `wipestation serve`
+   prints at start-up; no API route or UI shows it, and no limit or
+   warning text is tied to it (ADR-0012 settled that the free tier
+   withholds nothing but the marking). The destroy-path half is unchanged.
 6. **§2, `scope`: stations can share a fingerprint, and site scope is not
    checked.** `machine_fingerprint` (`crates/wipe-license/src/lib.rs`)
    hashes the station id, and `wipestation serve` defaults the station id to

@@ -433,6 +433,16 @@ fn lease_state_json_without_a_licence_id_still_parses() {
 }
 
 #[test]
+fn lease_state_json_without_an_evaluation_count_parses_to_zero() {
+    // Written before `evaluation_erasures` existed (licensing-as-built story 2).
+    let old = r#"{"time_watermark":"2026-05-28T20:26:40Z","erasures_used":3,"counter_is_monotonic":false,"license_id":"lic"}"#;
+    let s: LeaseState = serde_json::from_str(old).unwrap();
+    assert_eq!(s.erasures_used, 3);
+    assert_eq!(s.evaluation_erasures, 0);
+    assert_eq!(s.license_id.as_deref(), Some("lic"));
+}
+
+#[test]
 fn a_fresh_lease_state_does_not_claim_a_monotonic_counter() {
     // The guarantee is only as strong as the anchor; a counter that claimed
     // to be monotonic while living in a rewritable file would be a lie.

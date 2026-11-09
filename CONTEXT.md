@@ -717,7 +717,7 @@ design target; its **Today:** line says what the code does at present.
 3. Licence fetched from lead/hub at boot, RAM-resident, expires if
    check-in stops. **Today:** nothing is fetched; the licence is read
    from a `--license` file at start and checked against
-   `--vendor-root-b64`. The lease (watermark and erasure count) is kept in
+   `--vendor-root-b64`. The lease (watermark and erasure counts) is kept in
    `lease-state.json` beside the bay topology and survives a restart; on a
    station whose config directory is not writable it is held in RAM and
    resets on every start, which the start-up output states.
@@ -915,7 +915,7 @@ folder or in `.scratch/DECISIONS.md`.
 | Tiered, self-detecting station config store | ADR-0003 | ✅ partial | Control-plane tier always fails (no hub); corrupt config only logged, not surfaced |
 | Bench-setup builder + learn-by-hot-swap identify mode | ADR-0002/0003 | ✅ CLI only | The desktop (Tauri) shell wires no store or simulator: layouts are lost on quit and identify mode is dead |
 | Model-aware enclosure catalog + shell artwork with machine-enforced legibility rules | ADR-0004 | ✅ partial | Site-local overlay exists in code but no host wires it |
-| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark persisted in `lease-state.json` beside the bay topology (RAM-only, resetting on restart, where that directory is not writable and in the desktop shell; tier printed at `wipestation serve` start-up only); `FileCounter` exists but nothing uses it yet (rewindable, not hardware-backed); `TpmCounter` cannot count and claims no hardware backing; `allowed_methods` unenforced; free-tier count not tracked; no API route or UI; desktop shell is always unlicensed |
+| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark persisted in `lease-state.json` beside the bay topology (RAM-only, resetting on restart, where that directory is not writable and in the desktop shell; tier printed at `wipestation serve` start-up only); `FileCounter` exists but nothing uses it yet (rewindable, not hardware-backed); `TpmCounter` cannot count and claims no hardware backing; `allowed_methods` unenforced; evaluation erasures counted and persisted, shown only in the `wipestation serve` start-up line, with no limit attached; no API route or UI; desktop shell is always unlicensed |
 | Vitest suite over the frontend's pure domain modules | §12 | ✅ | |
 | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
 | Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check; landing page (problem, offline-verifiable certificate, differentiators, "what we are not", one early-access CTA); product, standards posture (certification roadmap labelled future), segment (ITAD, enterprise IT, government), pricing ("early-access pricing on request"), contact, privacy and terms pages; early-access and contact forms | ADR-0006 / ROADMAP W1.1–W1.4 | ✅ partial | The forms stay closed (no script, submit disabled, "not open yet") unless the build is given `PUBLIC_HUB_ORIGIN`, and `astro build` refuses that until the privacy notice is published (`site.privacyNoticePublished`), so production builds cannot take sales leads yet; pricing has no amounts unless the build is given `PRICING_HUB_ORIGIN` (`offerings-and-payments` story 5, below); privacy and terms are placeholders to publish before launch; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); copy and statuses await vendor sign-off |
@@ -1001,10 +1001,16 @@ keep resolving.
    entitlements and an offline lease. Shipped: the chain, licence
    verification against `--vendor-root-b64` at start, and the
    `evaluation` marker inside the signed certificate, and lease
-   persistence (the watermark and erasure count in `lease-state.json`
+   persistence (the watermark and erasure counts in `lease-state.json`
    beside the bay topology, RAM-only where that directory is not
-   writable). **Not built:** a licence API route or UI (the lease tier is
-   printed only at `wipestation serve` start-up), use of a counter (`FileCounter` exists — a rewindable file, not
+   writable), and a free-tier count: every `evaluation` certificate of a
+   Job that holds an erasure event is counted as an evaluation erasure
+   (a drive destroyed after an erasure attempt, even a failed one,
+   counts; one destroyed with no erasure attempt does not), apart from the
+   licensed count and kept across licence changes, with no limit or
+   warning attached (ADR-0012). **Not built:** a licence API route or UI
+   (the lease tier and both counts are printed only at `wipestation
+   serve` start-up), use of a counter (`FileCounter` exists — a rewindable file, not
    hardware-backed — but nothing wires it in; `TpmCounter` is a
    placeholder that returns `Unsupported` and does not claim hardware
    backing), enforcement of `allowed_methods`, verifying a
@@ -1390,8 +1396,13 @@ and resolve. None of these have a decided answer.
   earlier key no longer installs.
 - **Lease / watermark** — the station's offline enforcement state
   (`wipe_license::LeaseState`): the highest clock time seen (the
-  watermark, for rollback detection) and the count of licensed
-  erasures under the current licence. `wipestation serve` keeps it in
+  watermark, for rollback detection), the count of licensed
+  erasures under the current licence (what a `Count` quota is checked
+  against), and the count of evaluation erasures — certificates marked
+  `evaluation`, for any reason, of Jobs that hold an erasure event — over
+  the station's life. A Job destroyed after an erasure attempt, even a
+  failed one, counts; one destroyed with no erasure attempt does not. The evaluation count is surfaced only in the `lease counts:` line
+  `wipestation serve` prints at start-up, and nothing is limited by it. `wipestation serve` keeps it in
   `lease-state.json` beside the bay topology, saved after every status
   check, signing decision and counted erasure, so a restart clears
   neither; where that directory is not writable (and in the desktop shell)
@@ -1399,15 +1410,15 @@ and resolve. None of these have a decided answer.
   readable file there, if any). A lease file that cannot be read or saved,
   or a save that takes over 2 s, marks licensed certificates
   `evaluation` and never stops an erasure; an unreadable one is never
-  overwritten. A different licence id keeps the watermark and restarts the
-  count. It is a speed bump, not a control (ADR-0005 §3a): deleting or
+  overwritten. A different licence id keeps the watermark and the evaluation count and
+  restarts the licensed count. It is a speed bump, not a control (ADR-0005 §3a): deleting or
   moving the file, or pointing `--bay-topology` / `WIPESTATION_CONFIG_DIR`
   at an empty directory, starts a fresh lease. Because the watermark now
   survives restarts, a station whose clock was once set far into the
   future keeps reporting `ClockRollback`, and every licensed certificate is
   `evaluation`, after the clock is put right. Recovery: correct the clock,
   stop the station, remove `lease-state.json` (which also restarts the
-  erasure count), and start it again. `wipe_license::FileCounter` (a counter kept in
+  erasure counts), and start it again. `wipe_license::FileCounter` (a counter kept in
   one file, which anyone who can edit the file can rewind, so not
   hardware-backed) exists but is not yet used; `TpmCounter` is a
   placeholder that returns `Unsupported` and does not claim hardware

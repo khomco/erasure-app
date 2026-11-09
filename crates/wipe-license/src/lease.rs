@@ -20,7 +20,7 @@ use crate::{LicenseError, LicenseResult};
 /// negative jumps that are not attacks.
 pub const CLOCK_SKEW_ALLOWANCE: Duration = Duration::minutes(5);
 
-/// Anti-rollback state: the clock watermark and the local erasure count.
+/// Anti-rollback state: the clock watermark and the local erasure counts.
 ///
 /// This type is only the data. Whether it survives a restart depends on the
 /// host: `wipestation serve` keeps it in its own file (`lease-state.json`) in
@@ -34,8 +34,19 @@ pub struct LeaseState {
     /// earlier than this (beyond skew) means time moved backwards.
     #[serde(with = "time::serde::rfc3339")]
     pub time_watermark: OffsetDateTime,
-    /// Erasures observed locally under the current license.
+    /// Licensed erasures observed locally under the current licence: the
+    /// count a `Count` quota is checked against. Evaluation erasures are
+    /// counted separately in [`evaluation_erasures`](Self::evaluation_erasures).
     pub erasures_used: u64,
+    /// Certificates this station signed `evaluation` — no licence, or one
+    /// that was expired, exhausted or otherwise not valid at signing time
+    /// (ADR-0005 §5) — for Jobs holding an erasure event. A Job destroyed
+    /// after an erasure attempt, even a failed one, counts; one destroyed
+    /// with no erasure attempt does not. Counted for the life of the station: it survives a
+    /// licence change, like the watermark. No limit is attached to it.
+    /// Defaults to 0 for lease files written before it existed.
+    #[serde(default)]
+    pub evaluation_erasures: u64,
     /// Set once the counter is anchored somewhere the customer cannot
     /// rewind. False for the file-backed counter.
     #[serde(default)]
@@ -52,6 +63,7 @@ impl LeaseState {
         Self {
             time_watermark: now,
             erasures_used: 0,
+            evaluation_erasures: 0,
             counter_is_monotonic: false,
             license_id: None,
         }

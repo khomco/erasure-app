@@ -506,6 +506,7 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         lease_store,
     )?;
     println!("{}", lease_store_line(&license_ctx.lease_persistence()));
+    println!("{}", lease_counts_line(&license_ctx.lease_state()));
 
     let mut state = AppState::with_static_dir(backend.clone(), fleet, signing_key, resolved_dist)
         .with_license(Arc::new(license_ctx))
@@ -874,6 +875,25 @@ fn lease_store_line(lease: &wipe_server::LeasePersistence) -> String {
     )
 }
 
+/// The start-up line giving the local erasure counts (ADR-0005 §5): licensed
+/// erasures under the licence the stored count belongs to (which, on an
+/// unlicensed start, is the last licence seen, if any), and evaluation
+/// erasures over the station's life. A count only — no limit or warning is
+/// attached to it.
+fn lease_counts_line(lease: &wipe_license::LeaseState) -> String {
+    let licensed = match &lease.license_id {
+        Some(id) => format!(
+            "{} licensed erasure(s) under licence {id}",
+            lease.erasures_used
+        ),
+        None => "no licensed erasures (no licence seen)".to_string(),
+    };
+    format!(
+        "lease counts: {licensed}, {} evaluation erasure(s) on this station",
+        lease.evaluation_erasures
+    )
+}
+
 /// Build the station's licensing state from `--license` / `--vendor-root-b64`.
 ///
 /// A licence that fails to verify, or that names another station's key, is a
@@ -1161,6 +1181,43 @@ mod tests {
         let line = lease_store_line(&ctx.lease_persistence());
         assert!(line.starts_with("lease store: LocalFile at "), "{line}");
         assert!(line.contains(&path.display().to_string()), "{line}");
+    }
+
+    #[test]
+    fn the_start_up_counts_line_reports_an_unlicensed_stations_evaluation_erasures() {
+        let dir = lease_tmpdir("counts-line");
+        let path = dir.join("lease-state.json");
+        let mut seeded = wipe_license::LeaseState::new(time::OffsetDateTime::now_utc());
+        seeded.evaluation_erasures = 3;
+        let store = Arc::new(wipe_server::LocalFileLeaseStore::new(path));
+        wipe_server::LeaseStore::save(store.as_ref(), &seeded).unwrap();
+        let ctx =
+            build_license_context(None, Vec::new(), "ed25519:test", "station-1", store).unwrap();
+        assert_eq!(
+            lease_counts_line(&ctx.lease_state()),
+            "lease counts: no licensed erasures (no licence seen), 3 evaluation erasure(s) on \
+             this station"
+        );
+    }
+
+    #[test]
+    fn the_start_up_counts_line_names_the_licence_a_stored_count_belongs_to() {
+        let dir = lease_tmpdir("counts-line-licence");
+        let path = dir.join("lease-state.json");
+        let mut seeded = wipe_license::LeaseState::new(time::OffsetDateTime::now_utc());
+        seeded.erasures_used = 5;
+        seeded.evaluation_erasures = 2;
+        seeded.license_id = Some("lic-old".into());
+        let store = Arc::new(wipe_server::LocalFileLeaseStore::new(path));
+        wipe_server::LeaseStore::save(store.as_ref(), &seeded).unwrap();
+        // Unlicensed start: the stored count is kept, and named by its licence.
+        let ctx =
+            build_license_context(None, Vec::new(), "ed25519:test", "station-1", store).unwrap();
+        assert_eq!(
+            lease_counts_line(&ctx.lease_state()),
+            "lease counts: 5 licensed erasure(s) under licence lic-old, 2 evaluation \
+             erasure(s) on this station"
+        );
     }
 
     #[test]

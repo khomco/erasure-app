@@ -336,13 +336,22 @@ impl AppState {
                                 "certificate marked evaluation (no valid licence)"
                             );
                         }
-                        // Only drives that were erased count, as at baseline.
-                        if !decision.evaluation && job.latest_erasure().is_some() {
+                        // Only drives that were erased count, as at baseline;
+                        // licensed and evaluation erasures are counted apart.
+                        if job.latest_erasure().is_some() {
                             let license = state.license();
-                            if let Err(e) =
-                                tokio::task::spawn_blocking(move || license.record_erasure()).await
+                            let evaluation = decision.evaluation;
+                            if let Err(e) = tokio::task::spawn_blocking(move || {
+                                if evaluation {
+                                    license.record_evaluation_erasure()
+                                } else {
+                                    license.record_erasure()
+                                }
+                            })
+                            .await
                             {
-                                tracing::error!(?e, %job_id, "erasure not recorded against the lease");
+                                tracing::error!(?e, %job_id, evaluation,
+                                    "erasure not recorded against the lease");
                             }
                         }
                         info!(%job_id, ?new_state, evaluation = decision.evaluation,

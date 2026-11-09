@@ -205,6 +205,27 @@ fn a_different_licence_resets_the_count_and_keeps_the_watermark() {
 }
 
 #[test]
+fn a_different_licence_keeps_the_evaluation_count() {
+    let dir = tmpdir("relicence-eval");
+    let cfg = cfg_in(&dir);
+    let mut old = stored(Some("old"), 5, now() - Duration::hours(2));
+    old.evaluation_erasures = 4;
+    LocalFileLeaseStore::new(lease_state_path(&cfg))
+        .save(&old)
+        .unwrap();
+
+    let ctx = LicenseContext::open(
+        "station-1",
+        Some(unlimited("new")),
+        detect_lease_store(&cfg),
+        now(),
+    );
+    let lease = ctx.lease_state();
+    assert_eq!(lease.erasures_used, 0);
+    assert_eq!(lease.evaluation_erasures, 4, "a station-lifetime count");
+}
+
+#[test]
 fn an_unlicensed_start_leaves_a_licensed_count_alone() {
     let dir = tmpdir("unlicensed");
     let cfg = cfg_in(&dir);
@@ -522,13 +543,17 @@ fn spec(device: &str) -> JobSpec {
 
 /// A station built from `dir`, as `wipestation serve` builds one.
 fn station(dir: &Path, key: &Arc<wipe_cert::SigningKey>, chain: &AttestationChain) -> AppState {
+    station_on(detect_lease_store(&cfg_in(dir)), key, Some(chain))
+}
+
+/// A station over `store`, licensed by `chain` or unlicensed (free tier).
+fn station_on(
+    store: Arc<dyn LeaseStore>,
+    key: &Arc<wipe_cert::SigningKey>,
+    chain: Option<&AttestationChain>,
+) -> AppState {
     let backend = Arc::new(wipe_engine_mock::MockBackend::fast_catalog());
-    let ctx = LicenseContext::open(
-        "station-1",
-        Some(chain.clone()),
-        detect_lease_store(&cfg_in(dir)),
-        now(),
-    );
+    let ctx = LicenseContext::open("station-1", chain.cloned(), store, now());
     AppState::new(backend, None, key.clone()).with_license(Arc::new(ctx))
 }
 
@@ -586,4 +611,83 @@ async fn a_count_quota_used_up_before_a_restart_stays_used_up_after_it() {
         erase_to_certificate(&second, "dev-nvme-0").await,
         "the next certificate is evaluation"
     );
+}
+
+// --- end to end: free-tier erasures are counted ---------------------------------
+
+#[tokio::test]
+async fn an_unlicensed_station_counts_its_evaluation_erasures_across_a_restart() {
+    let dir = tmpdir("eval-e2e");
+    let key = Arc::new(wipe_cert::SigningKey::generate());
+
+    let first = station_on(detect_lease_store(&cfg_in(&dir)), &key, None);
+    for device in ["dev-nvme-0", "dev-nvme-1"] {
+        assert!(erase_to_certificate(&first, device).await, "{device}");
+    }
+    let lease = first.license().lease_state();
+    assert_eq!(lease.evaluation_erasures, 2);
+    assert_eq!(lease.erasures_used, 0);
+    drop(first);
+
+    let second = station_on(detect_lease_store(&cfg_in(&dir)), &key, None);
+    let lease = second.license().lease_state();
+    assert_eq!(lease.evaluation_erasures, 2, "restart keeps the count");
+    assert_eq!(lease.erasures_used, 0);
+}
+
+#[tokio::test]
+async fn a_licensed_station_past_its_quota_counts_the_rest_as_evaluation() {
+    let dir = tmpdir("eval-quota");
+    let key = Arc::new(wipe_cert::SigningKey::generate());
+    let chain = chain(
+        "lic-one",
+        Quota::Count { erasures: 1 },
+        &key.public_key_id(),
+    );
+
+    let state = station(&dir, &key, &chain);
+    assert!(!erase_to_certificate(&state, "dev-nvme-0").await);
+    assert!(erase_to_certificate(&state, "dev-nvme-1").await);
+    let lease = state.license().lease_state();
+    assert_eq!(lease.erasures_used, 1);
+    assert_eq!(lease.evaluation_erasures, 1);
+    drop(state);
+
+    // Restarted with no licence: both counts survive, untouched.
+    let unlicensed = station_on(detect_lease_store(&cfg_in(&dir)), &key, None);
+    let lease = unlicensed.license().lease_state();
+    assert_eq!(lease.erasures_used, 1);
+    assert_eq!(lease.evaluation_erasures, 1);
+    assert_eq!(lease.license_id.as_deref(), Some("lic-one"));
+}
+
+/// A store that loads nothing and refuses every save.
+struct FailingStore;
+
+impl LeaseStore for FailingStore {
+    fn tier(&self) -> StoreTier {
+        StoreTier::LocalFile
+    }
+    fn location(&self) -> String {
+        "failing".into()
+    }
+    fn detail(&self) -> String {
+        "failing".into()
+    }
+    fn load(&self) -> Result<Option<LeaseState>, wipe_server::store::StoreError> {
+        Ok(None)
+    }
+    fn save(&self, _: &LeaseState) -> Result<(), wipe_server::store::StoreError> {
+        Err(wipe_server::store::StoreError::Unavailable)
+    }
+}
+
+#[tokio::test]
+async fn a_failed_save_still_counts_the_evaluation_erasure_in_ram_and_signs() {
+    let key = Arc::new(wipe_cert::SigningKey::generate());
+    let state = station_on(Arc::new(FailingStore), &key, None);
+    assert!(erase_to_certificate(&state, "dev-nvme-0").await);
+    let lease = state.license().lease_state();
+    assert_eq!(lease.evaluation_erasures, 1);
+    assert_eq!(lease.erasures_used, 0);
 }
