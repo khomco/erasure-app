@@ -6,6 +6,7 @@
 //!   * Hub (future) for cross-site visibility.
 
 pub mod app;
+pub mod bootstrap;
 pub mod handlers;
 pub mod licensing;
 pub mod store;

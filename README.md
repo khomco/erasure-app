@@ -251,18 +251,22 @@ URL — there's no "API port" and "UI port" split.
 | **Headless / air-gap** | `wipestation serve --no-fleet` | Same as above, mDNS off |
 | **Remote tablet console** | open `http://<station-ip>:7878` from another device | Same React UI, talks to the remote station's API |
 | **Fast demo mode** | `wipestation serve --fast` | Erasures complete in ~1s for live demos |
-| **Native desktop window** | `cargo run -p wipestation-desktop` | Tauri window over an in-process API on `127.0.0.1:7878` (`WIPESTATION_API_ADDR` moves the API, but the window URL stays `http://127.0.0.1:7878`), same UI as the browser path. Apart from that variable the shell takes none of `serve`'s options: no bay-topology store (bench setup is not saved), no licence (every cert is evaluation), no hot-plug simulator, default (slow) mock timing, and a fresh signing key and random station id on every launch, so certs from one launch do not verify against the next launch's key. It advertises on mDNS, so each launch appears to other stations as a new peer. If the port is taken, the bind error is only logged and the window shows whatever answers there. Its `api_url_cmd` Tauri command exists but the frontend never calls it |
+| **Native desktop window** | `cargo run -p wipestation-desktop` | Tauri window over an in-process API on `127.0.0.1:7878` (`WIPESTATION_API_ADDR` moves the API, but the window URL stays `http://127.0.0.1:7878`), same UI as the browser path. It starts its station through the same `wipe_server::bootstrap` as `serve`, so it has identify mode (the hot-plug simulator is attached). Apart from that variable the shell takes none of `serve`'s options: configuration and lease state stay in memory (bench setup is not saved), no licence (every cert is evaluation), default (slow) mock timing, and a fresh signing key and random station id on every launch, so certs from one launch do not verify against the next launch's key. It advertises on mDNS, so each launch appears to other stations as a new peer. If the port is taken, the bind error is only logged and the window shows whatever answers there. Its `api_url_cmd` Tauri command exists but the frontend never calls it |
 | **Inspect catalog** | `wipestation inspect` | Prints the mock device catalog as JSON |
 | **Offline cert verify** | `wipestation verify-cert path.json --public-key-b64 <key> [--vendor-root-b64 <root>] [--require-licensed]` | Checks the primary signature against the station key, then the content by `cert_format_version` (v2 signature-only; v3 refuses a self-contradicting destruction record or any co-signature; an unknown version is refused by name), and, given a vendor root, the ADR-0005 attestation chain; `--require-licensed`, which takes effect only together with `--vendor-root-b64`, fails an evaluation cert. Prints the format version, the device (or "not read from the device") and, for a destroyed drive, the technique and label, caution, who recorded it (name, title, identity assurance, time, identifiers and source), the completion (time, equipment, criterion, video) and the concurrence or "none required". Does not check v2 co-signatures. No network needed |
 
 ### Important: build the frontend first
 
-The `wipestation` binary auto-detects the frontend bundle at one of:
+The `wipestation` binary and the desktop shell share one resolver
+(`wipe_server::bootstrap::resolve_frontend_dist`); the first that holds an
+`index.html` wins:
 
-* `--static-dir <path>` (explicit override)
-* `$WIPESTATION_STATIC_DIR`
-* `apps/desktop/dist` relative to the CWD
-* `apps/desktop/dist` relative to the binary
+* `wipestation serve` only: `--static-dir <path>` or `$WIPESTATION_STATIC_DIR`
+  (explicit override, used even if it does not exist)
+* the desktop shell only: its Tauri resource dir's `dist`
+* `apps/desktop/dist` or `dist` relative to the CWD
+* `static` next to the binary, or `apps/desktop/dist` up to four directories
+  above it
 
 If none of these are present you'll see an "API only" landing page that
 tells you exactly how to fix it. To build the frontend:

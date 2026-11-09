@@ -12,11 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { workspace = true }
 
 [dependencies]
-wipe-common = { path = "../../../crates/wipe-common" }
 wipe-engine = { path = "../../../crates/wipe-engine" }
-wipe-engine-mock = { path = "../../../crates/wipe-engine-mock" }
-wipe-cert = { path = "../../../crates/wipe-cert" }
-wipe-fleet = { path = "../../../crates/wipe-fleet" }
 wipe-server = { path = "../../../crates/wipe-server" }
 tauri = { workspace = true }
 tauri-plugin-shell = { workspace = true }
@@ -28,7 +24,6 @@ tracing-subscriber = { workspace = true }
 parking_lot = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
-time = { workspace = true }
 url = { workspace = true }
 
 [features]

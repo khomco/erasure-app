@@ -6350,7 +6350,6 @@ dependencies = [
  "wipe-common",
  "wipe-engine",
  "wipe-engine-mock",
- "wipe-fleet",
  "wipe-license",
  "wipe-server",
 ]
@@ -6518,16 +6517,11 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
- "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "url",
- "wipe-cert",
- "wipe-common",
  "wipe-engine",
- "wipe-engine-mock",
- "wipe-fleet",
  "wipe-server",
 ]
 

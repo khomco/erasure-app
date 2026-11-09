@@ -10,15 +10,11 @@
 //! This collapses the "browser at localhost" and "Tauri window" modes onto
 //! one origin — same code, same UI, same API.
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use tauri::Manager;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
-
-use wipe_cert::SigningKey;
-use wipe_engine_mock::{MockBackend, MockTiming};
-use wipe_fleet::FleetService;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7878";
 
@@ -42,9 +38,9 @@ pub fn run() {
         .setup(move |app| {
             // Spawn the API in the background.
             let api_url_for_setup = api_url.clone();
-            let static_dir = detect_static_dir(app.handle());
+            let resource_dist = app.path().resource_dir().ok().map(|d| d.join("dist"));
             tauri::async_runtime::spawn(async move {
-                match bootstrap_api(api_addr, static_dir).await {
+                match bootstrap_api(api_addr, resource_dist).await {
                     Ok(_) => info!("api server exited"),
                     Err(e) => tracing::error!(?e, "api server failed to start or crashed"),
                 }
@@ -80,67 +76,33 @@ fn api_url_cmd() -> String {
         .unwrap_or_else(|_| format!("http://{DEFAULT_ADDR}"))
 }
 
-/// Locate the frontend bundle. In dev (running via `pnpm tauri dev`) the
-/// `tauri dev` process puts the built dist next to the binary; the
-/// resource resolver normally handles this. As a robust fallback we walk
-/// a few common paths.
-fn detect_static_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
-    if let Ok(resource) = app.path().resource_dir() {
-        let p = resource.join("dist");
-        if p.join("index.html").is_file() {
-            return Some(p);
-        }
+/// The desktop's station: nothing written to disk (configuration and lease
+/// state in RAM), a fresh signing key and random station id per launch, no
+/// licence, best-effort mDNS. The resource dir's `dist` is tried before the
+/// shared bundle locations.
+fn station_config(
+    addr: SocketAddr,
+    resource_dist: Option<PathBuf>,
+) -> wipe_server::bootstrap::StationConfig {
+    use wipe_server::bootstrap::{Fleet, Persistence, StationConfig};
+    StationConfig {
+        hostname: hostname_or_default(),
+        fleet: Fleet::BestEffort,
+        host_static_candidates: resource_dist.into_iter().collect(),
+        persistence: Persistence::InMemory {
+            reason: "The desktop app keeps configuration and licence lease state in memory \
+                     only."
+                .into(),
+        },
+        ..StationConfig::new(addr)
     }
-    if let Ok(exe) = std::env::current_exe() {
-        for rel in [
-            "../apps/desktop/dist",
-            "../../apps/desktop/dist",
-            "../../../apps/desktop/dist",
-            "../../../../apps/desktop/dist",
-        ] {
-            let p = exe.parent()?.join(rel);
-            if p.join("index.html").is_file() {
-                return Some(p);
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        let p = cwd.join("apps/desktop/dist");
-        if p.join("index.html").is_file() {
-            return Some(p);
-        }
-    }
-    warn!("could not locate frontend dist — Tauri window will show the API-only landing page");
-    None
 }
 
-async fn bootstrap_api(addr: SocketAddr, static_dir: Option<PathBuf>) -> anyhow::Result<()> {
-    let backend = Arc::new(MockBackend::with_catalog(
-        wipe_engine_mock::default_devices_public(),
-        MockTiming::default(),
-    ));
-    let signing_key = Arc::new(SigningKey::generate());
-
-    let info_msg = wipe_common::StationInfo {
-        id: wipe_common::StationId::new_random(),
-        hostname: hostname_or_default(),
-        role: wipe_common::StationRole::Member,
-        version: env!("CARGO_PKG_VERSION").into(),
-        api_port: addr.port(),
-        started_at: time::OffsetDateTime::now_utc(),
-        active_jobs: 0,
-        last_seen: None,
-    };
-    // mDNS is best-effort — don't fail the app if it can't start.
-    let fleet = match FleetService::start(info_msg) {
-        Ok(f) => Some(Arc::new(f)),
-        Err(e) => {
-            warn!(?e, "mDNS fleet disabled");
-            None
-        }
-    };
-
-    let state = wipe_server::AppState::with_static_dir(backend, fleet, signing_key, static_dir);
+/// Build the station with the shared bootstrap (`wipe_server::bootstrap`) and
+/// serve it.
+async fn bootstrap_api(addr: SocketAddr, resource_dist: Option<PathBuf>) -> anyhow::Result<()> {
+    let cfg = station_config(addr, resource_dist);
+    let state = wipe_server::bootstrap::build_station(cfg, &mut |line| info!("{line}"))?;
     info!(%addr, "binding API");
     wipe_server::serve(state, addr).await?;
     Ok(())
@@ -169,7 +131,8 @@ async fn reqwest_get(url: &str) -> Result<bool, std::io::Error> {
     // Hand-rolled, no dependency: open a TCP connection, send a minimal
     // GET, look for a 200 in the first line.
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let parsed = url::Url::parse(url).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let parsed = url::Url::parse(url)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let host = parsed
         .host_str()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no host"))?;
@@ -182,4 +145,27 @@ async fn reqwest_get(url: &str) -> Result<bool, std::io::Error> {
     let n = stream.read(&mut buf).await?;
     let line = String::from_utf8_lossy(&buf[..n]);
     Ok(line.starts_with("HTTP/1.1 200"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wipe_server::bootstrap::{Fleet, Persistence};
+
+    #[test]
+    fn the_desktop_station_keeps_everything_in_memory_and_prefers_its_resource_dist() {
+        let addr: SocketAddr = "127.0.0.1:7878".parse().unwrap();
+        let dist = PathBuf::from("/resources/dist");
+        let cfg = station_config(addr, Some(dist.clone()));
+        assert_eq!(cfg.addr, addr);
+        assert_eq!(cfg.fleet, Fleet::BestEffort);
+        assert!(matches!(cfg.persistence, Persistence::InMemory { .. }));
+        assert!(cfg.key_path.is_none());
+        assert!(cfg.license.is_none());
+        assert!(cfg.vendor_roots.is_empty());
+        assert!(cfg.static_dir.is_none());
+        assert_eq!(cfg.host_static_candidates.first(), Some(&dist));
+
+        assert!(station_config(addr, None).host_static_candidates.is_empty());
+    }
 }

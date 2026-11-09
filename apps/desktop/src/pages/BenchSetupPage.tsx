@@ -134,8 +134,8 @@ export function BenchSetupPage() {
   });
 
   // /api/sim/* is always mounted but 404s unless the host attached a
-  // simulator (`wipestation serve` does; the desktop shell, though mock-backed,
-  // does not). Any failed query, a 404 included, hides the simulated controls
+  // simulator (`wipestation serve` and the desktop shell both do, through
+  // `wipe_server::bootstrap`). Any failed query, a 404 included, hides the simulated controls
   // and identify mode waits for the operator's actual hands.
   const detached = useQuery({
     queryKey: ["sim-detached"],

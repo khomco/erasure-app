@@ -61,7 +61,10 @@ Station side (one `wipestation` process per bench):
  +------------------+
 ```
 
-`wipe-server` is a library with two hosts:
+`wipe-server` is a library with two hosts. Both build their station with
+`wipe_server::bootstrap::build_station` (signing key, bay-topology seed,
+stores, licence, vendor roots, concurrence policy, simulator, frontend bundle)
+from a `StationConfig` they fill in, so start-up wiring exists once:
 
 - **`wipe-cli`**, the `wipestation` binary: `serve` (all station options),
   `bay-presets`, `verify-cert`, `inspect`, and the vendor-side
@@ -321,7 +324,7 @@ lead are read-side; the discovery transport is pluggable.
 | Mode | Binary | Frontend |
 | --- | --- | --- |
 | Standalone, browser | `wipestation serve` | Same React bundle at `http://127.0.0.1:7878` |
-| Standalone, native window | `wipestation-desktop` (`cargo run -p wipestation-desktop`, or `pnpm tauri dev` / `pnpm tauri build`) | Tauri 2 window over an in-process `wipe-server` on `127.0.0.1:7878`. Only `WIPESTATION_API_ADDR` is honoured (it moves the API; the window URL stays `127.0.0.1:7878`); none of `serve`'s options apply: no topology store, licence or simulator, default mock timing, and a fresh signing key and random station id on every launch. It advertises on mDNS, so each launch appears as a new peer. If the port is taken the bind error is only logged and the window shows whatever answers there |
+| Standalone, native window | `wipestation-desktop` (`cargo run -p wipestation-desktop`, or `pnpm tauri dev` / `pnpm tauri build`) | Tauri 2 window over an in-process `wipe-server` on `127.0.0.1:7878`. Only `WIPESTATION_API_ADDR` is honoured (it moves the API; the window URL stays `127.0.0.1:7878`); none of `serve`'s options apply. It builds its station with the same `wipe_server::bootstrap::build_station` as `serve`, so the simulator (identify mode) is attached; configuration and lease state stay in memory, no licence, default mock timing, and a fresh signing key and random station id on every launch. It advertises on mDNS, so each launch appears as a new peer. If the port is taken the bind error is only logged and the window shows whatever answers there |
 | Headless, no mDNS | `wipestation serve --no-fleet` | Same bundle; tablets must be given the address |
 | Headless wipestation (PXE / rack) | `wipestation serve --no-ui` (future flag) | none on device; operator tablet connects to it |
 | Roaming operator tablet | Same React bundle | Pointed at any station's `/api` |

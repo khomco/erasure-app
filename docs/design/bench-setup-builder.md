@@ -1,13 +1,12 @@
 # Bench setup — customer-facing bay layout builder
 
 **Status:** accepted (2026-08-06). The core builder and identify mode are
-built in `wipestation serve`. Not built: SES auto-detect, custom labels, and
-the Devices-page entry links (see the dated notes below). In the Tauri shell,
-identify mode does nothing useful: the shell attaches no simulator, so
-`/api/sim/devices` answers 404 there (`apps/desktop/src-tauri/src/lib.rs`). The
-operator sees the identify panel hide its simulated-bench controls and ask them
-to insert a drive at the bench (`IdentifyPanel.tsx`), but the shell's mock
-backend never reports a new drive, so identify mode waits indefinitely.
+built in `wipestation serve` and in the Tauri shell, which both start their
+station through `wipe_server::bootstrap` and so both attach the simulator that
+identify mode needs. Not built: SES auto-detect, custom labels, and the
+Devices-page entry links (see the dated notes below). The Tauri shell still has
+no saved store, persistent signing key or licence: a layout built there lasts
+until the app quits.
 
 Companion to [ADR-0002](../adr/0002-configurable-bay-topology.md) (the model)
 and [ADR-0003](../adr/0003-station-config-persistence.md) (where a saved layout
@@ -177,8 +176,8 @@ Because the mock backend has no hands, `DeviceSimulator` stands in for them,
 and the panel says so rather than pretending the drives are real. The
 `/api/sim/*` routes are always mounted (`crates/wipe-server/src/app.rs`); they
 answer only when the host has called `AppState::with_simulator`, and return 404
-otherwise. `wipestation serve` attaches its mock backend that way; the Tauri
-shell does not, so identify mode has no simulator there.
+otherwise. `wipestation serve` and the Tauri shell both attach their mock
+backend that way, through the shared `wipe_server::bootstrap::build_station`.
 
 ## Templates
 
@@ -233,9 +232,10 @@ a fleet of identical benches. **Import** accepts it back.
 > renames (`LocalFileStore::save` in `crates/wipe-server/src/store.rs`), so the
 > write is atomic within one filesystem. It persists only when the station has
 > a writable store tier; otherwise the save holds until restart and the page
-> says so. The Tauri shell wires no store: `AppState::with_static_dir` installs
-> an `EphemeralStore` ("No configuration store was wired in."), so a layout
-> saved there is lost when the app quits.
+> says so. The Tauri shell builds its station with `Persistence::InMemory`
+> (`wipe_server::bootstrap`), so its store is in RAM only and a layout saved
+> there is still lost when the app quits (story 2 moves it to an app-data
+> directory).
 
 ## Model changes this needed (all four done)
 

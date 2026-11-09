@@ -106,8 +106,9 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   with `src/api/ws.ts` and `crates/wipe-server/src/ws.rs`; new routes with
   `crates/wipe-server/src/app.rs` and `src/api/client.ts`. The frontend talks HTTP/WS, not
   Tauri commands.
-- Frontend-bundle resolution is implemented twice — `crates/wipe-cli/src/main.rs:516` and
-  `apps/desktop/src-tauri/src/lib.rs:87`. Change both or the desktop and server paths diverge.
+- Station start-up lives once, in `wipe_server::bootstrap` (`build_station`,
+  `resolve_frontend_dist`): `wipestation serve` and the Tauri shell only map their options into a
+  `StationConfig`. Wire anything new there, never in one host, or the two hosts diverge.
 - Update `CONTEXT.md`, `README.md`, and `docs/design/*` in the same commit as the code they
   describe; when a roadmap item ships, strike it in `docs/ROADMAP.md` and record it in
   `CONTEXT.md` §10. Docs trailing code is the repeated failure here (f7af492, a06e8ac, 7610905).

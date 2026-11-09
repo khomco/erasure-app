@@ -7,7 +7,6 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -15,9 +14,8 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use wipe_cert::{SignedCertificate, SigningKey, VerifyingKey};
-use wipe_engine_mock::{MockBackend, MockTiming};
-use wipe_fleet::FleetService;
-use wipe_server::{serve, AppState};
+use wipe_engine_mock::MockBackend;
+use wipe_server::serve;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -203,38 +201,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Serve {
-            addr,
-            station_id,
-            no_fleet,
-            key_path,
-            fast,
-            static_dir,
-            bay_topology,
-            bay_profile,
-            control_plane_url,
-            ephemeral_config,
-            license,
-            vendor_root_b64,
-            concurrence_policy,
-        } => {
-            cmd_serve(ServeArgs {
-                addr,
-                station_id,
-                no_fleet,
-                key_path,
-                fast,
-                static_dir,
-                bay_topology,
-                bay_profile,
-                control_plane_url,
-                ephemeral_config,
-                license,
-                vendor_root_b64,
-                concurrence_policy,
-            })
-            .await
-        }
+        cmd @ Cmd::Serve { .. } => cmd_serve(serve_args(cmd)).await,
         Cmd::VerifyCert {
             cert,
             public_key_b64,
@@ -247,120 +214,10 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Load the station's bay topology from an explicit file or a named preset.
-///
-/// A file that names an unknown schema version, or a preset name we don't
-/// know, is a hard error: rendering the wrong bay map is worse than
-/// rendering none, because the operator's reason to trust it is that they
-/// stop double-checking against the metal.
-fn load_bay_topology(
-    path: Option<PathBuf>,
-    profile: Option<String>,
-) -> Result<Option<wipe_common::BayTopology>> {
-    if let Some(path) = path {
-        // Since ADR-0003 this path is read *and* written, so "not there yet"
-        // is a first run rather than a misconfiguration. A file that exists
-        // but is wrong is still a hard error.
-        let raw = match fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                println!(
-                    "bay topology: {} does not exist yet — it will be created on first save",
-                    path.display()
-                );
-                return Ok(None);
-            }
-            Err(e) => {
-                return Err(e).with_context(|| format!("reading bay topology {}", path.display()))
-            }
-        };
-        let topology: wipe_common::BayTopology = serde_json::from_str(&raw)
-            .with_context(|| format!("parsing bay topology {}", path.display()))?;
-        if topology.schema_version != wipe_common::BAY_TOPOLOGY_SCHEMA_VERSION {
-            return Err(anyhow!(
-                "bay topology {} declares schema_version {}, but this build understands {}",
-                path.display(),
-                topology.schema_version,
-                wipe_common::BAY_TOPOLOGY_SCHEMA_VERSION
-            ));
-        }
-        let dupes = topology.duplicate_bay_ids();
-        if !dupes.is_empty() {
-            return Err(anyhow!(
-                "bay topology {} has duplicate bay ids: {}",
-                path.display(),
-                dupes
-                    .iter()
-                    .map(|b| b.0.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        println!(
-            "bay topology: {} ({} bays) from {}",
-            topology.label,
-            topology.bay_count(),
-            path.display()
-        );
-        return Ok(Some(topology));
-    }
-
-    if let Some(name) = profile {
-        let (topology, source) = resolve_profile(&name)?;
-        println!(
-            "bay topology: {} ({} bays) from {source} `{name}`",
-            topology.label,
-            topology.bay_count()
-        );
-        return Ok(Some(topology));
-    }
-
-    println!("bay topology: not configured — bench will be shown as unconfigured");
-    Ok(None)
-}
-
-/// Resolve a `--bay-profile` name: a built-in preset, or a catalog model id.
-///
-/// The catalog is a source of defaults (ADR-0004), so a station should be able
-/// to start from one without an operator hand-writing the same JSON the
-/// builder would have produced. Either way the bays start unbound — the
-/// catalog knows the shape of a chassis, never which drive is in which bay.
-fn resolve_profile(name: &str) -> Result<(wipe_common::BayTopology, &'static str)> {
-    if let Some(topology) = wipe_common::preset(name) {
-        return Ok((topology, "preset"));
-    }
-
-    let catalog = wipe_common::Catalog::bundled();
-    if let Some(model) = catalog.get(&wipe_common::ModelId(name.to_string())) {
-        return Ok((
-            wipe_common::BayTopology {
-                schema_version: wipe_common::BAY_TOPOLOGY_SCHEMA_VERSION,
-                label: model.display_name(),
-                generated: false,
-                revision: 0,
-                auto_fill_unbound: true,
-                enclosures: vec![model.expand("enc1")],
-            },
-            "catalog model",
-        ));
-    }
-
-    Err(anyhow!(
-        "unknown bay profile `{name}` — presets: {}; catalog models: {}",
-        wipe_common::preset_names().join(", "),
-        catalog
-            .models
-            .iter()
-            .map(|m| m.id.0.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
-}
-
 fn cmd_bay_presets(dump: Option<String>) -> Result<()> {
     match dump {
         Some(name) => {
-            let (topology, _) = resolve_profile(&name)?;
+            let (topology, _) = wipe_server::bootstrap::resolve_profile(&name)?;
             println!("{}", serde_json::to_string_pretty(&topology)?);
         }
         None => {
@@ -411,6 +268,42 @@ struct ServeArgs {
     concurrence_policy: wipe_common::ConcurrencePolicy,
 }
 
+/// The `serve` subcommand's flags as one struct.
+fn serve_args(cmd: Cmd) -> ServeArgs {
+    match cmd {
+        Cmd::Serve {
+            addr,
+            station_id,
+            no_fleet,
+            key_path,
+            fast,
+            static_dir,
+            bay_topology,
+            bay_profile,
+            control_plane_url,
+            ephemeral_config,
+            license,
+            vendor_root_b64,
+            concurrence_policy,
+        } => ServeArgs {
+            addr,
+            station_id,
+            no_fleet,
+            key_path,
+            fast,
+            static_dir,
+            bay_topology,
+            bay_profile,
+            control_plane_url,
+            ephemeral_config,
+            license,
+            vendor_root_b64,
+            concurrence_policy,
+        },
+        other => unreachable!("serve_args called with {other:?}"),
+    }
+}
+
 /// `none`, `review` or `witness`, the policy's serde names.
 fn parse_concurrence_policy(s: &str) -> Result<wipe_common::ConcurrencePolicy, String> {
     serde_json::from_value(serde_json::Value::String(s.to_owned()))
@@ -418,6 +311,24 @@ fn parse_concurrence_policy(s: &str) -> Result<wipe_common::ConcurrencePolicy, S
 }
 
 async fn cmd_serve(args: ServeArgs) -> Result<()> {
+    let addr = args.addr;
+    // ADR-0005: the roots are decoded whether or not --license is given: they
+    // are also what a licence installed at runtime must verify against
+    // (ADR-0008 §4).
+    let vendor_roots = decode_keys("vendor-root-b64", args.vendor_root_b64.clone())?;
+    let cfg = station_config(args, vendor_roots);
+    let state = wipe_server::bootstrap::build_station(cfg, &mut |line| println!("{line}"))?;
+    println!("API listening on http://{addr}");
+    serve(state, addr).await?;
+    Ok(())
+}
+
+/// Map `serve`'s flags onto the shared station bootstrap's config.
+fn station_config(
+    args: ServeArgs,
+    vendor_roots: Vec<VerifyingKey>,
+) -> wipe_server::bootstrap::StationConfig {
+    use wipe_server::bootstrap::{Fleet, Persistence, StationConfig};
     let ServeArgs {
         addr,
         station_id,
@@ -425,149 +336,37 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         key_path,
         fast,
         static_dir,
-        bay_topology: bay_topology_path,
+        bay_topology,
         bay_profile,
         control_plane_url,
-        ephemeral_config: force_ephemeral,
-        license: license_path,
-        vendor_root_b64,
+        ephemeral_config,
+        license,
+        vendor_root_b64: _,
         concurrence_policy,
     } = args;
-    let seed_topology = load_bay_topology(bay_topology_path.clone(), bay_profile)?;
-    let signing_key = Arc::new(load_or_create_signing_key(key_path)?);
-    println!(
-        "signing key public id: {}",
-        signing_key.verifying_key().public_key_id()
-    );
-    println!(
-        "signing key public b64: {}",
-        signing_key.verifying_key().to_base64()
-    );
-
-    let backend = Arc::new(MockBackend::with_catalog(
-        wipe_engine_mock::default_devices_public(),
-        if fast {
-            MockTiming::fast()
+    StationConfig {
+        addr,
+        station_id,
+        hostname: std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".into()),
+        fleet: if no_fleet {
+            Fleet::Off
         } else {
-            MockTiming::default()
+            Fleet::Required
         },
-    ));
-
-    let resolved_station_id = station_id.clone().unwrap_or_else(|| "standalone".into());
-
-    let fleet = if no_fleet {
-        None
-    } else {
-        use wipe_common::{StationId, StationInfo, StationRole};
-        let id = station_id
-            .map(StationId)
-            .unwrap_or_else(StationId::new_random);
-        let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".into());
-        let info = StationInfo {
-            id,
-            hostname,
-            role: StationRole::Member,
-            version: env!("CARGO_PKG_VERSION").into(),
-            api_port: addr.port(),
-            started_at: time::OffsetDateTime::now_utc(),
-            active_jobs: 0,
-            last_seen: None,
-        };
-        Some(Arc::new(FleetService::start(info)?))
-    };
-
-    let resolved_dist = static_dir.or_else(detect_frontend_dist);
-    match &resolved_dist {
-        Some(p) => println!("serving frontend from {}", p.display()),
-        None => println!("no frontend bundle found — UI will show an API-only landing page"),
+        key_path,
+        fast,
+        static_dir,
+        host_static_candidates: Vec::new(),
+        bay_topology,
+        bay_profile,
+        persistence: Persistence::Detect {
+            control_plane_url,
+            ephemeral_config,
+        },
+        license,
+        vendor_roots,
+        concurrence_policy,
     }
-
-    // Work out where saved configuration goes before serving, so the tier is
-    // in the startup log next to everything else an operator checks (ADR-0003).
-    let store_cfg = wipe_server::store::StoreConfig {
-        explicit_path: bay_topology_path,
-        control_plane_url,
-        station_id: resolved_station_id.clone(),
-    };
-    let (store, lease_store) = serve_stores(&store_cfg, force_ephemeral);
-    let store_status = wipe_server::store::status_of(&store);
-    println!(
-        "config store: {:?} at {} — {}",
-        store_status.tier, store_status.location, store_status.detail
-    );
-    if store_status.needs_operator_decision {
-        println!("  ^ the UI will ask the operator to point at a control plane or accept the loss");
-    }
-
-    // ADR-0005: a licence only decides how certificates are *marked*. A
-    // station with none still erases and still signs. The roots are decoded
-    // whether or not --license is given: they are also what a licence
-    // installed at runtime must verify against (ADR-0008 §4).
-    let vendor_roots = decode_keys("vendor-root-b64", vendor_root_b64)?;
-    let license_ctx = build_license_context(
-        license_path,
-        &vendor_roots,
-        &signing_key.public_key_id(),
-        &resolved_station_id,
-        lease_store,
-    )?;
-    println!("{}", lease_store_line(&license_ctx.lease_persistence()));
-    println!("{}", lease_counts_line(&license_ctx.lease_state()));
-    println!("{}", runtime_install_line(vendor_roots.len()));
-
-    let state = AppState::with_static_dir(backend.clone(), fleet, signing_key, resolved_dist);
-    let mut state = apply_licensing(state, license_ctx, vendor_roots)
-        .with_topology_store(store)
-        .with_concurrence_policy(concurrence_policy)
-        // The mock can fake hot-plug, which is what identify mode is driven
-        // by. The /api/sim/* routes are always mounted; without this call
-        // they answer 404.
-        .with_simulator(backend);
-    // A --bay-topology file or --bay-profile seeds the bench only when the
-    // store had nothing; a saved layout is the operator's and outranks it.
-    if state.bay_topology.read().is_none() {
-        state = state.with_bay_topology(seed_topology);
-    }
-    println!(
-        "destruction concurrence policy: {}",
-        serde_json::to_value(concurrence_policy)?
-            .as_str()
-            .unwrap_or_default()
-    );
-    println!("API listening on http://{addr}");
-    serve(state, addr).await?;
-    Ok(())
-}
-
-/// Walk a small list of likely locations for a built frontend (`index.html`
-/// must exist). Tries:
-///   * `$WIPESTATION_STATIC_DIR` (handled by clap)
-///   * `<cwd>/apps/desktop/dist`
-///   * `<cwd>/dist`
-///   * `<binary-dir>/../apps/desktop/dist`
-///   * `<binary-dir>/static`
-fn detect_frontend_dist() -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("apps/desktop/dist"));
-        candidates.push(cwd.join("dist"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            candidates.push(parent.join("static"));
-            candidates.push(parent.join("../apps/desktop/dist"));
-            candidates.push(parent.join("../../apps/desktop/dist"));
-            candidates.push(parent.join("../../../apps/desktop/dist"));
-        }
-    }
-    candidates
-        .into_iter()
-        .find(|p| has_index_html(p))
-        .map(|p| p.canonicalize().unwrap_or(p))
-}
-
-fn has_index_html(p: &Path) -> bool {
-    p.join("index.html").is_file()
 }
 
 fn decode_keys(label: &str, keys_b64: Vec<String>) -> Result<Vec<VerifyingKey>> {
@@ -824,157 +623,6 @@ async fn cmd_inspect() -> Result<()> {
     Ok(())
 }
 
-fn load_or_create_signing_key(path: Option<PathBuf>) -> Result<SigningKey> {
-    match path {
-        None => Ok(SigningKey::generate()),
-        Some(p) => {
-            if p.exists() {
-                let bytes = fs::read(&p)?;
-                if bytes.len() != 32 {
-                    return Err(anyhow!(
-                        "{p:?} is not a 32-byte Ed25519 seed (got {})",
-                        bytes.len()
-                    ));
-                }
-                let arr: [u8; 32] = bytes.try_into().unwrap();
-                Ok(SigningKey::from_seed(arr))
-            } else {
-                let key = SigningKey::generate();
-                fs::write(&p, key.0.to_bytes())?;
-                Ok(key)
-            }
-        }
-    }
-}
-
-/// The topology store and the lease store `wipestation serve` runs with.
-///
-/// `--ephemeral-config` keeps *configuration* in RAM; lease state is detected
-/// whatever it says, because lease state is licensing enforcement, not
-/// configuration (ADR-0005 §3a). That only stops this flag from refilling a
-/// quota: deleting or moving `lease-state.json`, or pointing `--bay-topology`
-/// or `WIPESTATION_CONFIG_DIR` at an empty directory, still starts a fresh
-/// lease — the speed bump ADR-0005 §3a admits.
-fn serve_stores(
-    cfg: &wipe_server::store::StoreConfig,
-    force_ephemeral: bool,
-) -> (
-    Arc<dyn wipe_server::TopologyStore>,
-    Arc<dyn wipe_server::LeaseStore>,
-) {
-    let topology: Arc<dyn wipe_server::TopologyStore> = if force_ephemeral {
-        Arc::new(wipe_server::store::EphemeralStore::new(
-            "Started with --ephemeral-config.".into(),
-            false,
-        ))
-    } else {
-        wipe_server::store::detect_store(cfg)
-    };
-    (topology, wipe_server::detect_lease_store(cfg))
-}
-
-/// The start-up line saying where lease state lives and whether it survives
-/// reboot. Same shape as the `config store:` line above it.
-fn lease_store_line(lease: &wipe_server::LeasePersistence) -> String {
-    format!(
-        "lease store: {:?} at {} — {}",
-        lease.tier, lease.location, lease.detail
-    )
-}
-
-/// The start-up line giving the local erasure counts (ADR-0005 §5): licensed
-/// erasures under the licence the stored count belongs to (which, on an
-/// unlicensed start, is the last licence seen, if any), and evaluation
-/// erasures over the station's life. A count only — no limit or warning is
-/// attached to it.
-fn lease_counts_line(lease: &wipe_license::LeaseState) -> String {
-    let licensed = match &lease.license_id {
-        Some(id) => format!(
-            "{} licensed erasure(s) under licence {id}",
-            lease.erasures_used
-        ),
-        None => "no licensed erasures (no licence seen)".to_string(),
-    };
-    format!(
-        "lease counts: {licensed}, {} evaluation erasure(s) on this station",
-        lease.evaluation_erasures
-    )
-}
-
-/// Give the station its start-up licence context and the vendor roots a
-/// licence installed at runtime (`POST /api/license`) is checked against.
-fn apply_licensing(
-    state: AppState,
-    license_ctx: wipe_server::LicenseContext,
-    vendor_roots: Vec<VerifyingKey>,
-) -> AppState {
-    state
-        .with_license(Arc::new(license_ctx))
-        .with_vendor_roots(vendor_roots)
-}
-
-/// Whether `POST /api/license` can install a licence on this station.
-fn runtime_install_line(roots: usize) -> String {
-    if roots == 0 {
-        "runtime licence install: disabled — no --vendor-root-b64, so POST /api/license is refused"
-            .to_string()
-    } else {
-        format!(
-            "runtime licence install: enabled (POST /api/license, checked against {roots} vendor \
-             root(s)); an installed licence lasts until restart"
-        )
-    }
-}
-
-/// Build the station's licensing state from `--license` / `--vendor-root-b64`.
-///
-/// A licence that fails to verify, or that names another station's key, is a
-/// hard error at startup rather than a silent downgrade: the operator asked
-/// for licensed operation and needs to know they did not get it. Running with
-/// *no* licence at all is a different, supported thing — free tier.
-fn build_license_context(
-    license_path: Option<PathBuf>,
-    roots: &[VerifyingKey],
-    station_key_id: &str,
-    station_id: &str,
-    lease_store: Arc<dyn wipe_server::LeaseStore>,
-) -> Result<wipe_server::LicenseContext> {
-    let now = time::OffsetDateTime::now_utc();
-    let Some(path) = license_path else {
-        println!("licence: none — free tier, certificates will be marked evaluation");
-        return Ok(wipe_server::LicenseContext::open(
-            station_id,
-            None,
-            lease_store,
-            now,
-        ));
-    };
-
-    if roots.is_empty() {
-        return Err(anyhow!(
-            "--license needs --vendor-root-b64: an unverified licence proves nothing"
-        ));
-    }
-    let license = wipe_license::load_license(&path).map_err(|e| anyhow!("{e}"))?;
-    wipe_license::check_installable(&license, station_key_id, roots)
-        .map_err(|p| anyhow!("cannot install {}: {p}", path.display()))?;
-
-    let ent = &license.body.entitlements;
-    println!(
-        "licence: {} for {} ({}) — valid {} to {}",
-        license.body.license_id,
-        ent.customer_name,
-        ent.customer_id,
-        ent.not_before.date(),
-        ent.not_after.date()
-    );
-
-    let chain = wipe_license::AttestationChain::new(license);
-    let ctx = wipe_server::LicenseContext::open(station_id, Some(chain), lease_store, now);
-    println!("  {}", ctx.status(now).operator_message());
-    Ok(ctx)
-}
-
 fn cmd_license(cmd: LicenseCmd) -> Result<()> {
     match cmd {
         LicenseCmd::NewRoot { out } => {
@@ -1131,55 +779,6 @@ mod tests {
     use super::*;
     use wipe_license::Feature;
 
-    /// `serve` hands its `--vendor-root-b64` roots to the station even with
-    /// no `--license`, so a licence can be installed at runtime.
-    #[tokio::test]
-    async fn serve_without_a_licence_still_trusts_its_vendor_roots_for_runtime_install() {
-        let root = wipe_license::VendorRoot::generate();
-        let station = |roots: Vec<VerifyingKey>| {
-            let backend = Arc::new(MockBackend::with_catalog(
-                wipe_engine_mock::default_devices_public(),
-                MockTiming::fast(),
-            ));
-            let state = AppState::new(backend, None, Arc::new(SigningKey::generate()));
-            let store: Arc<dyn wipe_server::LeaseStore> =
-                Arc::new(wipe_server::EphemeralLeaseStore::new("test".into()));
-            let ctx =
-                build_license_context(None, &roots, "ed25519:test", "station-1", store).unwrap();
-            apply_licensing(state, ctx, roots)
-        };
-        let licence_for = |state: &AppState| {
-            let now = time::OffsetDateTime::now_utc();
-            let ent = wipe_license::Entitlements {
-                customer_id: "c".into(),
-                customer_name: "C".into(),
-                quota: wipe_license::Quota::Unlimited,
-                scope: wipe_license::Scope::Site {
-                    site_id: "s".into(),
-                },
-                not_before: now - time::Duration::days(1),
-                not_after: now + time::Duration::days(30),
-                features: vec![],
-                allowed_methods: wipe_license::AllowedMethods::All,
-                machine_binding: None,
-            };
-            let licence = root
-                .issue("lic-rt", state.signing_key.public_key_id(), ent, now)
-                .unwrap();
-            serde_json::to_string(&licence).unwrap()
-        };
-
-        let roots = decode_keys("vendor-root-b64", vec![root.verifying_key().to_base64()]).unwrap();
-        let state = station(roots);
-        assert!(state.install_license(&licence_for(&state)).is_ok());
-
-        let state = station(Vec::new());
-        assert_eq!(
-            state.install_license(&licence_for(&state)),
-            Err(wipe_server::LicenseInstallError::NoVendorRoot)
-        );
-    }
-
     /// Exhaustive: a new `Feature` variant fails to compile here until it is
     /// listed, and then fails the test until `parse_feature` accepts it.
     fn all_features() -> Vec<Feature> {
@@ -1204,179 +803,77 @@ mod tests {
         all
     }
 
-    fn lease_tmpdir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "wipestation-cli-lease-{name}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn store_cfg_in(dir: &std::path::Path) -> wipe_server::store::StoreConfig {
-        wipe_server::store::StoreConfig {
-            explicit_path: Some(dir.join("bay-topology.json")),
-            control_plane_url: None,
-            station_id: "station-1".into(),
-        }
-    }
-
-    #[test]
-    fn ephemeral_config_keeps_topology_in_ram_but_still_persists_lease_state() {
-        let dir = lease_tmpdir("ephemeral-config");
-        let cfg = store_cfg_in(&dir);
-
-        let (topology, lease) = serve_stores(&cfg, true);
-        assert_eq!(topology.tier(), wipe_server::StoreTier::Ephemeral);
-        assert_eq!(lease.tier(), wipe_server::StoreTier::LocalFile);
-        assert_eq!(
-            lease.location(),
-            dir.join("lease-state.json").display().to_string()
-        );
-
-        let (topology, lease) = serve_stores(&cfg, false);
-        assert_eq!(topology.tier(), wipe_server::StoreTier::LocalFile);
-        assert_eq!(lease.tier(), wipe_server::StoreTier::LocalFile);
-    }
-
-    #[test]
-    fn an_unlicensed_station_saves_its_lease_after_a_signing_decision() {
-        let dir = lease_tmpdir("unlicensed");
-        let path = dir.join("lease-state.json");
-        let store = Arc::new(wipe_server::LocalFileLeaseStore::new(path.clone()));
-        let ctx = build_license_context(None, &[], "ed25519:test", "station-1", store).unwrap();
-        assert_eq!(
-            ctx.lease_persistence().tier,
-            wipe_server::StoreTier::LocalFile
-        );
-
-        let decision = ctx.signing_decision(time::OffsetDateTime::now_utc());
-        assert!(decision.evaluation);
-        let saved: wipe_license::LeaseState =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved.erasures_used, 0);
-
-        let line = lease_store_line(&ctx.lease_persistence());
-        assert!(line.starts_with("lease store: LocalFile at "), "{line}");
-        assert!(line.contains(&path.display().to_string()), "{line}");
-    }
-
-    #[test]
-    fn the_start_up_counts_line_reports_an_unlicensed_stations_evaluation_erasures() {
-        let dir = lease_tmpdir("counts-line");
-        let path = dir.join("lease-state.json");
-        let mut seeded = wipe_license::LeaseState::new(time::OffsetDateTime::now_utc());
-        seeded.evaluation_erasures = 3;
-        let store = Arc::new(wipe_server::LocalFileLeaseStore::new(path));
-        wipe_server::LeaseStore::save(store.as_ref(), &seeded).unwrap();
-        let ctx = build_license_context(None, &[], "ed25519:test", "station-1", store).unwrap();
-        assert_eq!(
-            lease_counts_line(&ctx.lease_state()),
-            "lease counts: no licensed erasures (no licence seen), 3 evaluation erasure(s) on \
-             this station"
-        );
-    }
-
-    #[test]
-    fn the_start_up_counts_line_names_the_licence_a_stored_count_belongs_to() {
-        let dir = lease_tmpdir("counts-line-licence");
-        let path = dir.join("lease-state.json");
-        let mut seeded = wipe_license::LeaseState::new(time::OffsetDateTime::now_utc());
-        seeded.erasures_used = 5;
-        seeded.evaluation_erasures = 2;
-        seeded.license_id = Some("lic-old".into());
-        let store = Arc::new(wipe_server::LocalFileLeaseStore::new(path));
-        wipe_server::LeaseStore::save(store.as_ref(), &seeded).unwrap();
-        // Unlicensed start: the stored count is kept, and named by its licence.
-        let ctx = build_license_context(None, &[], "ed25519:test", "station-1", store).unwrap();
-        assert_eq!(
-            lease_counts_line(&ctx.lease_state()),
-            "lease counts: 5 licensed erasure(s) under licence lic-old, 2 evaluation \
-             erasure(s) on this station"
-        );
-    }
-
-    #[test]
-    fn a_licensed_station_starts_from_its_saved_lease_count() {
-        let dir = lease_tmpdir("licensed");
-        let now = time::OffsetDateTime::now_utc();
-        let root = wipe_license::VendorRoot::generate();
-        let ent = wipe_license::Entitlements {
-            customer_id: "c".into(),
-            customer_name: "C".into(),
-            quota: wipe_license::Quota::Count { erasures: 10 },
-            scope: wipe_license::Scope::Site {
-                site_id: "s".into(),
-            },
-            not_before: now - time::Duration::days(1),
-            not_after: now + time::Duration::days(30),
-            features: vec![],
-            allowed_methods: wipe_license::AllowedMethods::All,
-            machine_binding: None,
-        };
-        let license = root.issue("lic-cli", "ed25519:test", ent, now).unwrap();
-        let license_path = dir.join("licence.json");
-        wipe_license::save_license(&license_path, &license).unwrap();
-
-        let lease_path = dir.join("lease-state.json");
-        let mut seeded = wipe_license::LeaseState::new(now - time::Duration::hours(1));
-        seeded.erasures_used = 2;
-        seeded.license_id = Some("lic-cli".into());
-        let store = Arc::new(wipe_server::LocalFileLeaseStore::new(lease_path));
-        wipe_server::LeaseStore::save(store.as_ref(), &seeded).unwrap();
-
-        let ctx = build_license_context(
-            Some(license_path),
-            &[root.verifying_key()],
-            "ed25519:test",
-            "station-1",
-            store,
+    fn serve_config(args: &[&str]) -> wipe_server::bootstrap::StationConfig {
+        let argv = ["wipestation", "serve"].iter().chain(args).copied();
+        station_config(
+            serve_args(Cli::try_parse_from(argv).unwrap().cmd),
+            Vec::new(),
         )
-        .unwrap();
-        assert_eq!(ctx.lease_state().erasures_used, 2);
-        assert_eq!(
-            ctx.lease_persistence().tier,
-            wipe_server::StoreTier::LocalFile
-        );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn serve_stores_on_a_read_only_directory_runs_the_lease_in_ram_and_says_so() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = lease_tmpdir("read-only");
-        let set = |mode| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode));
-        set(0o500).unwrap();
-        let probe = dir.join(".mode-probe");
-        if std::fs::write(&probe, b"x").is_ok() {
-            let _ = std::fs::remove_file(&probe);
-            set(0o700).unwrap();
-            return; // mode bits do not stop this user (root)
+    fn serve_flags_map_onto_the_station_config() {
+        use wipe_server::bootstrap::{Fleet, Persistence};
+        let cfg = serve_config(&[
+            "--no-fleet",
+            "--ephemeral-config",
+            "--bay-topology",
+            "X",
+            "--station-id",
+            "S",
+            "--control-plane-url",
+            "U",
+            "--addr",
+            "127.0.0.1:7999",
+            "--key-path",
+            "K",
+            "--fast",
+            "--static-dir",
+            "D",
+            "--bay-profile",
+            "P",
+            "--license",
+            "L",
+        ]);
+        assert_eq!(cfg.addr, "127.0.0.1:7999".parse().unwrap());
+        assert_eq!(cfg.fleet, Fleet::Off);
+        assert_eq!(cfg.station_id.as_deref(), Some("S"));
+        assert_eq!(cfg.bay_topology, Some(PathBuf::from("X")));
+        assert_eq!(cfg.key_path, Some(PathBuf::from("K")));
+        assert!(cfg.fast);
+        assert_eq!(cfg.static_dir, Some(PathBuf::from("D")));
+        assert_eq!(cfg.bay_profile.as_deref(), Some("P"));
+        assert_eq!(cfg.license, Some(PathBuf::from("L")));
+        assert!(cfg.host_static_candidates.is_empty());
+        match cfg.persistence {
+            Persistence::Detect {
+                control_plane_url,
+                ephemeral_config,
+            } => {
+                assert_eq!(control_plane_url.as_deref(), Some("U"));
+                assert!(ephemeral_config);
+            }
+            other => panic!("expected Detect, got {other:?}"),
         }
-        let (_, lease) = serve_stores(&store_cfg_in(&dir), false);
-        set(0o700).unwrap();
-        assert_eq!(lease.tier(), wipe_server::StoreTier::Ephemeral);
-        let ctx = build_license_context(None, &[], "ed25519:test", "station-1", lease).unwrap();
-        let line = lease_store_line(&ctx.lease_persistence());
-        assert!(
-            line.contains("quota count and clock-rollback protection reset on reboot"),
-            "{line}"
-        );
-    }
 
-    #[test]
-    fn the_start_up_line_says_what_a_ram_only_lease_loses_on_reboot() {
-        let store = Arc::new(wipe_server::EphemeralLeaseStore::new(
-            "This station cannot write /ro.".into(),
-        ));
-        let ctx = build_license_context(None, &[], "ed25519:test", "station-1", store).unwrap();
-        let line = lease_store_line(&ctx.lease_persistence());
-        assert!(line.starts_with("lease store: Ephemeral at "), "{line}");
-        assert!(
-            line.contains("quota count and clock-rollback protection reset on reboot"),
-            "{line}"
-        );
+        // Env twins would leak into the defaults; keep this half hermetic.
+        if std::env::var_os("WIPESTATION_CONTROL_PLANE_URL").is_none()
+            && std::env::var_os("WIPESTATION_BAY_TOPOLOGY").is_none()
+        {
+            let cfg = serve_config(&[]);
+            assert_eq!(cfg.fleet, Fleet::Required);
+            assert!(cfg.bay_topology.is_none());
+            match cfg.persistence {
+                Persistence::Detect {
+                    control_plane_url,
+                    ephemeral_config,
+                } => {
+                    assert!(control_plane_url.is_none());
+                    assert!(!ephemeral_config);
+                }
+                other => panic!("expected Detect, got {other:?}"),
+            }
+        }
     }
 
     #[test]
