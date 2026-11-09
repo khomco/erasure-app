@@ -223,8 +223,10 @@ and the drift-gate contract).
   router; a test asserts every `.route()` appears).
   *Partial (drift-tests story 1): `crates/wipe-server/tests/route_golden.rs` pins every
   station route into `docs/generated/http-routes.txt` and fails when a route has no desktop
-  client call or the client calls an unrouted path. The generated reference page itself is
-  still open (needs W2.1 and the docs site).*
+  client call or the client calls an unrouted path. Drift-tests story 2:
+  `crates/wipe-cli/tests/help_golden.rs` pins `wipestation --help` and every subcommand's
+  `--help` into `docs/generated/cli/`, failing on changed, missing or stale files. The generated
+  reference pages themselves are still open (need W2.1 and the docs site).*
 - W2.3 Bench configuration guide: builder, presets, catalog, identify mode.
 - W2.4 Run-a-wipe guide and certificate anatomy, with generated cert examples.
 - W2.5 Verify-a-certificate guide, including third-party verification with only

@@ -1,0 +1,7 @@
+List built-in bay-topology presets and known enclosure models, or dump one as JSON to use as a starting point for a station config file
+
+Usage: wipestation bay-presets [OPTIONS]
+
+Options:
+      --dump <DUMP>  Print this preset or catalog model as JSON instead of listing names
+  -h, --help         Print help

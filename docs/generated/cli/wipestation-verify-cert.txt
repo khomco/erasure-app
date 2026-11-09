@@ -1,0 +1,16 @@
+Verify a signed certificate JSON file against a public key
+
+Usage: wipestation verify-cert [OPTIONS] --public-key-b64 <PUBLIC_KEY_B64> <CERT>
+
+Arguments:
+  <CERT>  Path to a SignedCertificate JSON document
+
+Options:
+      --public-key-b64 <PUBLIC_KEY_B64>
+          Trusted public key, base64 (no padding) of the 32-byte Ed25519 key. Can be repeated for multiple keys
+      --vendor-root-b64 <VENDOR_ROOT_B64>
+          Published vendor ROOT public key, base64. Supply this to verify the attestation chain (ADR-0005): that the signing key was licensed to a named customer under stated entitlements. Can be repeated so a verifier can accept more than one root
+      --require-licensed
+          Treat an unlicensed (evaluation) certificate as a failure. Off by default: an evaluation cert is still a valid record of a real erasure, and auditors usually want to see it
+  -h, --help
+          Print help

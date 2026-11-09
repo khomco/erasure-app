@@ -1,0 +1,10 @@
+Print a licence and, given roots, whether it verifies
+
+Usage: wipestation license inspect [OPTIONS] <LICENSE>
+
+Arguments:
+  <LICENSE>  
+
+Options:
+      --vendor-root-b64 <VENDOR_ROOT_B64>  
+  -h, --help                               Print help

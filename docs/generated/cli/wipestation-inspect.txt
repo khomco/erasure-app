@@ -1,0 +1,6 @@
+Print the catalog of devices the mock backend would expose
+
+Usage: wipestation inspect
+
+Options:
+  -h, --help  Print help

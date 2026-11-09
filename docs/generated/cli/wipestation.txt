@@ -1,0 +1,15 @@
+wipestation — data sanitization toolkit
+
+Usage: wipestation <COMMAND>
+
+Commands:
+  serve        Run the Axum API server with the mock backend. Advertises on mDNS
+  bay-presets  List built-in bay-topology presets and known enclosure models, or dump one as JSON to use as a starting point for a station config file
+  verify-cert  Verify a signed certificate JSON file against a public key
+  inspect      Print the catalog of devices the mock backend would expose
+  license      Vendor licensing tools (ADR-0005)
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version

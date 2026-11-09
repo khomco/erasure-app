@@ -1,0 +1,29 @@
+Issue a licence binding an instance key to entitlements
+
+Usage: wipestation license issue [OPTIONS] --root-seed <ROOT_SEED> --instance-key-id <INSTANCE_KEY_ID> --license-id <LICENSE_ID> --customer-id <CUSTOMER_ID> --customer-name <CUSTOMER_NAME> --out <OUT>
+
+Options:
+      --root-seed <ROOT_SEED>
+          Vendor root seed produced by `new-root`
+      --instance-key-id <INSTANCE_KEY_ID>
+          Instance public key id to license, e.g. `ed25519:...`. Read it from a station's startup log or `GET /api/public_key`
+      --license-id <LICENSE_ID>
+          
+      --customer-id <CUSTOMER_ID>
+          
+      --customer-name <CUSTOMER_NAME>
+          
+      --quota <QUOTA>
+          Erasure quota. Omit for unlimited
+      --site-id <SITE_ID>
+          Site id for a site-wide licence. Omit with --machine-fingerprint for a machine-scoped one
+      --machine-fingerprint <MACHINE_FINGERPRINT>
+          Bind to one station's machine fingerprint
+      --days <DAYS>
+          Lease length in days from now [default: 365]
+      --feature <FEATURE>
+          Feature to grant; repeatable. One of: enterprise_mode, hub_sync, erp_integration, pdf_certificates, cert_anchoring, operator_sso
+      --out <OUT>
+          
+  -h, --help
+          Print help

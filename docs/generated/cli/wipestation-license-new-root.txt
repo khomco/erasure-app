@@ -1,0 +1,7 @@
+Generate a vendor root keypair. Writes the 32-byte seed and prints the public key to publish
+
+Usage: wipestation license new-root --out <OUT>
+
+Options:
+      --out <OUT>  Where to write the root seed. Guard this file — it is the highest-value secret in the product
+  -h, --help       Print help

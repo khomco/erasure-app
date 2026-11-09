@@ -1,0 +1,33 @@
+Run the Axum API server with the mock backend. Advertises on mDNS
+
+Usage: wipestation serve [OPTIONS]
+
+Options:
+      --addr <ADDR>
+          TCP address to bind, e.g. `127.0.0.1:7878` [default: 127.0.0.1:7878]
+      --station-id <STATION_ID>
+          Station identifier (defaults to a random UUID)
+      --no-fleet
+          Disable mDNS fleet advertisement
+      --key-path <KEY_PATH>
+          Path where the signing key seed is read/written. If the file doesn't exist a new key is generated and persisted
+      --fast
+          Speed up mock erasures (useful for demos/CI)
+      --static-dir <STATIC_DIR>
+          Directory containing the built frontend (`index.html` + `assets/`). If omitted, common locations are auto-detected; if no UI is found the server still runs API-only [env: WIPESTATION_STATIC_DIR=]
+      --bay-topology <BAY_TOPOLOGY>
+          Path to a bay-topology JSON file describing this station's physical drive bays (ADR-0002). Takes precedence over `--bay-profile`. If neither is given the station reports an explicitly-unconfigured bench rather than inventing a chassis [env: WIPESTATION_BAY_TOPOLOGY=]
+      --bay-profile <BAY_PROFILE>
+          Bay-topology preset, or a catalog model id (ADR-0004), to start from. Both expand into the same model a config file uses, with all bays unbound; run `wipestation bay-presets` to list them and to dump one as a starting point
+      --control-plane-url <CONTROL_PLANE_URL>
+          Base URL of a control plane to hold this station's configuration when the station has no writable storage (ADR-0003 tier 2). The hub itself is future work; with no writable path and no reachable control plane the station runs ephemeral and says so [env: WIPESTATION_CONTROL_PLANE_URL=]
+      --ephemeral-config
+          Skip store detection and keep configuration in RAM only. For demos and for reproducing what a PXE station sees. Licence lease state is still saved to `lease-state.json` in the config directory when it is writable
+      --license <LICENSE>
+          Path to a vendor-issued licence (ADR-0005). Without one the station runs free-tier: it still erases and still signs, but certificates are marked `evaluation` [env: WIPESTATION_LICENSE=]
+      --vendor-root-b64 <VENDOR_ROOT_B64>
+          Published vendor root public key(s), base64. Required with --license: a licence is only meaningful if we check who signed it. Also the only roots a licence installed while the station runs (`POST /api/license`) is checked against; without one, runtime install is refused. A request can never add a root
+      --concurrence-policy <CONCURRENCE_POLICY>
+          Whether destruction runs need a second signer before their Jobs are destroyed (ADR-0011 §3): `none` (the standards' default), `review` or `witness`. Set here, never edited from the bench [env: WIPESTATION_CONCURRENCE_POLICY=] [default: none]
+  -h, --help
+          Print help
