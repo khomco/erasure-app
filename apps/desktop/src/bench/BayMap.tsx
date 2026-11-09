@@ -134,6 +134,32 @@ export interface BayCellData {
 
 export type BayLookup = (bay: Bay) => BayCellData;
 
+/**
+ * Bay → what is in it, from the server-resolved occupancy alone (ADR-0002).
+ * Exported so the Devices page's batch selection sees exactly the cells the
+ * map draws, rather than matching bays to devices a second time.
+ */
+export function makeBayLookup(
+  resolved: ResolvedBayTopology,
+  devicesById: Map<string, Device>,
+  jobsByDeviceId: Map<string, Job>,
+  deriveStatus: (job: Job | undefined) => SlotStatus,
+): BayLookup {
+  const occupancy = new Map<string, string>();
+  for (const o of resolved.occupancy) occupancy.set(o.bay_id, o.device_id);
+  return (bay) => {
+    const deviceId = occupancy.get(bay.id);
+    const device = deviceId ? (devicesById.get(deviceId) ?? null) : null;
+    const job = device ? (jobsByDeviceId.get(device.id) ?? null) : null;
+    // No device resolved to this bay: it is physically free, which is a
+    // different signal from "a drive is here and idle".
+    const status: SlotStatus = device
+      ? deriveStatus(job ?? undefined)
+      : { kind: "empty" };
+    return { bay, device, job, status };
+  };
+}
+
 // --- one tray --------------------------------------------------------------
 
 function Tray({
@@ -145,6 +171,8 @@ function Tray({
   vertical,
   onSelect,
   selected,
+  checked,
+  toggle,
 }: {
   cell: BayCellData;
   x: number;
@@ -153,7 +181,12 @@ function Tray({
   h: number;
   vertical: boolean;
   onSelect?: (cell: BayCellData) => void;
+  /** Focused: the bay the operator last clicked. */
   selected: boolean;
+  /** Ticked for a batch start — drawn louder than focus, with a check. */
+  checked: boolean;
+  /** Select mode: a clickable tray is a toggle and always says whether it is pressed. */
+  toggle: boolean;
 }) {
   const { bay, device, status } = cell;
   const tone = SLOT_TONE[status.kind];
@@ -180,9 +213,10 @@ function Tray({
       onClick={canClick ? () => onSelect(cell) : undefined}
       style={canClick ? { cursor: "pointer" } : undefined}
       role={canClick ? "button" : undefined}
+      aria-pressed={canClick && toggle ? checked : undefined}
       aria-label={`Bay ${bay.label}: ${
         disabled ? "blanked" : tone.label
-      }${device ? `, ${device.model}` : ""}`}
+      }${device ? `, ${device.model}` : ""}${checked ? ", selected" : ""}`}
     >
       <title>
         {`Bay ${bay.label}\n${
@@ -204,8 +238,8 @@ function Tray({
         height={h}
         rx={3}
         fill={disabled ? "#0a0f1a" : tone.fill}
-        stroke={disabled ? "#16202f" : tone.stroke}
-        strokeWidth={selected ? 2 : 1}
+        stroke={disabled ? "#16202f" : checked ? CHECKED_STROKE : tone.stroke}
+        strokeWidth={checked ? 2.5 : selected ? 2 : 1}
         strokeDasharray={disabled ? "3 3" : undefined}
       />
 
@@ -267,9 +301,28 @@ function Tray({
           )}
         </g>
       )}
+
+      {/* batch tick: a filled dot with a check in the tray's far corner */}
+      {checked && !disabled && (
+        <g pointerEvents="none">
+          <circle cx={x + w - 7} cy={y + 7} r={5} fill={CHECKED_STROKE} />
+          <path
+            d={`M ${x + w - 9.5} ${y + 7} l 1.8 1.9 l 3.4 -3.6`}
+            fill="none"
+            stroke="#0b1220"
+            strokeWidth={1.4}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </g>
+      )}
     </g>
   );
 }
+
+/** Outline of a bay ticked for a batch start: distinct from every status hue
+ *  and from the thicker-but-same-colour outline of a merely focused bay. */
+const CHECKED_STROKE = "#38bdf8";
 
 // --- bank / enclosure ------------------------------------------------------
 
@@ -280,6 +333,7 @@ function BankGroup({
   lookup,
   onSelect,
   selectedBayId,
+  selectedBayIds,
 }: {
   bank: Bank;
   ox: number;
@@ -287,6 +341,7 @@ function BankGroup({
   lookup: BayLookup;
   onSelect?: (cell: BayCellData) => void;
   selectedBayId?: string | null;
+  selectedBayIds?: ReadonlySet<string>;
 }) {
   const cell = cellSize(bank);
   const size = bankSize(bank);
@@ -338,6 +393,8 @@ function BankGroup({
               vertical={vertical}
               onSelect={onSelect}
               selected={selectedBayId === bay.id}
+              checked={selectedBayIds?.has(bay.id) ?? false}
+              toggle={selectedBayIds !== undefined}
             />
           </g>
         );
@@ -398,12 +455,14 @@ function EnclosureGroup({
   lookup,
   onSelect,
   selectedBayId,
+  selectedBayIds,
 }: {
   enc: Enclosure;
   layout: ReturnType<typeof enclosureLayout>;
   lookup: BayLookup;
   onSelect?: (cell: BayCellData) => void;
   selectedBayId?: string | null;
+  selectedBayIds?: ReadonlySet<string>;
 }) {
   const { content, shell, fit } = layout;
 
@@ -452,6 +511,7 @@ function EnclosureGroup({
               lookup={lookup}
               onSelect={onSelect}
               selectedBayId={selectedBayId}
+              selectedBayIds={selectedBayIds}
             />
           </g>
         ))}
@@ -469,6 +529,7 @@ export function BayMap({
   deriveStatus,
   onSelect,
   selectedBayId,
+  selectedBayIds,
   catalog,
 }: {
   resolved: ResolvedBayTopology;
@@ -477,6 +538,8 @@ export function BayMap({
   deriveStatus: (job: Job | undefined) => SlotStatus;
   onSelect?: (cell: BayCellData) => void;
   selectedBayId?: string | null;
+  /** Bays ticked for a batch start (Devices page select mode). */
+  selectedBayIds?: ReadonlySet<string>;
   /** Optional. Without it every enclosure renders generic — which is the
    *  normal outcome for unrecognised hardware anyway, so a missing or failed
    *  catalog fetch costs recognition, not the bay map. */
@@ -488,23 +551,10 @@ export function BayMap({
     return m;
   }, [catalog]);
 
-  const occupancy = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const o of resolved.occupancy) m.set(o.bay_id, o.device_id);
-    return m;
-  }, [resolved.occupancy]);
-
-  const lookup: BayLookup = (bay) => {
-    const deviceId = occupancy.get(bay.id);
-    const device = deviceId ? (devicesById.get(deviceId) ?? null) : null;
-    const job = device ? (jobsByDeviceId.get(device.id) ?? null) : null;
-    // No device resolved to this bay: it is physically free, which is a
-    // different signal from "a drive is here and idle".
-    const status: SlotStatus = device
-      ? deriveStatus(job ?? undefined)
-      : { kind: "empty" };
-    return { bay, device, job, status };
-  };
+  const lookup = useMemo(
+    () => makeBayLookup(resolved, devicesById, jobsByDeviceId, deriveStatus),
+    [resolved, devicesById, jobsByDeviceId, deriveStatus],
+  );
 
   // Enclosures flow and wrap rather than stacking in one tall column: a bench
   // with a rack, a dock and a carrier is three separate boxes on a workbench,
@@ -533,6 +583,7 @@ export function BayMap({
               lookup={lookup}
               onSelect={onSelect}
               selectedBayId={selectedBayId}
+              selectedBayIds={selectedBayIds}
             />
             {enc.note && (
               <p className="mt-1 max-w-sm text-[11px] leading-relaxed text-slate-500">

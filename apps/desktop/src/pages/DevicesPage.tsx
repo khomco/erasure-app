@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   CheckCircle2,
+  CheckSquare,
   ChevronRight,
   CircleOff,
   Cpu,
@@ -20,7 +21,20 @@ import {
 import { api, classNames, formatBytes } from "@/api/client";
 import { useOperator } from "@/operator/context";
 import { useEventStream } from "@/api/ws";
-import { BayMap, type BayCellData } from "@/bench/BayMap";
+import { BayMap, makeBayLookup, type BayCellData } from "@/bench/BayMap";
+import {
+  EMPTY_SELECTION,
+  batchTargets,
+  bayCellsInOrder,
+  canStart,
+  pruneSelection,
+  runBatch,
+  selectAllIdle,
+  toggleBay,
+  type BatchResult,
+  type BatchSelection,
+  type BatchTarget,
+} from "@/bench/batchSelection";
 import {
   ATTENTION_KINDS,
   deriveSlotStatus,
@@ -28,7 +42,7 @@ import {
   type SlotStatus,
   type SlotStatusKind,
 } from "@/bench/slotStatus";
-import type { Classification, Device, Intent, Job } from "@/api/types";
+import type { Classification, Device, Intent, Job, OperatorRef } from "@/api/types";
 
 function deviceIcon(d: Device) {
   switch (d.media_type) {
@@ -83,6 +97,12 @@ export function DevicesPage() {
   const [selected, setSelected] = useState<Device | null>(null);
   const [view, setView] = useState<"bays" | "cards">("bays");
   const [focusedBayId, setFocusedBayId] = useState<string | null>(null);
+  // Batch start (ROADMAP O1.4): select mode ticks idle bays instead of
+  // opening the single-drive wizard; the selection is ad hoc, never stored.
+  const [selectMode, setSelectMode] = useState(false);
+  const [batch, setBatch] = useState<BatchSelection>(EMPTY_SELECTION);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const { operator } = useOperator();
 
   const devicesById = useMemo(() => {
     const m = new Map<string, Device>();
@@ -101,6 +121,22 @@ export function DevicesPage() {
     }
     return map;
   }, [jobs.data]);
+
+  // Every bay as the map draws it, in bay-map order — from the server's
+  // resolved occupancy only (ADR-0002).
+  const cells = useMemo(() => {
+    if (!bays.data) return [];
+    const lookup = makeBayLookup(bays.data, devicesById, deviceToLatestJob, deriveSlotStatus);
+    return bayCellsInOrder(bays.data.topology, lookup);
+  }, [bays.data, devicesById, deviceToLatestJob]);
+
+  // A refetch of devices, jobs or topology can make a ticked bay stale (drive
+  // pulled or swapped, a Job started on it); drop it before it can be started.
+  useEffect(() => {
+    setBatch((prev) => pruneSelection(prev, cells));
+  }, [cells]);
+
+  const targets = useMemo(() => batchTargets(batch, cells), [batch, cells]);
 
   if (devices.isLoading) {
     return <div className="text-slate-400">Probing attached storage…</div>;
@@ -126,7 +162,16 @@ export function DevicesPage() {
     ATTENTION_KINDS.includes(s.kind),
   ).length;
 
+  const leaveSelectMode = () => {
+    setSelectMode(false);
+    setBatch(EMPTY_SELECTION);
+  };
+
   const onBaySelect = (cell: BayCellData) => {
+    if (selectMode) {
+      setBatch((prev) => toggleBay(prev, cell));
+      return;
+    }
     setFocusedBayId(cell.bay.id);
     // An empty bay has nothing to act on; clicking a populated one opens the
     // same wizard the card grid does.
@@ -155,7 +200,26 @@ export function DevicesPage() {
           <span className="text-xs text-slate-500">
             {list.length} device{list.length === 1 ? "" : "s"} attached
           </span>
-          <ViewToggle view={view} onChange={setView} />
+          {view === "bays" && resolved && (
+            <button
+              className={classNames(
+                "btn text-xs",
+                selectMode ? "btn-secondary" : "btn-ghost",
+              )}
+              onClick={() => (selectMode ? leaveSelectMode() : setSelectMode(true))}
+              aria-pressed={selectMode}
+            >
+              <CheckSquare className="h-3.5 w-3.5" />
+              {selectMode ? "Done selecting" : "Select bays"}
+            </button>
+          )}
+          <ViewToggle
+            view={view}
+            onChange={(v) => {
+              if (v !== "bays") leaveSelectMode();
+              setView(v);
+            }}
+          />
         </div>
       </div>
 
@@ -176,13 +240,24 @@ export function DevicesPage() {
                 <code>--bay-topology</code> to mirror the real hardware.
               </div>
             )}
+            {selectMode && (
+              <SelectionBar
+                count={targets.length}
+                operator={operator}
+                onSelectAll={() => setBatch((prev) => selectAllIdle(prev, cells))}
+                onClear={() => setBatch(EMPTY_SELECTION)}
+                onStart={() => setBatchOpen(true)}
+                canOpen={canStart({ targets, operator, running: false })}
+              />
+            )}
             <BayMap
               resolved={resolved}
               devicesById={devicesById}
               jobsByDeviceId={deviceToLatestJob}
               deriveStatus={deriveSlotStatus}
               onSelect={onBaySelect}
-              selectedBayId={focusedBayId}
+              selectedBayId={selectMode ? null : focusedBayId}
+              selectedBayIds={selectMode ? new Set(batch.keys()) : undefined}
               catalog={catalog.data ?? null}
             />
             <BayLegend />
@@ -217,6 +292,18 @@ export function DevicesPage() {
 
       {selected && (
         <EraseWizard device={selected} onClose={() => setSelected(null)} />
+      )}
+
+      {batchOpen && (
+        <BatchWizard
+          targets={targets}
+          onClose={(ran) => {
+            setBatchOpen(false);
+            // Cancelling before Begin keeps the ticks so the operator can add
+            // a bay; only a finished run clears the selection.
+            if (ran) leaveSelectMode();
+          }}
+        />
       )}
     </div>
   );
@@ -612,61 +699,14 @@ function EraseWizard({ device, onClose }: { device: Device; onClose: () => void 
           </button>
         </div>
 
-        {operator && (
-          <div className="flex items-center gap-2 rounded-md border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs">
-            <UserCircle2 className="h-4 w-4 text-indigo-400" />
-            <span className="text-slate-300">
-              Running as <span className="font-medium">{operator.display_name}</span>
-            </span>
-            <span className="font-mono text-[10px] text-slate-500">
-              &lt;{operator.email}&gt;
-            </span>
-            <span className="ml-auto text-[10px] uppercase tracking-wide text-slate-500">
-              stamped on cert
-            </span>
-          </div>
-        )}
+        {operator && <OperatorChip operator={operator} />}
 
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <div className="label">Classification (FIPS 199)</div>
-            <div className="flex gap-1">
-              {(["low", "moderate", "high"] as const).map((c) => (
-                <button
-                  key={c}
-                  onClick={() => setClassification(c)}
-                  className={classNames(
-                    "btn flex-1 text-xs",
-                    classification === c
-                      ? "bg-indigo-500 text-white"
-                      : "bg-slate-800 text-slate-300 hover:bg-slate-700"
-                  )}
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <div className="label">Intent</div>
-            <div className="flex gap-1">
-              {(["reuse", "recycle", "destroy"] as const).map((c) => (
-                <button
-                  key={c}
-                  onClick={() => setIntent(c)}
-                  className={classNames(
-                    "btn flex-1 text-xs",
-                    intent === c
-                      ? "bg-indigo-500 text-white"
-                      : "bg-slate-800 text-slate-300 hover:bg-slate-700"
-                  )}
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
+        <SpecChoices
+          classification={classification}
+          onClassification={setClassification}
+          intent={intent}
+          onIntent={setIntent}
+        />
 
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -678,15 +718,7 @@ function EraseWizard({ device, onClose }: { device: Device; onClose: () => void 
               placeholder="optional"
             />
           </div>
-          <div>
-            <div className="label">Ticket / RMA</div>
-            <input
-              className="field"
-              value={ticket}
-              onChange={(e) => setTicket(e.target.value)}
-              placeholder="optional"
-            />
-          </div>
+          <TicketField value={ticket} onChange={setTicket} />
         </div>
 
         {caps.data && (
@@ -735,5 +767,328 @@ function EraseWizard({ device, onClose }: { device: Device; onClose: () => void 
         </div>
       </div>
     </div>
+  );
+}
+
+// --- spec controls shared by the single-drive and batch wizards ------------
+
+function OperatorChip({ operator }: { operator: OperatorRef }) {
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs">
+      <UserCircle2 className="h-4 w-4 text-indigo-400" />
+      <span className="text-slate-300">
+        Running as <span className="font-medium">{operator.display_name}</span>
+      </span>
+      <span className="font-mono text-[10px] text-slate-500">
+        &lt;{operator.email}&gt;
+      </span>
+      <span className="ml-auto text-[10px] uppercase tracking-wide text-slate-500">
+        stamped on cert
+      </span>
+    </div>
+  );
+}
+
+function SpecChoices({
+  classification,
+  onClassification,
+  intent,
+  onIntent,
+}: {
+  classification: Classification;
+  onClassification: (c: Classification) => void;
+  intent: Intent;
+  onIntent: (i: Intent) => void;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <div>
+        <div className="label">Classification (FIPS 199)</div>
+        <div className="flex gap-1">
+          {(["low", "moderate", "high"] as const).map((c) => (
+            <button
+              key={c}
+              onClick={() => onClassification(c)}
+              className={classNames(
+                "btn flex-1 text-xs",
+                classification === c
+                  ? "bg-indigo-500 text-white"
+                  : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+              )}
+            >
+              {c}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div>
+        <div className="label">Intent</div>
+        <div className="flex gap-1">
+          {(["reuse", "recycle", "destroy"] as const).map((c) => (
+            <button
+              key={c}
+              onClick={() => onIntent(c)}
+              className={classNames(
+                "btn flex-1 text-xs",
+                intent === c
+                  ? "bg-indigo-500 text-white"
+                  : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+              )}
+            >
+              {c}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TicketField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <div>
+      <div className="label">Ticket / RMA</div>
+      <input
+        className="field"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="optional"
+      />
+    </div>
+  );
+}
+
+// --- batch start (ROADMAP O1.4) --------------------------------------------
+
+function SelectionBar({
+  count,
+  operator,
+  canOpen,
+  onSelectAll,
+  onClear,
+  onStart,
+}: {
+  count: number;
+  operator: OperatorRef | null;
+  canOpen: boolean;
+  onSelectAll: () => void;
+  onClear: () => void;
+  onStart: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-sky-700/50 bg-sky-500/5 px-3 py-2 text-xs">
+      <span className="font-medium text-sky-200">{count} selected</span>
+      <span className="text-slate-500">Click idle bays to add or remove them.</span>
+      {!operator && <span className="text-amber-300">Sign in to start Jobs.</span>}
+      <div className="ml-auto flex items-center gap-2">
+        <button className="btn btn-ghost text-xs" onClick={onSelectAll}>
+          Select all idle
+        </button>
+        <button className="btn btn-ghost text-xs" onClick={onClear} disabled={count === 0}>
+          Clear
+        </button>
+        <button className="btn btn-primary text-xs" onClick={onStart} disabled={!canOpen}>
+          Start {count}… <ChevronRight className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One shared spec, one Job per drive. Rows follow the live selection until
+ * Begin, so a drive pulled meanwhile drops out; from Begin on, the rows are
+ * the snapshot that was sent and then each drive's outcome.
+ */
+function BatchWizard({
+  targets,
+  onClose,
+}: {
+  targets: BatchTarget[];
+  /** `ran` is true once Begin has been pressed. */
+  onClose: (ran: boolean) => void;
+}) {
+  const qc = useQueryClient();
+  const { operator } = useOperator();
+  const [classification, setClassification] = useState<Classification>("high");
+  const [intent, setIntent] = useState<Intent>("reuse");
+  const [ticket, setTicket] = useState("");
+  const [assetTags, setAssetTags] = useState<ReadonlyMap<string, string>>(new Map());
+  const [running, setRunning] = useState(false);
+  const [sent, setSent] = useState<BatchTarget[] | null>(null);
+  const [results, setResults] = useState<BatchResult[] | null>(null);
+  // State updates are not synchronous; this stops a double click from
+  // starting a second run before `running` re-renders the button disabled.
+  const inFlight = useRef(false);
+
+  const begin = async () => {
+    if (inFlight.current || !operator) return;
+    if (!canStart({ targets, operator, running })) return;
+    inFlight.current = true;
+    setRunning(true);
+    const snapshot = targets;
+    setSent(snapshot);
+    try {
+      const out = await runBatch(
+        snapshot,
+        { classification, intent, operator, ticket },
+        assetTags,
+        api,
+      );
+      setResults(out);
+    } finally {
+      setRunning(false);
+      await qc.invalidateQueries({ queryKey: ["jobs"] });
+    }
+  };
+
+  const rows = sent ?? targets;
+  const done = results !== null;
+  const close = () => onClose(sent !== null);
+  const started = results?.filter((r) => r.outcome.kind === "started").length ?? 0;
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-end justify-center bg-slate-950/70 p-4 sm:items-center">
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col space-y-4 rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
+        <div className="flex items-start justify-between">
+          <div>
+            <h3 className="text-base font-semibold">
+              {done ? "Batch results" : `Sanitize ${rows.length} drive${rows.length === 1 ? "" : "s"}`}
+            </h3>
+            <p className="mt-0.5 text-xs text-slate-400">
+              {done
+                ? `${started} of ${results.length} started`
+                : "One Job per drive, with the spec below. Asset tags are per drive."}
+            </p>
+          </div>
+          <button onClick={close} className="btn btn-ghost p-1" disabled={running}>
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {!done && operator && <OperatorChip operator={operator} />}
+
+        {!done && (
+          <>
+            <SpecChoices
+              classification={classification}
+              onClassification={setClassification}
+              intent={intent}
+              onIntent={setIntent}
+            />
+            <div className="grid grid-cols-2 gap-3">
+              <TicketField value={ticket} onChange={setTicket} />
+            </div>
+          </>
+        )}
+
+        <div className="min-h-0 overflow-y-auto rounded-md border border-slate-800">
+          <table className="w-full text-xs">
+            <thead className="bg-slate-950/50 text-left text-slate-400">
+              <tr>
+                <th className="px-3 py-1.5 font-medium">Bay</th>
+                <th className="px-3 py-1.5 font-medium">Drive</th>
+                <th className="px-3 py-1.5 font-medium">{done ? "Result" : "Asset tag"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {done
+                ? results.map((r) => <BatchResultRow key={r.target.bayId} result={r} />)
+                : rows.map((t) => (
+                    <tr key={t.bayId} className="border-t border-slate-800">
+                      <td className="px-3 py-1.5 font-mono">{t.bayLabel}</td>
+                      <td className="px-3 py-1.5">
+                        <div>{t.device.model}</div>
+                        <div className="font-mono text-[10px] text-slate-500">{t.device.serial}</div>
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <input
+                          className="field"
+                          value={assetTags.get(t.device.id) ?? ""}
+                          disabled={running}
+                          onChange={(e) => {
+                            const next = new Map(assetTags);
+                            next.set(t.device.id, e.target.value);
+                            setAssetTags(next);
+                          }}
+                          placeholder="optional"
+                          aria-label={`Asset tag for bay ${t.bayLabel}`}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+              {!done && rows.length === 0 && (
+                <tr>
+                  <td colSpan={3} className="px-3 py-3 text-center text-slate-500">
+                    No idle drives left in the selection.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-2">
+          {done ? (
+            <button className="btn btn-primary" onClick={close}>
+              Close
+            </button>
+          ) : (
+            <>
+              <button className="btn btn-ghost" onClick={close} disabled={running}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={begin}
+                disabled={!canStart({ targets: rows, operator, running })}
+              >
+                {running ? "Starting…" : `Begin sanitization (${rows.length})`}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BatchResultRow({ result }: { result: BatchResult }) {
+  const { target, outcome } = result;
+  return (
+    <tr className="border-t border-slate-800 align-top">
+      <td className="px-3 py-1.5 font-mono">{target.bayLabel}</td>
+      <td className="px-3 py-1.5">
+        <div>{target.device.model}</div>
+        <div className="font-mono text-[10px] text-slate-500">{target.device.serial}</div>
+      </td>
+      <td className="px-3 py-1.5">
+        {outcome.kind === "started" && (
+          <span className="flex items-center gap-2">
+            <span className="pill pill-info">started</span>
+            <Link to="/jobs/$jobId" params={{ jobId: outcome.jobId }} className="text-indigo-300 hover:underline">
+              Open Job
+            </Link>
+          </span>
+        )}
+        {outcome.kind === "not_started" && (
+          <div className="space-y-1">
+            <span className="flex items-center gap-2">
+              <span className="pill pill-warning">created, not started</span>
+              <Link to="/jobs/$jobId" params={{ jobId: outcome.jobId }} className="text-indigo-300 hover:underline">
+                Open Job
+              </Link>
+            </span>
+            <div className="text-rose-300">{outcome.error}</div>
+          </div>
+        )}
+        {outcome.kind === "not_created" && (
+          <div className="space-y-1">
+            <span className="pill pill-danger">not created</span>
+            <div className="text-rose-300">{outcome.error}</div>
+          </div>
+        )}
+      </td>
+    </tr>
   );
 }

@@ -450,7 +450,11 @@ build.** Three frontends, one engine.
 - O1.1 Authentication in `wipe-server`; replace `localStorage` identity.
 - O1.2 RBAC roles + per-action attribution.
 - O1.3 PXE first-boot authentication (resolve CONTEXT §12; likely ADR).
-- O1.4 Batch selection on the bay map → N jobs with a shared spec.
+- ~~O1.4 Batch selection on the bay map → N jobs with a shared spec.~~ *Shipped
+  2026-11-09 (bench-throughput-inbox story 1; CONTEXT §8, §10.2): select mode on the
+  Devices bay map ticks idle bays; one shared classification, intent and ticket, a
+  per-drive asset tag, one Job created and started per drive through the existing
+  routes, and a per-drive results list.*
 - O1.5 Queue view with throughput and ETA.
 - **Exit:** a supervisor can prove who ran what, and an operator can start a
   tray in one gesture.
