@@ -51,12 +51,13 @@ pub const INTERVALS: [&str; 2] = ["one_off", "annual"];
 pub const SCOPES: [&str; 2] = ["machine", "site"];
 /// `wipe_license::Feature`'s serde names, in declaration order. A test
 /// matches it exhaustively against the enum.
-pub const FEATURES: [&str; 5] = [
+pub const FEATURES: [&str; 6] = [
     "enterprise_mode",
     "hub_sync",
     "erp_integration",
     "pdf_certificates",
     "cert_anchoring",
+    "operator_sso",
 ];
 
 pub const MSG_DUPLICATE_NAME: &str = "an offering with this name is already in draft or for sale";
@@ -650,6 +651,7 @@ mod tests {
             Feature::ErpIntegration => "erp_integration",
             Feature::PdfCertificates => "pdf_certificates",
             Feature::CertAnchoring => "cert_anchoring",
+            Feature::OperatorSso => "operator_sso",
         }
     }
 
@@ -661,6 +663,7 @@ mod tests {
             Feature::ErpIntegration,
             Feature::PdfCertificates,
             Feature::CertAnchoring,
+            Feature::OperatorSso,
         ];
         assert_eq!(all.len(), FEATURES.len());
         for (f, name) in all.into_iter().zip(FEATURES) {

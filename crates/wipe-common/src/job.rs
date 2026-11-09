@@ -189,6 +189,11 @@ pub struct DestructionEvent {
     pub photo_refs: Vec<String>,
     pub notes: Option<String>,
     pub station_id: Option<StationId>,
+    /// The operator's "recorded for destruction" attestation (ADR-0011 §1).
+    /// Omitted when absent, so a v2 certificate signed before this field
+    /// existed re-canonicalizes to the same bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<crate::DestructionAttestation>,
 }
 
 /// One typed activity composing the Job's evidence chain.
@@ -299,6 +304,12 @@ pub struct DestructionManifest {
     pub supervisor: Option<OperatorRef>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub signed_at: Option<OffsetDateTime>,
+    /// "Destruction completed" for this run (ADR-0011 §1, second step).
+    #[serde(default)]
+    pub completion: Option<crate::DestructionCompletion>,
+    /// Optional concurrence with this run (ADR-0011 §3).
+    #[serde(default)]
+    pub concurrence: Option<crate::Concurrence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +331,107 @@ impl DestructionManifest {
             note,
             supervisor: None,
             signed_at: None,
+            completion: None,
+            concurrence: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn event_json() -> serde_json::Value {
+        json!({
+            "id": "6f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+            "device_id": "dev-1",
+            "at": "2026-11-08T10:00:00Z",
+            "method": "shred",
+            "operator": {"id": "op-1", "display_name": "Ana", "email": "ana@example.com"},
+            "supervisor": null,
+            "manifest_ref": null,
+            "photo_refs": [],
+            "notes": null,
+            "station_id": null
+        })
+    }
+
+    /// v2 certificates embed `DestructionEvent`; one signed before the
+    /// `attestation` field existed must re-canonicalize to the same bytes.
+    #[test]
+    fn an_event_without_an_attestation_keeps_its_old_shape() {
+        let old = event_json();
+        let e: DestructionEvent = serde_json::from_value(old.clone()).unwrap();
+        assert!(e.attestation.is_none());
+        let again = serde_json::to_value(&e).unwrap();
+        assert!(again.get("attestation").is_none());
+        assert_eq!(again, old);
+    }
+
+    #[test]
+    fn new_techniques_round_trip_on_an_event() {
+        let mut v = event_json();
+        v["method"] = json!("crush");
+        let e: DestructionEvent = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(e.method, crate::DestructMethod::Crush);
+        assert_eq!(serde_json::to_value(&e).unwrap(), v);
+    }
+
+    #[test]
+    fn a_manifest_with_completion_and_concurrence_round_trips() {
+        use crate::{
+            AttestationSigner, Concurrence, ConcurrenceKind, DestructionCompletion,
+            DestructionVerification,
+        };
+        let op = OperatorRef {
+            id: "op-1".into(),
+            display_name: "Ana".into(),
+            email: "ana@example.com".into(),
+        };
+        let signer =
+            AttestationSigner::self_asserted(op.clone(), "Ana Ruiz", "Bench lead").unwrap();
+        let at = OffsetDateTime::from_unix_timestamp(1_794_000_000).unwrap();
+        let mut m = DestructionManifest::new(op, vec![Uuid::new_v4()], None);
+        m.completion = Some(
+            DestructionCompletion::new(
+                at,
+                DestructionVerification {
+                    remnants_inspected: true,
+                    equipment_cycle_completed: true,
+                    equipment_id: "SHR-2".into(),
+                    criterion: "platters will not engage".into(),
+                },
+                Some("CAM-4"),
+                signer.clone(),
+            )
+            .unwrap(),
+        );
+        m.concurrence = Some(Concurrence::new(ConcurrenceKind::Witness, m.id, at, signer).unwrap());
+        let back: DestructionManifest =
+            serde_json::from_value(serde_json::to_value(&m).unwrap()).unwrap();
+        assert_eq!(back.completion, m.completion);
+        assert_eq!(back.concurrence, m.concurrence);
+    }
+
+    #[test]
+    fn a_manifest_stored_before_completion_existed_still_loads() {
+        let m = DestructionManifest::new(
+            OperatorRef {
+                id: "op-1".into(),
+                display_name: "Ana".into(),
+                email: "ana@example.com".into(),
+            },
+            vec![],
+            None,
+        );
+        let mut v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["completion"], json!(null));
+        assert_eq!(v["concurrence"], json!(null));
+        let obj = v.as_object_mut().unwrap();
+        obj.remove("completion");
+        obj.remove("concurrence");
+        let back: DestructionManifest = serde_json::from_value(v).unwrap();
+        assert!(back.completion.is_none() && back.concurrence.is_none());
     }
 }

@@ -62,6 +62,11 @@ pub enum Feature {
     PdfCertificates,
     /// Optional public anchoring of cert hashes (ADR-0005 §6).
     CertAnchoring,
+    /// Operator sign-in through the customer's identity provider, so a
+    /// destruction attestation's identity assurance can be `verified`
+    /// (ADR-0011 §4). Gates nothing yet: the SSO sign-in is unbuilt, and
+    /// destruction never depends on licence state (ROADMAP §0.2).
+    OperatorSso,
 }
 
 /// Which sanitization methods the license permits.

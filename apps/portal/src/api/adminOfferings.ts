@@ -27,6 +27,7 @@ export const FEATURES = [
   "erp_integration",
   "pdf_certificates",
   "cert_anchoring",
+  "operator_sso",
 ] as const;
 export type Feature = (typeof FEATURES)[number];
 
@@ -36,6 +37,7 @@ export const FEATURE_LABELS: Record<Feature, string> = {
   erp_integration: "ERP integration",
   pdf_certificates: "PDF certificates",
   cert_anchoring: "Certificate anchoring",
+  operator_sso: "Operator SSO",
 };
 
 export const OFFERING_STATUSES = ["draft", "published", "retired"] as const;

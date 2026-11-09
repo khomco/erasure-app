@@ -13,8 +13,17 @@ import {
 
 import { api, classNames, formatBytes } from "@/api/client";
 import { latestErasure, useJobLiveState } from "@/api/ws";
+import {
+  DESTRUCTION_TECHNIQUES,
+  identityAssuranceLabel,
+  isNistDestroy,
+  techniqueCaution,
+  techniqueName,
+  techniqueStandardLabel,
+} from "@/api/destruction";
 import { useOperator } from "@/operator/context";
 import type {
+  Classification,
   DestructMethod,
   ErasureEvent,
   Job,
@@ -129,7 +138,7 @@ function JobBody({
             </button>
           )}
           {!outerTerminal && erasure?.state.state === "failed" && (
-            <EscalateButton jobId={job.id} />
+            <EscalateButton jobId={job.id} classification={job.spec.classification} />
           )}
           {showCert && (
             <Link
@@ -167,7 +176,13 @@ function OuterStatePill({ state }: { state: Job["state"]["state"] }) {
   return <span className={classNames("pill", tone)}>{state.replace(/_/g, " ")}</span>;
 }
 
-function EscalateButton({ jobId }: { jobId: string }) {
+function EscalateButton({
+  jobId,
+  classification,
+}: {
+  jobId: string;
+  classification: Classification;
+}) {
   const { operator } = useOperator();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -205,26 +220,48 @@ function EscalateButton({ jobId }: { jobId: string }) {
                 Destroyed disposition.
               </p>
             </div>
-            <div>
-              <div className="label">Destruction method</div>
-              <div className="grid grid-cols-3 gap-1">
-                {(
-                  ["shred", "disintegrate", "incinerate", "pulverize", "melt"] as const
-                ).map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => setMethod(m)}
-                    className={classNames(
-                      "btn text-xs",
-                      method === m
-                        ? "bg-indigo-500 text-white"
-                        : "bg-slate-800 text-slate-300 hover:bg-slate-700"
-                    )}
-                  >
-                    {m}
-                  </button>
-                ))}
+            <div className="space-y-2">
+              <div className="label">Destruction technique</div>
+              {[true, false].map((nist) => {
+                const group = DESTRUCTION_TECHNIQUES.filter((m) => isNistDestroy(m) === nist);
+                return (
+                  <div key={String(nist)}>
+                    <div className="mb-1 text-[11px] text-slate-500">
+                      {techniqueStandardLabel(group[0])}
+                    </div>
+                    <div className="grid grid-cols-3 gap-1">
+                      {group.map((m) => (
+                        <button
+                          key={m}
+                          onClick={() => setMethod(m)}
+                          className={classNames(
+                            "btn text-xs",
+                            method === m
+                              ? "bg-indigo-500 text-white"
+                              : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                          )}
+                        >
+                          {techniqueName(m)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+              <div
+                className={classNames(
+                  "text-xs",
+                  isNistDestroy(method) ? "text-slate-300" : "text-amber-300"
+                )}
+              >
+                {techniqueName(method)}: {techniqueStandardLabel(method)}
               </div>
+              {techniqueCaution(method, classification) && (
+                <div className="flex gap-2 rounded-md bg-amber-950/40 p-2 text-xs text-amber-300">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  {techniqueCaution(method, classification)}
+                </div>
+              )}
             </div>
             <div>
               <div className="label">Notes</div>
@@ -329,11 +366,20 @@ function ActivityCard({ activity, index }: { activity: JobActivity; index: numbe
           />
           <div className="mt-2 space-y-1 text-sm">
             <div>
-              Method: <span className="font-mono">{activity.method}</span>
+              Technique: {techniqueName(activity.method)}{" "}
+              <span className="text-xs text-slate-400">
+                ({techniqueStandardLabel(activity.method)})
+              </span>
             </div>
             <div className="text-xs text-slate-400">
               Operator: {activity.operator.display_name}
             </div>
+            {activity.attestation && (
+              <div className="text-xs text-slate-400">
+                Identity:{" "}
+                {identityAssuranceLabel(activity.attestation.signer.identity_assurance)}
+              </div>
+            )}
             {activity.notes && (
               <div className="text-xs text-slate-400">Notes: {activity.notes}</div>
             )}

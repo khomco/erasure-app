@@ -298,6 +298,7 @@ pub async fn escalate_to_destroy(
         photo_refs: Vec::new(),
         notes: req.notes,
         station_id: None,
+        attestation: None,
     };
     state
         .runner

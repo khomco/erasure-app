@@ -66,12 +66,17 @@ export interface Capabilities {
   frozen: boolean;
 }
 
+/** Mirrors `wipe_common::DestructMethod`; order is `DestructMethod::ALL`. */
 export type DestructMethod =
   | "shred"
   | "disintegrate"
   | "incinerate"
   | "pulverize"
-  | "melt";
+  | "melt"
+  | "crush"
+  | "punch"
+  | "degauss"
+  | "drill";
 
 export type Method =
   | { kind: "nvme_sanitize_block_erase"; ause: boolean; no_deallocate: boolean }
@@ -260,6 +265,67 @@ export interface DestructionEvent {
   photo_refs: string[];
   notes: string | null;
   station_id: string | null;
+  /** Omitted (not null) when absent, so pre-ADR-0011 certs keep their bytes. */
+  attestation?: DestructionAttestation;
+}
+
+// ---- Destruction records (ADR-0011; mirrors wipe_common::destruction) ----
+
+export type IdentityAssurance =
+  | { level: "self_asserted" }
+  | { level: "verified"; issuer: string; subject: string };
+
+export interface AttestationSigner {
+  operator: OperatorRef;
+  full_name: string;
+  title: string;
+  identity_assurance: IdentityAssurance;
+}
+
+export type IdentifierSource = "scanned" | "device";
+
+export interface RecordedIdentifiers {
+  asset_tag: string | null;
+  serial: string | null;
+  source: IdentifierSource;
+}
+
+/** "Recorded for destruction". The technique is the event's `method`. */
+export interface DestructionAttestation {
+  at: string;
+  equipment_id: string;
+  location: string;
+  identifiers: RecordedIdentifiers;
+  signer: AttestationSigner;
+  statement: string;
+}
+
+export interface DestructionVerification {
+  remnants_inspected: boolean;
+  equipment_cycle_completed: boolean;
+  equipment_id: string;
+  criterion: string;
+}
+
+/** "Destruction completed", for one destruction run (manifest). */
+export interface DestructionCompletion {
+  completed_at: string;
+  verification: DestructionVerification;
+  video_ref: string | null;
+  signer: AttestationSigner;
+  statement: string;
+}
+
+export type ConcurrenceKind = "review" | "witness";
+
+export type ConcurrencePolicy = "none" | "review" | "witness";
+
+export interface Concurrence {
+  kind: ConcurrenceKind;
+  manifest_id: string;
+  at: string;
+  signer: AttestationSigner;
+  statement: string;
 }
 
 export type JobActivity =
@@ -292,6 +358,8 @@ export interface DestructionManifest {
   note: string | null;
   supervisor: OperatorRef | null;
   signed_at: string | null;
+  completion: DestructionCompletion | null;
+  concurrence: Concurrence | null;
 }
 
 export interface StationInfo {

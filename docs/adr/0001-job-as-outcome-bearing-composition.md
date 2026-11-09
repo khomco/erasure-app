@@ -95,3 +95,21 @@ readable.
 
 `DiagnosticEvent` and `HealthCheckEvent` landed as schema-only types —
 see CONTEXT §11 v0.2 #11 for the remaining runtime work.
+
+## Addendum (2026-11-08) — amended by ADR-0011
+
+[ADR-0011](0011-destruction-by-operator-attestation.md) amends this ADR on
+three points, and where they conflict with the decision above, ADR-0011
+governs:
+
+1. Supervisor co-sign is no longer mandatory on the Destroy path; a
+   concurrence is optional site policy (`none` by default).
+2. The destruction certificate is signed once, when destruction is
+   complete (`Destroyed`), not on entry to `PendingCoSign`.
+3. A drive that was never erased can be certified, from its recorded
+   identifiers.
+
+The batched `DestructionManifest` stays, as the record of one destruction
+run. This addendum records which ADR governs, not built behaviour: see
+CONTEXT §5 (**Recorded for destruction**, **Destruction completed**,
+**Concurrence**) for what exists today.

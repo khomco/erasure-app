@@ -194,6 +194,7 @@ describe("offering calls", () => {
       "erp_integration",
       "pdf_certificates",
       "cert_anchoring",
+      "operator_sso",
     ]);
   });
 });

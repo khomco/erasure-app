@@ -3,6 +3,11 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Download, ShieldCheck, UserCheck } from "lucide-react";
 
 import { api, classNames, formatBytes } from "@/api/client";
+import {
+  identityAssuranceLabel,
+  techniqueName,
+  techniqueStandardLabel,
+} from "@/api/destruction";
 import type { CommandEvidence, JobActivity, SignedCertificate } from "@/api/types";
 
 export function CertificatePage() {
@@ -117,10 +122,19 @@ export function CertificatePage() {
           </Field>
           {destruction && destruction.type === "destruction" && (
             <Field label="Destruction">
-              <span className="font-mono">{destruction.method}</span>
+              {techniqueName(destruction.method)}
+              <div className="text-xs text-slate-400">
+                {techniqueStandardLabel(destruction.method)}
+              </div>
               <div className="text-xs text-slate-400">
                 Operator: {destruction.operator.display_name}
               </div>
+              {destruction.attestation && (
+                <div className="text-xs text-slate-400">
+                  Identity:{" "}
+                  {identityAssuranceLabel(destruction.attestation.signer.identity_assurance)}
+                </div>
+              )}
             </Field>
           )}
         </div>

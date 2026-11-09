@@ -5,6 +5,7 @@
 
 pub mod bay;
 pub mod catalog;
+pub mod destruction;
 pub mod device;
 pub mod method;
 pub mod erasure_event;
@@ -17,6 +18,7 @@ pub(crate) mod serde_hex_opt;
 
 pub use bay::*;
 pub use catalog::*;
+pub use destruction::*;
 pub use device::*;
 pub use method::*;
 pub use erasure_event::*;

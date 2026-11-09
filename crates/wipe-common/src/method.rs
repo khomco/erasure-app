@@ -74,6 +74,12 @@ pub enum Pattern {
     Fixed(u8),
 }
 
+/// Destruction technique: what the bench physically did to the drive
+/// (ADR-0011 §5).
+///
+/// The first five are the NIST SP 800-88 Rev. 2 §3.1.3 Destroy techniques.
+/// `Crush`, `Punch`, `Degauss` and `Drill` are recorded honestly as physical
+/// damage that is **not** NIST Destroy; see [`DestructMethod::standard_label`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DestructMethod {
@@ -82,6 +88,78 @@ pub enum DestructMethod {
     Incinerate,
     Pulverize,
     Melt,
+    Crush,
+    Punch,
+    Degauss,
+    Drill,
+}
+
+/// Label for a technique that NIST SP 800-88 Rev. 2 §3.1.3 counts as Destroy.
+pub const NIST_DESTROY_LABEL: &str = "NIST SP 800-88 Destroy";
+/// Label for a technique that only damages the drive physically.
+pub const NOT_NIST_DESTROY_LABEL: &str = "physical damage — not NIST Destroy";
+/// NIST SP 800-88 Rev. 2 §3.1.3's caution on shred and pulverize, shown when
+/// the Job's classification is above Low (ADR-0011 §5).
+pub const SHRED_PULVERIZE_CAUTION: &str = "NIST SP 800-88 Rev. 2: shred and pulverize \
+     should be avoided for anything but the lowest security categories.";
+
+impl DestructMethod {
+    /// Every technique, NIST Destroy techniques first, in declaration order.
+    pub const ALL: [DestructMethod; 9] = [
+        Self::Shred,
+        Self::Disintegrate,
+        Self::Incinerate,
+        Self::Pulverize,
+        Self::Melt,
+        Self::Crush,
+        Self::Punch,
+        Self::Degauss,
+        Self::Drill,
+    ];
+
+    /// Whether NIST SP 800-88 Rev. 2 §3.1.3 counts this technique as Destroy.
+    pub fn is_nist_destroy(self) -> bool {
+        match self {
+            Self::Shred | Self::Disintegrate | Self::Incinerate | Self::Pulverize | Self::Melt => {
+                true
+            }
+            Self::Crush | Self::Punch | Self::Degauss | Self::Drill => false,
+        }
+    }
+
+    /// The technique's name as an operator reads it, e.g. "Shred".
+    pub fn human_name(self) -> &'static str {
+        match self {
+            Self::Shred => "Shred",
+            Self::Disintegrate => "Disintegrate",
+            Self::Incinerate => "Incinerate",
+            Self::Pulverize => "Pulverize",
+            Self::Melt => "Melt",
+            Self::Crush => "Crush",
+            Self::Punch => "Punch",
+            Self::Degauss => "Degauss",
+            Self::Drill => "Drill",
+        }
+    }
+
+    /// The standard the technique meets, stated honestly.
+    pub fn standard_label(self) -> &'static str {
+        if self.is_nist_destroy() {
+            NIST_DESTROY_LABEL
+        } else {
+            NOT_NIST_DESTROY_LABEL
+        }
+    }
+
+    /// The shred/pulverize caution, for those two techniques when the Job's
+    /// classification is above Low; `None` otherwise.
+    pub fn caution(self, classification: Classification) -> Option<&'static str> {
+        match (self, classification) {
+            (_, Classification::Low) => None,
+            (Self::Shred | Self::Pulverize, _) => Some(SHRED_PULVERIZE_CAUTION),
+            _ => None,
+        }
+    }
 }
 
 impl Method {
@@ -184,4 +262,96 @@ pub fn select_method(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_lists_nine_techniques_nist_destroy_first() {
+        let names: Vec<String> = DestructMethod::ALL
+            .iter()
+            .map(|m| {
+                serde_json::to_value(m)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "shred",
+                "disintegrate",
+                "incinerate",
+                "pulverize",
+                "melt",
+                "crush",
+                "punch",
+                "degauss",
+                "drill"
+            ]
+        );
+    }
+
+    #[test]
+    fn standard_labels_are_pinned() {
+        for m in [
+            DestructMethod::Shred,
+            DestructMethod::Disintegrate,
+            DestructMethod::Incinerate,
+            DestructMethod::Pulverize,
+            DestructMethod::Melt,
+        ] {
+            assert!(m.is_nist_destroy());
+            assert_eq!(m.standard_label(), "NIST SP 800-88 Destroy");
+        }
+        for m in [
+            DestructMethod::Crush,
+            DestructMethod::Punch,
+            DestructMethod::Degauss,
+            DestructMethod::Drill,
+        ] {
+            assert!(!m.is_nist_destroy());
+            assert_eq!(m.standard_label(), "physical damage — not NIST Destroy");
+        }
+    }
+
+    #[test]
+    fn human_names() {
+        assert_eq!(DestructMethod::Shred.human_name(), "Shred");
+        assert_eq!(DestructMethod::Degauss.human_name(), "Degauss");
+    }
+
+    #[test]
+    fn caution_only_for_shred_and_pulverize_above_low() {
+        let caution = "NIST SP 800-88 Rev. 2: shred and pulverize should be avoided for \
+                       anything but the lowest security categories.";
+        for m in DestructMethod::ALL {
+            assert_eq!(m.caution(Classification::Low), None);
+            for c in [Classification::Moderate, Classification::High] {
+                let expected = matches!(m, DestructMethod::Shred | DestructMethod::Pulverize)
+                    .then_some(caution);
+                assert_eq!(m.caution(c), expected, "{m:?} at {c:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn destroy_selection_still_disintegrates() {
+        let m = select_method(
+            &Capabilities::default(),
+            MediaType::HddMagnetic,
+            Classification::High,
+            Intent::Destroy,
+        );
+        assert_eq!(
+            m,
+            Some(Method::Destroy {
+                method: DestructMethod::Disintegrate
+            })
+        );
+    }
 }

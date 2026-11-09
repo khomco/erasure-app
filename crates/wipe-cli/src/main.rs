@@ -164,7 +164,7 @@ enum LicenseCmd {
         #[arg(long, default_value_t = 365)]
         days: i64,
         /// Feature to grant; repeatable. One of: enterprise_mode, hub_sync,
-        /// erp_integration, pdf_certificates, cert_anchoring.
+        /// erp_integration, pdf_certificates, cert_anchoring, operator_sso.
         #[arg(long)]
         feature: Vec<String>,
         #[arg(long)]
@@ -901,6 +901,47 @@ fn parse_feature(s: &str) -> Result<wipe_license::Feature> {
         "erp_integration" => ErpIntegration,
         "pdf_certificates" => PdfCertificates,
         "cert_anchoring" => CertAnchoring,
+        "operator_sso" => OperatorSso,
         other => return Err(anyhow!("unknown feature `{other}`")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wipe_license::Feature;
+
+    /// Exhaustive: a new `Feature` variant fails to compile here until it is
+    /// listed, and then fails the test until `parse_feature` accepts it.
+    fn all_features() -> Vec<Feature> {
+        let all = vec![
+            Feature::EnterpriseMode,
+            Feature::HubSync,
+            Feature::ErpIntegration,
+            Feature::PdfCertificates,
+            Feature::CertAnchoring,
+            Feature::OperatorSso,
+        ];
+        for f in &all {
+            match f {
+                Feature::EnterpriseMode
+                | Feature::HubSync
+                | Feature::ErpIntegration
+                | Feature::PdfCertificates
+                | Feature::CertAnchoring
+                | Feature::OperatorSso => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn parse_feature_accepts_every_feature_serde_name() {
+        for f in all_features() {
+            let name = serde_json::to_value(f).unwrap();
+            let name = name.as_str().unwrap();
+            assert_eq!(parse_feature(name).unwrap(), f, "{name}");
+        }
+        assert!(parse_feature("no_such_feature").is_err());
+    }
 }

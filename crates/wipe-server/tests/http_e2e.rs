@@ -1073,6 +1073,7 @@ async fn certificate_signed_after_linking_still_omits_the_manifest() {
                 photo_refs: Vec::new(),
                 notes: None,
                 station_id: None,
+                attestation: None,
             },
         )
         .unwrap();
@@ -1390,4 +1391,30 @@ async fn cosigning_a_signed_manifest_again_is_409_and_adds_no_cosignature() {
     assert_eq!(status, 409, "{body}");
     let job = http_get_job(&client, &base, &job_id).await;
     assert_eq!(job["state"]["state"], "destroyed");
+}
+
+/// ADR-0011 §5: a technique that is not NIST Destroy is still recorded as
+/// what the bench actually did.
+#[tokio::test]
+async fn escalating_with_a_non_nist_technique_records_it() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_job(&client, &base, "dev-nvme-0").await;
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/escalate-to-destroy"),
+        Some(json!({ "method": "crush", "operator": http_op() })),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let job = http_get_job(&client, &base, &job_id).await;
+    let destruction = job["activities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["type"] == "destruction")
+        .expect("a destruction activity");
+    assert_eq!(destruction["method"], "crush");
+    assert!(destruction.get("attestation").is_none());
 }

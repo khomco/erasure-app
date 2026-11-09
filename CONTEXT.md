@@ -324,8 +324,11 @@ the hardware in front of them. See ADR-0002.
   `verify()` call errors. A failed check leaves the ErasureEvent at
   `Completed` and the Job `InProgress`, awaiting the operator.
 - **DestructionEvent** — chain-of-custody record for physical
-  destruction: method, operator, optional supervisor, manifest
-  reference, optional photo references, notes. **Live** — appended by
+  destruction: method (the **Destruction technique**), operator, optional
+  supervisor, manifest reference, optional photo references, notes, and
+  an optional `attestation` slot for the operator's **Recorded for
+  destruction** attestation, omitted from the JSON when empty so
+  certificates signed before it existed keep their bytes. **Live** — appended by
   `escalate_to_destroy`; it is what permits a Job to reach `Destroyed`.
   Escalation is allowed from any non-terminal Job state, including
   `Queued` with no erasure attempted, not only once erasure attempts
@@ -376,7 +379,53 @@ the hardware in front of them. See ADR-0002.
   co-signatures (see **PendingCoSign**). There is no reject route
   (`Rejected` is never set), so a manifest whose co-sign is refused stays `Pending`, and its
   Jobs cannot join another manifest until the station restarts. Under ADR-0011 (accepted, not built) the manifest
-  stays as the batch record but co-sign becomes optional.
+  stays as the batch record but co-sign becomes optional. It carries
+  `completion` (**Destruction completed**) and `concurrence`
+  (**Concurrence**) slots, both always `null` today.
+- **Recorded for destruction** — the first of ADR-0011's two attested
+  steps: the operator's signed statement that a drive, identified by
+  its asset tag and/or serial (and whether those were scanned or read
+  from the device), was placed into the destruction process with a
+  named technique, equipment and location. The statement text is
+  rendered only by `DestructionAttestation::new`, which refuses blank
+  fields or a drive with neither identifier. Held on the
+  DestructionEvent's `attestation`. *Avoid: "destroyed" for a drive in
+  this state.* **Today:** schema only; nothing produces it.
+- **Destruction completed** — the second attested step, per
+  DestructionManifest (one destruction run): completion time,
+  verification (remnants inspected against a named criterion, the
+  named equipment completed its cycle), an optional video reference,
+  and the signer. `DestructionCompletion::new` refuses a run whose
+  remnants were not inspected or whose cycle did not complete. Held on
+  the manifest's `completion`. **Today:** schema only; nothing
+  produces it.
+- **Concurrence** — an optional second signer's agreement with a
+  destruction run, given per manifest, as a `review` ("reviewed the
+  destruction records and verification evidence") or a `witness`
+  ("witnessed the destruction"); the kind fixes the wording, so a
+  reviewer is never recorded as a witness. A site's **Concurrence
+  policy** is `none` (the default, matching the standards), `review`
+  or `witness`. Held on the manifest's `concurrence`. **Today:** schema
+  only; nothing produces it, and the policy is not yet a station
+  setting. *Avoid: "co-sign" for this; "co-sign" names today's
+  PendingCoSign flow.*
+- **Identity assurance** — how sure a destruction record is of who
+  signed it: `self_asserted` (the typed full name and title, with an
+  explicit "I attest", is the signature) or `verified` (issuer and
+  subject from the customer's identity provider, once the licence has
+  the `operator_sso` Feature and SSO sign-in exists). Shown as
+  "Self-asserted" or "Verified by {issuer}". **Today:** schema only;
+  nothing produces a record, only `self_asserted` can be constructed,
+  and `operator_sso` gates nothing.
+- **Destruction technique** — what the bench physically did
+  (`DestructMethod`): shred, disintegrate, incinerate, pulverize and
+  melt are labelled `NIST SP 800-88 Destroy`; crush, punch, degauss and
+  drill are labelled `physical damage — not NIST Destroy`. Shred and
+  pulverize carry NIST Rev. 2's caution when the Job's classification
+  is above Low. **Today:** the escalate dialog offers all nine, grouped
+  by label, and shows the caution; the Job and certificate pages show
+  the technique's name and label. Automatic method selection for a
+  Destroy intent still picks only disintegrate.
 - **JobSpec** — what was asked for at Job creation: target Asset (or
   Device + asset_tag in Simple mode), classification, intent, optional
   method override, verify config, operator, WorkOrder/ticket/site
@@ -1155,6 +1204,17 @@ and resolve. None of these have a decided answer.
   and the manifest lives in the RAM of the station that assembled it.
   Assembly stamps the manifest id on each member Job (`manifest_id`)
   and its latest DestructionEvent (`manifest_ref`). **Not** a Batch.
+- **Recorded for destruction** — the operator's signed attestation that
+  a drive went into the destruction process (ADR-0011). Schema only today.
+- **Destruction completed** — the signed confirmation that a manifest's
+  destruction run finished and its remnants were inspected. Schema only today.
+- **Concurrence** — optional second signer per manifest, `review` or
+  `witness`; site policy `none` (default) / `review` / `witness`. Schema only today.
+- **Identity assurance** — `self_asserted` or `verified` (identity
+  provider, `operator_sso` Feature) on a destruction record's signer.
+  Schema only today.
+- **Destruction technique** — nine techniques; five are NIST Destroy,
+  crush/punch/degauss/drill are "physical damage — not NIST Destroy".
 - **AssetDisposition** — the resolved terminal outcome
   (Erased / Destroyed / Quarantined) stated explicitly on the cert.
 - **Enclosure / Bank / Bay** — the physical bench hierarchy: an

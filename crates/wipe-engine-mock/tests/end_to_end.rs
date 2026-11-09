@@ -263,6 +263,7 @@ fn destruction(device_id: &str) -> wipe_common::DestructionEvent {
         photo_refs: Vec::new(),
         notes: None,
         station_id: None,
+        attestation: None,
     }
 }
 
