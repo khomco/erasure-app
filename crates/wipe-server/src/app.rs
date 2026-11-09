@@ -2,7 +2,7 @@ use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{
     response::IntoResponse,
-    routing::{any, get, post},
+    routing::{any, get, post, MethodRouter},
     Router,
 };
 use parking_lot::RwLock;
@@ -452,8 +452,34 @@ impl std::fmt::Display for LicenseInstallError {
 
 impl std::error::Error for LicenseInstallError {}
 
-pub fn router(state: AppState) -> Router {
-    let api = Router::new()
+/// Registers API routes on a [`Router`] and records each path, because axum
+/// cannot list a router's routes. The `.route(...)` chain in [`api_routes`]
+/// is the one place a station API route is declared; the route golden test
+/// (`tests/route_golden.rs`) reads paths from here and probes the built
+/// router for their methods.
+struct ApiRoutes {
+    router: Router<AppState>,
+    paths: Vec<&'static str>,
+}
+
+impl ApiRoutes {
+    fn new() -> Self {
+        Self {
+            router: Router::new(),
+            paths: Vec::new(),
+        }
+    }
+
+    fn route(mut self, path: &'static str, method_router: MethodRouter<AppState>) -> Self {
+        self.router = self.router.route(path, method_router);
+        self.paths.push(path);
+        self
+    }
+}
+
+/// Every station API route, without the `/api/*rest` JSON 404 catch-all.
+fn api_routes() -> ApiRoutes {
+    ApiRoutes::new()
         .route("/api/health", get(handlers::health))
         .route("/api/station", get(handlers::station_info))
         .route("/api/public_key", get(handlers::public_key))
@@ -529,6 +555,19 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sim/devices/detach", post(handlers::sim_detach))
         .route("/api/sim/devices", get(handlers::sim_detached))
         .route("/api/events", get(ws::ws_events))
+}
+
+/// The paths of every station API route, in declaration order, excluding the
+/// `/api/*rest` catch-all. Parameters keep axum's `:name` form.
+pub fn api_route_paths() -> Vec<&'static str> {
+    api_routes().paths
+}
+
+pub fn router(state: AppState) -> Router {
+    // Declare every API route in `api_routes()`, never here (nor merged or
+    // nested in below): the route golden test sees only that list.
+    let api = api_routes()
+        .router
         // An unknown API path is a JSON 404, never the frontend or the
         // API-only landing page: a client calling a removed route (such as
         // the old `escalate-to-destroy`) must see that it is gone.

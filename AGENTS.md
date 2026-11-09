@@ -22,7 +22,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 
 ## Running and verifying
 
-- `cargo test --workspace` — 814 tests, ~30s. Needs `docker compose up -d` first (root
+- `cargo test --workspace` — 926 tests, ~30s. Needs `docker compose up -d` first (root
   `compose.yaml`: Postgres on `127.0.0.1:55432`, Mailpit SMTP `:1025`, UI/API `:8025`):
   `wipe-hub`'s compose-backed tests fail, never skip, when they are down.
 - Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and
@@ -49,6 +49,12 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   `TestDb::migrated()` give each test its own `wipehub_test_<uuid>` database, dropped with the
   guard; `Mailpit` reads captured mail. Isolate mail by sending to `unique_address()`, never by
   deleting Mailpit messages.
+- Goldens: `docs/generated/http-routes.txt` pins the station router's `METHOD /path` lines
+  (`crates/wipe-server/tests/route_golden.rs`, routes declared once in `app.rs` `api_routes()`).
+  After an intended route change, regenerate with `UPDATE_GOLDENS=1 cargo test -p wipe-server
+  --test route_golden` and commit the file. The same test fails when a routed path has no call
+  in `apps/desktop/src/api/client.ts` (or `ws.ts` for `/api/events`) or the client calls an
+  unrouted one; `UPDATE_GOLDENS=1` does not relax that.
 - Never pipe `cargo test` through `grep`/`awk` to summarize: compile errors are discarded and
   a broken build prints as a clean run (68844bf).
 - Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 385 tests, under a second.
