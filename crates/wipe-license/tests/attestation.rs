@@ -9,8 +9,8 @@ use time::{Duration, OffsetDateTime};
 use wipe_cert::SigningKey;
 use wipe_license::{
     evaluate, feature_available, machine_fingerprint, verify_chain, AllowedMethods,
-    AttestationChain, ChainVerdict, Entitlements, Feature, LeaseState, LeaseStatus, LicenseError,
-    MethodClass, MonotonicCounter, Quota, Scope, TpmCounter, VendorRoot,
+    AttestationChain, ChainVerdict, Entitlements, Feature, FileCounter, LeaseState, LeaseStatus,
+    LicenseError, MethodClass, MonotonicCounter, Quota, Scope, TpmCounter, VendorRoot,
 };
 
 fn now() -> OffsetDateTime {
@@ -409,7 +409,7 @@ fn small_backwards_jumps_are_tolerated_as_clock_skew() {
 }
 
 #[test]
-fn the_file_counter_does_not_claim_hardware_backing() {
+fn a_fresh_lease_state_does_not_claim_a_monotonic_counter() {
     // The guarantee is only as strong as the anchor; a counter that claimed
     // to be monotonic while living in a rewritable file would be a lie.
     let s = LeaseState::new(now());
@@ -419,12 +419,146 @@ fn the_file_counter_does_not_claim_hardware_backing() {
 #[test]
 fn the_tpm_counter_seam_fails_rather_than_fabricating_a_value() {
     let c = TpmCounter;
-    assert!(c.is_hardware_backed());
+    // A counter that cannot count must not claim hardware backing.
+    assert!(!c.is_hardware_backed());
     match c.read() {
         Err(LicenseError::Unsupported(msg)) => assert!(msg.contains("TPM")),
         other => panic!("expected Unsupported, got {other:?}"),
     }
+    assert!(matches!(c.increment(), Err(LicenseError::Unsupported(_))));
+}
+
+// --- file counter ------------------------------------------------------------
+
+#[test]
+fn a_fresh_file_counter_reads_zero_and_increments_to_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("counter");
+    let c = FileCounter::new(&path);
+    assert!(!c.is_hardware_backed());
+    assert_eq!(c.path(), path.as_path());
+    assert_eq!(c.read().unwrap(), 0);
+    assert!(!path.exists(), "reading must not create the file");
+    assert_eq!(c.increment().unwrap(), 1);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "1");
+    let entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        entries,
+        vec![std::ffi::OsString::from("counter")],
+        "no temp file left behind"
+    );
+}
+
+#[test]
+fn an_unreadable_counter_file_is_an_error_not_zero() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // A directory where the file should be: a read failure other than NotFound.
+    let as_dir = dir.path().join("is-a-dir");
+    std::fs::create_dir(&as_dir).unwrap();
+    // Non-UTF-8 bytes: unreadable as text.
+    let as_bytes = dir.path().join("bytes");
+    std::fs::write(&as_bytes, [0xff, 0xfe]).unwrap();
+
+    for path in [&as_dir, &as_bytes] {
+        let c = FileCounter::new(path);
+        for result in [c.read(), c.increment()] {
+            match result {
+                Err(LicenseError::Encoding(msg)) => {
+                    assert!(msg.contains(&path.display().to_string()), "{msg}")
+                }
+                other => panic!("expected Encoding error, got {other:?}"),
+            }
+        }
+    }
+    assert_eq!(std::fs::read(&as_bytes).unwrap(), vec![0xff, 0xfe]);
+}
+
+#[test]
+fn a_failed_counter_write_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let not_a_dir = dir.path().join("plain-file");
+    std::fs::write(&not_a_dir, "x").unwrap();
+    let c = FileCounter::new(not_a_dir.join("counter"));
+    assert!(matches!(c.increment(), Err(LicenseError::Encoding(_))));
+}
+
+#[test]
+fn the_file_counter_survives_being_reopened() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("counter");
+    let c = FileCounter::new(&path);
+    for expected in 1..=3 {
+        assert_eq!(c.increment().unwrap(), expected);
+    }
+    drop(c);
+    assert_eq!(FileCounter::new(&path).read().unwrap(), 3);
+}
+
+#[test]
+fn the_file_counter_creates_a_missing_parent_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("not").join("yet").join("counter");
+    let c = FileCounter::new(&path);
+    assert_eq!(c.increment().unwrap(), 1);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "1");
+}
+
+#[test]
+fn a_corrupt_counter_file_is_an_error_not_a_number() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("counter");
+    std::fs::write(&path, "abc").unwrap();
+    let c = FileCounter::new(&path);
+    for result in [c.read(), c.increment()] {
+        match result {
+            Err(LicenseError::Encoding(msg)) => {
+                assert!(msg.contains(&path.display().to_string()), "{msg}")
+            }
+            other => panic!("expected Encoding error, got {other:?}"),
+        }
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "abc");
+}
+
+#[test]
+fn the_file_counter_refuses_to_wrap_at_its_maximum() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("counter");
+    std::fs::write(&path, u64::MAX.to_string()).unwrap();
+    let c = FileCounter::new(&path);
+    assert_eq!(c.read().unwrap(), u64::MAX);
     assert!(c.increment().is_err());
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        u64::MAX.to_string()
+    );
+}
+
+#[test]
+fn concurrent_increments_on_one_file_counter_are_not_lost() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = std::sync::Arc::new(FileCounter::new(dir.path().join("counter")));
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let c = c.clone();
+            std::thread::spawn(move || (0..25).map(|_| c.increment().unwrap()).collect::<Vec<_>>())
+        })
+        .collect();
+    let mut seen: Vec<u64> = threads
+        .into_iter()
+        .flat_map(|t| t.join().unwrap())
+        .collect();
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        (1..=200).collect::<Vec<_>>(),
+        "values must be distinct"
+    );
+    assert_eq!(c.read().unwrap(), 200);
 }
 
 // --- features --------------------------------------------------------------

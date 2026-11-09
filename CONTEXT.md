@@ -913,7 +913,7 @@ folder or in `.scratch/DECISIONS.md`.
 | Tiered, self-detecting station config store | ADR-0003 | ✅ partial | Control-plane tier always fails (no hub); corrupt config only logged, not surfaced |
 | Bench-setup builder + learn-by-hot-swap identify mode | ADR-0002/0003 | ✅ CLI only | The desktop (Tauri) shell wires no store or simulator: layouts are lost on quit and identify mode is dead |
 | Model-aware enclosure catalog + shell artwork with machine-enforced legibility rules | ADR-0004 | ✅ partial | Site-local overlay exists in code but no host wires it |
-| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark not persisted (resets on restart); no `FileCounter`; `allowed_methods` unenforced; free-tier count not tracked; no API route or UI; desktop shell is always unlicensed |
+| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark not persisted (resets on restart); `FileCounter` exists but nothing uses it yet (rewindable, not hardware-backed); `TpmCounter` cannot count and claims no hardware backing; `allowed_methods` unenforced; free-tier count not tracked; no API route or UI; desktop shell is always unlicensed |
 | Vitest suite over the frontend's pure domain modules | §12 | ✅ | |
 | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
 | Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check; landing page (problem, offline-verifiable certificate, differentiators, "what we are not", one early-access CTA); product, standards posture (certification roadmap labelled future), segment (ITAD, enterprise IT, government), pricing ("early-access pricing on request"), contact, privacy and terms pages; early-access and contact forms | ADR-0006 / ROADMAP W1.1–W1.4 | ✅ partial | The forms stay closed (no script, submit disabled, "not open yet") unless the build is given `PUBLIC_HUB_ORIGIN`, and `astro build` refuses that until the privacy notice is published (`site.privacyNoticePublished`), so production builds cannot take sales leads yet; pricing has no amounts unless the build is given `PRICING_HUB_ORIGIN` (`offerings-and-payments` story 5, below); privacy and terms are placeholders to publish before launch; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); copy and statuses await vendor sign-off |
@@ -1001,8 +1001,10 @@ keep resolving.
    `evaluation` marker inside the signed certificate. **Not built:**
    lease persistence (the watermark and erasure count reset on every
    start, so a restart defeats rollback detection and the quota),
-   a `FileCounter` (named in comments, absent; `TpmCounter` is a
-   placeholder), enforcement of `allowed_methods`, verifying a
+   use of a counter (`FileCounter` exists — a rewindable file, not
+   hardware-backed — but nothing wires it in; `TpmCounter` is a
+   placeholder that returns `Unsupported` and does not claim hardware
+   backing), enforcement of `allowed_methods`, verifying a
    certificate from the vendor root alone (`verify-cert` still needs
    the station's `--public-key-b64`), and station-side enforcement of
    the **Lapse policy** (ADR-0012, accepted). The remaining product
@@ -1387,8 +1389,11 @@ and resolve. None of these have a decided answer.
   (`wipe_license::LeaseState`): the highest clock time seen (the
   watermark, for rollback detection) and the count of licensed
   erasures. Today it is held in RAM and reset on every start, so a
-  restart clears both; no `FileCounter` exists and `TpmCounter` is a
-  placeholder.
+  restart clears both. `wipe_license::FileCounter` (a counter kept in
+  one file, which anyone who can edit the file can rewind, so not
+  hardware-backed) exists but is not yet used; `TpmCounter` is a
+  placeholder that returns `Unsupported` and does not claim hardware
+  backing.
 - **Enclosure model / catalog** — an `EnclosureModel` is one known
   enclosure product (vendor, product, kind, bank spec, optional `art`
   key and verified capabilities); the catalog is the set of them,

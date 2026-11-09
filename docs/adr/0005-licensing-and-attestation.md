@@ -243,6 +243,13 @@ how a certificate is marked when the station is unlicensed.
    `is_hardware_backed()` returns `true`: a counter that cannot count
    reports itself hardware-backed, against §3b's "nothing pretends to
    succeed".
+   *Resolved 2026-11-08 (licensing-as-built story 1):* `FileCounter` now
+   exists in `lease.rs` — a decimal count in one file, written by temp
+   file and rename, rewindable by anyone who can edit that file, and so
+   reporting `is_hardware_backed() == false`. `TpmCounter` still returns
+   `Unsupported` and now reports `false` as well, until it really counts.
+   Nothing constructs a `FileCounter` yet, and lease persistence remains
+   item 1.
 3. **§2, `allowed_methods` and `features` are not enforced.**
    `AllowedMethods::permits` (`crates/wipe-license/src/entitlement.rs`) is
    tested (`crates/wipe-license/tests/attestation.rs`) and called by no

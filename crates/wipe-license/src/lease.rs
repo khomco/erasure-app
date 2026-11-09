@@ -5,6 +5,10 @@
 //! lease, notice a clock that has moved backwards, and say plainly which of
 //! those guarantees is cryptographic and which is a speed bump.
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
@@ -57,18 +61,131 @@ impl LeaseState {
     }
 }
 
-/// A monotonic counter the station cannot rewind.
+/// A counter meant to only move forward (ADR-0005 §3b).
 ///
-/// `FileCounter` is honest about being rewindable; a TPM-backed
-/// implementation lands with the Linux backend and is the only variant that
-/// makes the anti-rollback claim real (ADR-0005 §3b).
+/// Whether the *customer* can rewind it depends on the implementation, and
+/// [`is_hardware_backed`](Self::is_hardware_backed) says whether they can:
+/// [`FileCounter`] lives in an ordinary file and can be rewound by anyone who
+/// edits it; [`TpmCounter`] is a seam that cannot count yet. Only a working
+/// hardware-anchored counter would make the anti-rollback claim real, and no
+/// such implementation exists today.
 pub trait MonotonicCounter: Send + Sync {
     fn read(&self) -> LicenseResult<u64>;
     fn increment(&self) -> LicenseResult<u64>;
-    /// False means "this counter can be rolled back by the customer" and the
-    /// UI is expected to say so rather than implying hardware backing.
+    /// False means "this counter can be rolled back by the customer, or does
+    /// not work at all" and the UI is expected to say so rather than implying
+    /// hardware backing. Only an implementation that really counts in
+    /// hardware may return true.
     fn is_hardware_backed(&self) -> bool {
         false
+    }
+}
+
+/// A counter persisted as a decimal integer in one file.
+///
+/// Honest about its limits: anyone who can write the file can rewind it, so
+/// it reports `is_hardware_backed() == false`. It never fabricates a value —
+/// a missing file is 0, but unreadable or unparsable content is an error.
+///
+/// Increments through one `FileCounter` are serialized, so concurrent callers
+/// sharing it get distinct values. Two `FileCounter`s on the same path, or
+/// two processes, are not coordinated: share one instance.
+#[derive(Debug)]
+pub struct FileCounter {
+    path: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl FileCounter {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            lock: Mutex::new(()),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn read_unlocked(&self) -> LicenseResult<u64> {
+        let raw = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => {
+                return Err(LicenseError::Encoding(format!(
+                    "reading counter {}: {e}",
+                    self.path.display()
+                )))
+            }
+        };
+        raw.trim().parse::<u64>().map_err(|e| {
+            LicenseError::Encoding(format!(
+                "parsing counter {}: {e} (content {:?})",
+                self.path.display(),
+                raw.trim()
+            ))
+        })
+    }
+
+    /// Write beside the target and rename: a half-written counter must never
+    /// be read back as a smaller number, and rename is atomic within a
+    /// filesystem.
+    fn write_unlocked(&self, value: u64) -> LicenseResult<()> {
+        let dir = match self.path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        std::fs::create_dir_all(dir)
+            .map_err(|e| LicenseError::Encoding(format!("creating {}: {e}", dir.display())))?;
+        let name = self
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "counter".into());
+        // Unique per call, so two counters on one path never share a temp file.
+        static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = dir.join(format!(".{name}.tmp-{}-{seq}", std::process::id()));
+        let write = || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            f.write_all(value.to_string().as_bytes())?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, &self.path)?;
+            // Persist the rename itself, or a power loss can revert the
+            // counter to its previous value after `increment` returned.
+            #[cfg(unix)]
+            std::fs::File::open(dir)?.sync_all()?;
+            Ok(())
+        };
+        write().map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            LicenseError::Encoding(format!("writing counter {}: {e}", self.path.display()))
+        })
+    }
+}
+
+impl MonotonicCounter for FileCounter {
+    fn read(&self) -> LicenseResult<u64> {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        self.read_unlocked()
+    }
+
+    fn increment(&self) -> LicenseResult<u64> {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let current = self.read_unlocked()?;
+        let next = current.checked_add(1).ok_or_else(|| {
+            LicenseError::Encoding(format!(
+                "counter {} is at its maximum ({current}) and cannot be incremented",
+                self.path.display()
+            ))
+        })?;
+        self.write_unlocked(next)?;
+        Ok(next)
     }
 }
 
@@ -76,7 +193,9 @@ pub trait MonotonicCounter: Send + Sync {
 ///
 /// Returns `Unsupported` rather than a plausible number: a counter that
 /// silently pretends to be monotonic is worse than none, because the whole
-/// point is the strength of the guarantee.
+/// point is the strength of the guarantee. For the same reason it keeps the
+/// default `is_hardware_backed() == false`; that turns true only once `read`
+/// and `increment` really reach a hardware counter.
 pub struct TpmCounter;
 
 impl MonotonicCounter for TpmCounter {
@@ -87,9 +206,6 @@ impl MonotonicCounter for TpmCounter {
     }
     fn increment(&self) -> LicenseResult<u64> {
         self.read()
-    }
-    fn is_hardware_backed(&self) -> bool {
-        true
     }
 }
 
