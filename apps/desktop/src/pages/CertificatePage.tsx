@@ -7,7 +7,11 @@ import {
   concurrenceLabel,
   deviceSummary,
   identifierSourceLabel,
+  licenceIsWarning,
+  licencePill,
+  licenceSummary,
   recordedForDestruction,
+  type LicenceSummary,
 } from "@/api/certificate";
 import {
   identityAssuranceLabel,
@@ -61,6 +65,7 @@ export function CertificatePage() {
   const commands = flattenCommands(c);
   const device = deviceSummary(c);
   const record = c.certificate.destruction;
+  const licence = licenceSummary(c);
 
   return (
     <div className="space-y-4">
@@ -77,7 +82,10 @@ export function CertificatePage() {
           <div className="flex items-start gap-3">
             <ShieldCheck className="h-6 w-6 text-emerald-400" />
             <div>
-              <h2 className="text-lg font-semibold">Certificate of Sanitization</h2>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-semibold">Certificate of Sanitization</h2>
+                <LicencePill summary={licence} />
+              </div>
               <div className="mt-1 font-mono text-xs text-slate-400">
                 {c.certificate.id}
               </div>
@@ -127,6 +135,12 @@ export function CertificatePage() {
               <span className="text-slate-500">not performed</span>
             )}
           </Field>
+          <Field label="Licence">
+            <span className={licenceIsWarning(licence.kind) ? "text-amber-200" : undefined}>
+              {licence.title}
+            </span>
+            <div className="text-xs text-slate-400">{licence.detail}</div>
+          </Field>
           <Field label="Asset tag / ticket">
             {c.certificate.spec.asset_tag || "—"}
             <div className="text-xs text-slate-400">
@@ -165,7 +179,9 @@ export function CertificatePage() {
             <div className="mb-1 font-semibold text-slate-300">Verify offline</div>
             <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[11px] text-slate-400">
 {`wipestation verify-cert <downloaded.json> \\
-  --public-key-b64 ${pubkey.data.public_key_b64}`}
+  --public-key-b64 ${pubkey.data.public_key_b64}${
+    c.attestation != null ? " \\\n  --vendor-root-b64 <vendor root public key>" : ""
+  }`}
             </pre>
           </div>
         )}
@@ -358,6 +374,17 @@ function flattenCommands(c: SignedCertificate): CommandEvidence[] {
     }
   }
   return out;
+}
+
+/**
+ * The licence marking beside the title. Warning tone for anything that is not
+ * a plainly licensed certificate; "Licensed" stays neutral (not success)
+ * because the chain is not verified here.
+ */
+function LicencePill({ summary }: { summary: LicenceSummary }) {
+  const pill = licencePill(summary.kind);
+  if (!pill) return null;
+  return <span className={classNames("pill text-sm", pill.tone)}>{pill.label}</span>;
 }
 
 function DispositionPill({ disposition }: { disposition: string }) {

@@ -352,6 +352,59 @@ export interface LicenseInfo {
   fingerprint: string;
 }
 
+/**
+ * Mirror of `wipe_license::Entitlements`. `quota`, `scope` and
+ * `allowed_methods` are tagged enums on the Rust side; the UI reads none of
+ * them, so they stay `unknown` rather than guessing their spellings here.
+ */
+export interface LicenseEntitlements {
+  customer_id: string;
+  customer_name: string;
+  quota: unknown;
+  scope: unknown;
+  not_before: string;
+  not_after: string;
+  features: string[];
+  allowed_methods: unknown;
+  machine_binding?: string;
+}
+
+/** Mirror of `wipe_license::LicenseBody`. `issued_at` is RFC 3339. */
+export interface LicenseBody {
+  license_format_version: number;
+  license_id: string;
+  root_key_id: string;
+  instance_public_key_id: string;
+  entitlements: LicenseEntitlements;
+  issued_at: string;
+  /** Omitted when `evaluation` (ADR-0012). */
+  lapse_policy?: LapsePolicy;
+}
+
+/** Mirror of `wipe_license::LicenseSignature` (the vendor root's signature). */
+export interface LicenseSignature {
+  algorithm: string;
+  public_key_id: string;
+  canonical_sha256_hex: string;
+  signature_b64: string;
+}
+
+/** Mirror of `wipe_license::LicenseCertificate`. */
+export interface LicenseCertificate {
+  body: LicenseBody;
+  signature: LicenseSignature;
+}
+
+/**
+ * Mirror of `wipe_license::AttestationChain`, carried on a licensed
+ * certificate (ADR-0005 §1). Opaque JSON on the Rust certificate side, so
+ * read it defensively; it is verified only offline, by `verify-cert`.
+ */
+export interface AttestationChain {
+  license: LicenseCertificate;
+  root_key_id: string;
+}
+
 export interface Concurrence {
   kind: ConcurrenceKind;
   manifest_id: string;
@@ -487,6 +540,11 @@ export interface SignedCertificate {
     };
     media_status: { operational: boolean; damaged: boolean; notes: string | null };
     audit_verification_ref?: { id: string; at: string | null } | null;
+    /**
+     * Signed marker of an Evaluation certificate (ADR-0005 §5). Always
+     * serialized by current stations; treat a missing key as `false`.
+     */
+    evaluation: boolean;
   };
   signature: {
     algorithm: string;
@@ -496,6 +554,8 @@ export interface SignedCertificate {
   };
   /** Pre-v3 supervisor co-signatures; never on a v3 certificate. */
   co_signatures?: CoSignatureBlock[];
+  /** The licence chain of a licensed station; absent on an evaluation certificate. */
+  attestation?: AttestationChain;
 }
 
 export interface PublicKeyResponse {
