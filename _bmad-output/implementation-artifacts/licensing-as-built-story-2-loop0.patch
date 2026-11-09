@@ -1,0 +1,1297 @@
+diff --git a/CONTEXT.md b/CONTEXT.md
+index 46bde81..e316f6f 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -717,8 +717,10 @@ design target; its **Today:** line says what the code does at present.
+ 3. Licence fetched from lead/hub at boot, RAM-resident, expires if
+    check-in stops. **Today:** nothing is fetched; the licence is read
+    from a `--license` file at start and checked against
+-   `--vendor-root-b64`, and the lease (watermark and erasure count) is
+-   reset on every start.
++   `--vendor-root-b64`. The lease (watermark and erasure count) is kept in
++   `lease-state.json` beside the bay topology and survives a restart; on a
++   station whose config directory is not writable it is held in RAM and
++   resets on every start, which the start-up output states.
+ 4. Signing keys never on the station. Signing happens at the lead
+    (YubiKey/PIV at supervisor desk) or in the cloud (KMS). **Today:**
+    the signing key is on the station — read from the `--key-path` file
+@@ -913,7 +915,7 @@ folder or in `.scratch/DECISIONS.md`.
+ | Tiered, self-detecting station config store | ADR-0003 | ✅ partial | Control-plane tier always fails (no hub); corrupt config only logged, not surfaced |
+ | Bench-setup builder + learn-by-hot-swap identify mode | ADR-0002/0003 | ✅ CLI only | The desktop (Tauri) shell wires no store or simulator: layouts are lost on quit and identify mode is dead |
+ | Model-aware enclosure catalog + shell artwork with machine-enforced legibility rules | ADR-0004 | ✅ partial | Site-local overlay exists in code but no host wires it |
+-| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark not persisted (resets on restart); `FileCounter` exists but nothing uses it yet (rewindable, not hardware-backed); `TpmCounter` cannot count and claims no hardware backing; `allowed_methods` unenforced; free-tier count not tracked; no API route or UI; desktop shell is always unlicensed |
++| Licensing by attestation — vendor root → licence → instance key → cert; entitlements; offline lease; `evaluation` marking inside the signed payload | ADR-0005 | ✅ partial | Lease/watermark persisted in `lease-state.json` beside the bay topology (RAM-only, resetting on restart, where that directory is not writable and in the desktop shell; tier printed at `wipestation serve` start-up only); `FileCounter` exists but nothing uses it yet (rewindable, not hardware-backed); `TpmCounter` cannot count and claims no hardware backing; `allowed_methods` unenforced; free-tier count not tracked; no API route or UI; desktop shell is always unlicensed |
+ | Vitest suite over the frontend's pure domain modules | §12 | ✅ | |
+ | `DiagnosticEvent` / `HealthCheckEvent` | ADR-0001 | ⛔ schema-only; runner never emits | |
+ | Marketing-site scaffold `sites/www` (static Astro + Tailwind) + capability list with `available`/`in-development`/`planned` badges + build-time honest-claims/meta/third-party check; landing page (problem, offline-verifiable certificate, differentiators, "what we are not", one early-access CTA); product, standards posture (certification roadmap labelled future), segment (ITAD, enterprise IT, government), pricing ("early-access pricing on request"), contact, privacy and terms pages; early-access and contact forms | ADR-0006 / ROADMAP W1.1–W1.4 | ✅ partial | The forms stay closed (no script, submit disabled, "not open yet") unless the build is given `PUBLIC_HUB_ORIGIN`, and `astro build` refuses that until the privacy notice is published (`site.privacyNoticePublished`), so production builds cannot take sales leads yet; pricing has no amounts unless the build is given `PRICING_HUB_ORIGIN` (`offerings-and-payments` story 5, below); privacy and terms are placeholders to publish before launch; brand and origin are placeholders; no CI runs the build (ROADMAP §0.5); copy and statuses await vendor sign-off |
+@@ -998,10 +1000,11 @@ keep resolving.
+    certificate → station instance key → erasure certificate, with
+    entitlements and an offline lease. Shipped: the chain, licence
+    verification against `--vendor-root-b64` at start, and the
+-   `evaluation` marker inside the signed certificate. **Not built:**
+-   lease persistence (the watermark and erasure count reset on every
+-   start, so a restart defeats rollback detection and the quota),
+-   use of a counter (`FileCounter` exists — a rewindable file, not
++   `evaluation` marker inside the signed certificate, and lease
++   persistence (the watermark and erasure count in `lease-state.json`
++   beside the bay topology, RAM-only where that directory is not
++   writable). **Not built:** a licence API route or UI (the lease tier is
++   printed only at `wipestation serve` start-up), use of a counter (`FileCounter` exists — a rewindable file, not
+    hardware-backed — but nothing wires it in; `TpmCounter` is a
+    placeholder that returns `Unsupported` and does not claim hardware
+    backing), enforcement of `allowed_methods`, verifying a
+@@ -1388,8 +1391,14 @@ and resolve. None of these have a decided answer.
+ - **Lease / watermark** — the station's offline enforcement state
+   (`wipe_license::LeaseState`): the highest clock time seen (the
+   watermark, for rollback detection) and the count of licensed
+-  erasures. Today it is held in RAM and reset on every start, so a
+-  restart clears both. `wipe_license::FileCounter` (a counter kept in
++  erasures under the current licence. `wipestation serve` keeps it in
++  `lease-state.json` beside the bay topology, saved after every signing
++  decision and counted erasure, so a restart clears neither; where that
++  directory is not writable (and in the desktop shell) it is held in RAM
++  and resets on every start. A lease file that cannot be read or saved
++  marks licensed certificates `evaluation`, never stops an erasure, and an
++  unreadable one is never overwritten. A different licence id keeps the
++  watermark and restarts the count. `wipe_license::FileCounter` (a counter kept in
+   one file, which anyone who can edit the file can rewind, so not
+   hardware-backed) exists but is not yet used; `TpmCounter` is a
+   placeholder that returns `Unsupported` and does not claim hardware
+diff --git a/README.md b/README.md
+index 02b0f9c..beeda5b 100644
+--- a/README.md
++++ b/README.md
+@@ -58,7 +58,7 @@ concurred with, when the station's concurrence policy requires it). See
+ | `wipe-engine` | `DeviceBackend` trait + `JobRunner`; runs the outer-Job and inner-ErasureEvent state machines and broadcasts `JobUpdate` records |
+ | `wipe-engine-mock` | Fake fleet of 4 drives (NVMe x2, SATA SSD, HDD) with simulated progress, failure injection, synthesised evidence |
+ | `wipe-cert` | JSON-LD certificate schema (v3 — carries the activity chain and, for a destroyed drive, its destruction run) + canonical serialization + detached Ed25519 sign / verify, with v3 content checks; v2 certificates and their co-signature blocks still verify |
+-| `wipe-license` | Licensing by attestation (ADR-0005): vendor root → licence → station instance key → certificate chain, entitlements, offline lease checks and the vendor-side licence issuing used by `wipestation license` and `wipe-hub`. Licences verify against vendor root public keys supplied at run time (`--vendor-root-b64`), not keys built into the binary; licensing never stops an erasure, and lease state (anti-rollback watermark, quota count) is held in memory and resets on restart |
++| `wipe-license` | Licensing by attestation (ADR-0005): vendor root → licence → station instance key → certificate chain, entitlements, offline lease checks and the vendor-side licence issuing used by `wipestation license` and `wipe-hub`. Licences verify against vendor root public keys supplied at run time (`--vendor-root-b64`), not keys built into the binary; licensing never stops an erasure, and lease state (anti-rollback watermark, quota count) is kept by `wipestation serve` in `lease-state.json` beside the bay topology, held in RAM (resetting on restart) where that directory is not writable |
+ | `wipe-fleet` | mDNS service advertise / browse + deterministic lead election |
+ | `wipe-server` | Axum REST API + WebSocket event stream for one station: health, station info, public key, fleet peers/lead, devices and capabilities, bay topology (get, save, saved config, dry-run resolve, store tier, ephemeral acknowledge), enclosure catalog, Jobs (create, list, get, start, abort, record-for-destruction, certificate), record a scanned group for destruction and preview the attestation statement, destruction runs (manifests: create, list, get, confirm completion, concur, preview either statement) and the read-only concurrence policy, simulator hot-plug (`/api/sim/devices[/attach\|/detach]`, always routed, 404 when the backend has no simulator) and `/api/events` (WS). Auto-signs certs when a Job reaches `Erased` or `Destroyed` (recording for destruction signs nothing) and keeps them in RAM only |
+ | `wipe-cli` | The `wipestation` station binary: `serve` (`--addr --station-id --no-fleet --key-path --fast --static-dir --bay-topology --bay-profile --control-plane-url --ephemeral-config --license --vendor-root-b64 --concurrence-policy none|review|witness`; without `--key-path` a fresh signing key is generated on every start), `bay-presets [--dump <id>]`, `verify-cert`, `inspect`, and the vendor-side `license new-root / issue / inspect` |
+@@ -383,7 +383,7 @@ their primary signature only.
+ - **PXE-ephemeral by design** — **no persistent local state for evidence**: certs are signed in RAM, held in the station's memory and served by `GET /api/jobs/:id/certificate`, never written to local storage; they are lost when the station restarts, so download them before then. Nothing ships them to a lead station, hub or cloud yet. *Configuration* (the bay topology) is a different matter and does persist where the station has somewhere to put it — see [ADR-0003](docs/adr/0003-station-config-persistence.md) for the tiered store and why the distinction is drawn.
+ - **One station binary, one engine** — the Tauri window and the Axum HTTP API (for browsers, tablets and automation) wrap the same engine; a Ratatui TUI is future work.
+ 
+-## Test inventory (814 Rust + 762 TypeScript, measured 2026-11-08)
++## Test inventory (835 Rust + 762 TypeScript, measured 2026-11-08)
+ 
+ | Crate / file | Tests | Covers |
+ | --- | --- | --- |
+@@ -398,8 +398,9 @@ their primary signature only.
+ | `wipe-engine-mock/tests/end_to_end.rs` | 31 | NVMe crypto-erase happy path reaches `Erased`; SATA failure keeps the outer Job `InProgress` for an operator decision; enumerate; broadcast stream observes outer *and* inner transitions; simulated hot-plug detach/attach (four tests); manifest linking stamps the Job and its latest DestructionEvent without a broadcast, refuses (stamping nothing) a Queued, unknown, already-linked or twice-listed Job, and a linked Job cannot be recorded for destruction again (six tests); `mark_destroyed` moves a whole run's Jobs to `Destroyed` with one broadcast each, and refuses all-or-nothing (moving and broadcasting nothing) on an unknown, twice-listed or not-pending Job (two tests); runner refusals (six tests): a second `start` is refused and one erasure runs, `start` moves the Job to `InProgress` before returning, a Job recorded for destruction cannot be started, aborting an `Erased` Job is refused while aborting an `Aborted` one is a no-op, and an unknown id is `JobNotFound` on start, abort, record-for-destruction and mark-destroyed; an abort or record for destruction landing right after `start` runs no erasure (two tests); record for destruction (seven tests): a record with no attestation is refused, a scanned group creates one pending Job per drive with intent `destroy` and broadcasts each, and a group repeating a serial, matching an open Job's asset tag, attached serial or erasure-snapshot serial, or empty creates nothing, while a match with a terminal Job does not block |
+ | `wipe-fleet/tests/two_instance.rs` | 2 | Solo lead election, two-instance mutual discovery + cross-station election agreement |
+ | `wipe-server/tests/http_e2e.rs` | 46 | Full HTTP flow → signed cert → offline verify; aborted job emits no cert; destruction runs (seventeen tests): with policy `none` completing a run of three erased drives destroys every Job, stores the previewed statement and time, and certifies each Job once with a v3 certificate carrying that completion, without a co-signature and verifying offline, and a destroyed Job cannot be aborted; with `witness` the run awaits a witness, no Job is destroyed or certified until a second operator concurs, and each certificate then records the `witness` concurrence; with `review` the concurrence is a review whatever kind the client sends; the completion's signer (same operator id, or same name ignoring case and spacing) cannot concur; a concurrence not needed, too early or repeated, and a repeated completion, are 409 and change nothing; an unverified or unattested completion is 422 and changes nothing; the completion time defaults to now and is 422 in the future or before assembly; an unknown run is 404 on completion, concurrence and both previews; blank preview fields are 422; never-erased Jobs (three scanned dead drives and a Queued Job recorded from its device) assemble, complete and get certificates with no `device` that verify; a run member that cannot be certified blocks completion and concurrence (409 naming it) and nothing is destroyed or certified, as does a member aborted after assembly; previews are 409 when the run is not in the state their action accepts; a completion time sent as `+02:00` is stored in UTC, exactly as the statement prints it; the default policy is `none` and runs assembled under it require no concurrence; the removed co-sign route is a JSON 404; a Job cannot be on two runs; a refused assembly stamps no Job; re-recording a Job on a run is refused with 409; record for destruction (thirteen tests): a Queued Job's record reads the serial from the device beside its asset tag and stores the previewed statement, scanned identifiers are recorded as `scanned`, a detached drive's serial comes from its erasure snapshot, a GET on the record route stays 405, an unreadable drive is 422 asking for a scan, an unattested or blank-field record is 422 and records nothing, an Erased Job is 409, the removed `escalate-to-destroy` route is 404, a scanned group creates one pending Job per drive sharing one statement, equal to the preview, a group that is empty, repeats an identifier, has an unidentified drive or is unattested is 422 and creates nothing, a group matching an open Job is 409 naming it, a non-NIST technique is recorded as such, and a blank preview field is 422; runner refusals map to exact statuses (seven tests): an unknown Job id is 404 on start, abort and record-for-destruction, a malformed id stays 400, a second start is 409 with one erasure, starting a Job recorded for destruction is 409, recording an aborted Job is 409, aborting an erased Job is 409 and aborting an aborted Job 200; recording for destruction and assembling sign nothing (the certificate is 404 until `Destroyed`); a destroyed certificate signs the run link, its completion, `media_status` damaged and the technique as `sanitization`; an unsaved topology resolves as a dry run (asserting the resolved topology came back) |
++| `wipe-server/tests/lease_store.rs` | 11 | Lease state (ADR-0005 §3a) in `lease-state.json`: written on the first signing decision with no temp files left; a restart keeps the count and watermark, and a clock rolled back after restart is still `ClockRollback`; a different licence id restarts the count and keeps the watermark, while an unlicensed start leaves a licensed count alone; a corrupt file signs licensed certificates `evaluation` naming the file and is never overwritten; a failed save marks that decision `evaluation` and the next save recovers; an unwritable or read-only directory, or no store wired, runs RAM-only and says the quota count and clock-rollback protection reset on reboot; end to end, a `Count { 3 }` quota used up by three erased drives stays `QuotaExhausted` after the station is rebuilt from the same directory and the next certificate is `evaluation` |
+ | `wipe-server/tests/topology_store.rs` | 16 | All four persistence tiers (ADR-0003), with the control-plane tier reporting unavailable rather than pretending to save; the write probe against a read-only directory; corrupt-config recovery; save-survives-restart; a licence installed after construction reaches the cert generator; and that a path binding learned by identify mode keeps its bay when a *different* drive is swapped into that port |
+-| `wipe-license/tests/attestation.rs` | 28 | ADR-0005 chain: vendor root → licence → instance key → cert; unknown roots, edited entitlements and swapped keys rejected; expiry, quota, machine scope and fingerprints; lease watermark and clock-rollback detection; counter seams that do not claim hardware backing; features need a grant and a live lease; install only on the named station |
++| `wipe-license/tests/attestation.rs` | 38 | ADR-0005 chain: vendor root → licence → instance key → cert; unknown roots, edited entitlements and swapped keys rejected; expiry, quota, machine scope and fingerprints; lease watermark and clock-rollback detection; unavailable lease state never permits licensed signing; lease JSON from before `license_id` still parses; `FileCounter` reads, increments and refuses to fabricate a value; counter seams that do not claim hardware backing; features need a grant and a live lease; install only on the named station |
+ | `wipe-license/tests/end_to_end.rs` | 6 | Licensed certs verify on both axes; evaluation certs are valid and marked; the evaluation marker cannot be stripped; a stolen licence cannot launder another station's cert; attaching a chain leaves the erasure signature intact |
+ | `wipe-license/tests/lapse_policy.rs` | 8 | ADR-0012 lapse policy in the signed licence body: older files still verify as `evaluation`, adding or removing `stop` is tampering, wire spelling |
+ | `wipe-hub` (unit + `tests/*.rs`) | 550 | 167 unit and 383 integration tests against the compose Postgres and Mailpit: migrations, audit log, accounts and sessions, team, admin, leads, offerings, orders and Stripe/Fake payments, entitlements, stations and licences, releases and downloads, portal serving, deployment banner, cross-organization isolation, CLI |
+@@ -481,8 +482,10 @@ positions are enumeration order, not physical bays.
+   is accepted, but the probe always fails, so the station falls back to the
+   ephemeral tier.
+ - Licence enforcement is partial: the chain and the `evaluation` marker are
+-  real, but lease state (watermark, quota count) is not persisted and resets
+-  on restart, and allowed-method and feature checks are not wired in.
++  real, and lease state (watermark, quota count) survives a restart in
++  `lease-state.json` (RAM-only where the config directory is not writable,
++  as the start-up output says), but allowed-method and feature checks are
++  not wired in, and no API route or UI shows the licence or lease.
+   Licensing never blocks an erasure (ADR-0005).
+ - RBAC, SAML/OIDC on the station, customer cert portal.
+ - PDF/A-3 cert rendering (JSON-LD only for now; PDF wraps the JSON later).
+diff --git a/crates/wipe-cli/src/main.rs b/crates/wipe-cli/src/main.rs
+index e14fa46..f7b71a3 100644
+--- a/crates/wipe-cli/src/main.rs
++++ b/crates/wipe-cli/src/main.rs
+@@ -479,17 +479,18 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
+ 
+     // Work out where saved configuration goes before serving, so the tier is
+     // in the startup log next to everything else an operator checks (ADR-0003).
++    let store_cfg = wipe_server::store::StoreConfig {
++        explicit_path: bay_topology_path,
++        control_plane_url,
++        station_id: resolved_station_id.clone(),
++    };
+     let store: Arc<dyn wipe_server::TopologyStore> = if force_ephemeral {
+         Arc::new(wipe_server::store::EphemeralStore::new(
+             "Started with --ephemeral-config.".into(),
+             false,
+         ))
+     } else {
+-        wipe_server::store::detect_store(&wipe_server::store::StoreConfig {
+-            explicit_path: bay_topology_path,
+-            control_plane_url,
+-            station_id: resolved_station_id.clone(),
+-        })
++        wipe_server::store::detect_store(&store_cfg)
+     };
+     let store_status = wipe_server::store::status_of(&store);
+     println!(
+@@ -501,13 +502,22 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
+     }
+ 
+     // ADR-0005: a licence only decides how certificates are *marked*. A
+-    // station with none still erases and still signs.
++    // station with none still erases and still signs. Lease state is detected
++    // whatever --ephemeral-config says: it is licensing enforcement, not
++    // configuration, and one flag must not refill a quota.
++    let lease_store = wipe_server::detect_lease_store(&store_cfg);
+     let license_ctx = build_license_context(
+         license_path,
+         vendor_root_b64,
+         &signing_key.public_key_id(),
+         &resolved_station_id,
++        lease_store,
+     )?;
++    let lease = license_ctx.lease_persistence();
++    println!(
++        "lease store: {:?} at {} — {}",
++        lease.tier, lease.location, lease.detail
++    );
+ 
+     let mut state = AppState::with_static_dir(backend.clone(), fleet, signing_key, resolved_dist)
+         .with_license(Arc::new(license_ctx))
+@@ -852,11 +862,17 @@ fn build_license_context(
+     vendor_root_b64: Vec<String>,
+     station_key_id: &str,
+     station_id: &str,
++    lease_store: Arc<dyn wipe_server::LeaseStore>,
+ ) -> Result<wipe_server::LicenseContext> {
+     let now = time::OffsetDateTime::now_utc();
+     let Some(path) = license_path else {
+         println!("licence: none — free tier, certificates will be marked evaluation");
+-        return Ok(wipe_server::LicenseContext::unlicensed(station_id, now));
++        return Ok(wipe_server::LicenseContext::open(
++            station_id,
++            None,
++            lease_store,
++            now,
++        ));
+     };
+ 
+     if vendor_root_b64.is_empty() {
+@@ -880,11 +896,7 @@ fn build_license_context(
+     );
+ 
+     let chain = wipe_license::AttestationChain::new(license);
+-    let ctx = wipe_server::LicenseContext::licensed(
+-        station_id,
+-        chain,
+-        wipe_license::LeaseState::new(now),
+-    );
++    let ctx = wipe_server::LicenseContext::open(station_id, Some(chain), lease_store, now);
+     println!("  {}", ctx.status(now).operator_message());
+     Ok(ctx)
+ }
+diff --git a/crates/wipe-license/src/lease.rs b/crates/wipe-license/src/lease.rs
+index 5d06747..15d4de5 100644
+--- a/crates/wipe-license/src/lease.rs
++++ b/crates/wipe-license/src/lease.rs
+@@ -20,11 +20,14 @@ use crate::{LicenseError, LicenseResult};
+ /// negative jumps that are not attacks.
+ pub const CLOCK_SKEW_ALLOWANCE: Duration = Duration::minutes(5);
+ 
+-/// Persisted anti-rollback state.
++/// Anti-rollback state: the clock watermark and the local erasure count.
+ ///
+-/// Stored through the ADR-0003 tiered config store, so on a PXE station with
+-/// no writable storage it lives only for the boot — which is itself worth
+-/// surfacing rather than hiding.
++/// This type is only the data. Whether it survives a restart depends on the
++/// host: `wipestation serve` keeps it in its own file (`lease-state.json`) in
++/// the directory the ADR-0003 tier detection resolves, and holds it in RAM
++/// only when that directory is not writable — which it says at start-up
++/// rather than hiding. A host that wires no store (the desktop shell, tests)
++/// holds it in RAM for the life of the process.
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub struct LeaseState {
+     /// Highest wall-clock time this station has ever observed. A clock
+@@ -37,6 +40,11 @@ pub struct LeaseState {
+     /// rewind. False for the file-backed counter.
+     #[serde(default)]
+     pub counter_is_monotonic: bool,
++    /// The licence `erasures_used` counts against. A station that starts
++    /// under a different licence keeps the watermark (a fact about the
++    /// clock) and resets the count. `None` until a licence has been seen.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub license_id: Option<String>,
+ }
+ 
+ impl LeaseState {
+@@ -45,6 +53,7 @@ impl LeaseState {
+             time_watermark: now,
+             erasures_used: 0,
+             counter_is_monotonic: false,
++            license_id: None,
+         }
+     }
+ 
+@@ -242,6 +251,10 @@ pub enum LeaseStatus {
+     },
+     /// No licence at all — free tier (ADR-0005 §5).
+     Unlicensed,
++    /// The station's persisted lease state could not be read or saved, so
++    /// the watermark and count it would check against cannot be trusted.
++    /// `detail` names the file and the error.
++    LeaseStateUnavailable { detail: String },
+ }
+ 
+ impl LeaseStatus {
+@@ -291,6 +304,10 @@ impl LeaseStatus {
+                  certificates are valid, but are marked as unlicensed."
+                     .into()
+             }
++            Self::LeaseStateUnavailable { detail } => format!(
++                "Licence state could not be read or saved ({detail}). Erasure still works; \
++                 certificates will be marked evaluation until this is fixed."
++            ),
+         }
+     }
+ }
+diff --git a/crates/wipe-license/tests/attestation.rs b/crates/wipe-license/tests/attestation.rs
+index e563518..d2a0a6c 100644
+--- a/crates/wipe-license/tests/attestation.rs
++++ b/crates/wipe-license/tests/attestation.rs
+@@ -408,6 +408,30 @@ fn small_backwards_jumps_are_tolerated_as_clock_skew() {
+     ));
+ }
+ 
++#[test]
++fn unavailable_lease_state_does_not_permit_licensed_signing() {
++    let status = LeaseStatus::LeaseStateUnavailable {
++        detail: "lease state at /cfg/lease-state.json is unreadable".into(),
++    };
++    assert!(!status.permits_licensed_signing());
++    let msg = status.operator_message();
++    assert!(msg.contains("/cfg/lease-state.json"), "{msg}");
++    assert!(msg.contains("Erasure still works"), "{msg}");
++    assert!(msg.contains("evaluation"), "{msg}");
++}
++
++#[test]
++fn lease_state_json_without_a_licence_id_still_parses() {
++    // Written before `license_id` existed: must load, with no licence id.
++    let old = r#"{"time_watermark":"2026-05-28T20:26:40Z","erasures_used":3,"counter_is_monotonic":false}"#;
++    let s: LeaseState = serde_json::from_str(old).unwrap();
++    assert_eq!(s.erasures_used, 3);
++    assert_eq!(s.license_id, None);
++    // And a state with no licence id writes no `license_id` key.
++    let back = serde_json::to_string(&s).unwrap();
++    assert!(!back.contains("license_id"), "{back}");
++}
++
+ #[test]
+ fn a_fresh_lease_state_does_not_claim_a_monotonic_counter() {
+     // The guarantee is only as strong as the anchor; a counter that claimed
+diff --git a/crates/wipe-server/src/lib.rs b/crates/wipe-server/src/lib.rs
+index 7dd758b..b5b9382 100644
+--- a/crates/wipe-server/src/lib.rs
++++ b/crates/wipe-server/src/lib.rs
+@@ -13,5 +13,7 @@ pub mod ws;
+ 
+ pub use app::*;
+ pub use licensing::{LicenseContext, SigningDecision};
+-pub use store::{StoreStatus, StoreTier, TopologyStore};
+-
++pub use store::{
++    detect_lease_store, lease_state_path, EphemeralLeaseStore, LeasePersistence, LeaseStore,
++    LocalFileLeaseStore, StoreStatus, StoreTier, TopologyStore,
++};
+diff --git a/crates/wipe-server/src/licensing.rs b/crates/wipe-server/src/licensing.rs
+index 789951b..02a3f7a 100644
+--- a/crates/wipe-server/src/licensing.rs
++++ b/crates/wipe-server/src/licensing.rs
+@@ -13,35 +13,113 @@
+ //! offline-verifiable certificate — it is simply marked as unlicensed
+ //! (ADR-0005 §5). Refusing to sanitize would destroy evidence the operator
+ //! needs, which is a worse failure than under-collected revenue.
++//!
++//! Lease state is loaded from a [`LeaseStore`] at start-up and saved after
++//! every signing decision and every recorded erasure, so a restart neither
++//! resets the clock watermark nor refills a `Count` quota. Lease I/O never
++//! blocks or fails a signature: a file that cannot be read or saved only
++//! marks certificates `evaluation` (ROADMAP §0.2), with
++//! [`LeaseStatus::LeaseStateUnavailable`] saying why.
++
++use std::sync::Arc;
+ 
+-use parking_lot::RwLock;
++use parking_lot::{Mutex, RwLock};
+ use time::OffsetDateTime;
+ 
+ use wipe_license::{
+     evaluate, machine_fingerprint, AttestationChain, Entitlements, LeaseState, LeaseStatus,
+ };
+ 
++use crate::store::{EphemeralLeaseStore, LeasePersistence, LeaseStore};
++
+ pub struct LicenseContext {
+     chain: Option<AttestationChain>,
+     fingerprint: String,
+     lease: RwLock<LeaseState>,
++    store: Arc<dyn LeaseStore>,
++    /// Set when the stored lease exists but could not be read or parsed.
++    /// Sticky for the life of the context: that file is never overwritten,
++    /// so the operator can inspect or repair it.
++    load_fault: Option<String>,
++    /// The last save's error, cleared by the next successful save.
++    save_fault: Mutex<Option<String>>,
++    /// Serializes snapshot-and-save so an older snapshot can never land
++    /// after a newer one.
++    save_lock: Mutex<()>,
++}
++
++fn unwired_store() -> Arc<dyn LeaseStore> {
++    Arc::new(EphemeralLeaseStore::new(
++        "No lease store was wired in.".into(),
++    ))
+ }
+ 
+ impl LicenseContext {
+-    /// An unlicensed station. The free-tier default.
++    /// An unlicensed station with lease state in RAM only. The free-tier
++    /// default for hosts that wire no store.
+     pub fn unlicensed(station_id: &str, now: OffsetDateTime) -> Self {
+-        Self {
+-            chain: None,
+-            fingerprint: machine_fingerprint(station_id),
+-            lease: RwLock::new(LeaseState::new(now)),
+-        }
++        Self::build(
++            None,
++            station_id,
++            LeaseState::new(now),
++            unwired_store(),
++            None,
++        )
+     }
+ 
++    /// A licensed station with the given lease state, held in RAM only.
+     pub fn licensed(station_id: &str, chain: AttestationChain, lease: LeaseState) -> Self {
++        Self::build(Some(chain), station_id, lease, unwired_store(), None)
++    }
++
++    /// Load lease state from `store` and keep saving it there.
++    ///
++    /// Nothing stored yet: a fresh state at `now`. Stored under a different
++    /// licence: the watermark is kept and the count restarts at 0 for this
++    /// licence. No licence: the stored count and licence id are left alone.
++    /// Stored but unreadable: a fresh state in RAM, the file untouched, and
++    /// every licensed decision `evaluation` until the file is fixed and the
++    /// station restarted.
++    pub fn open(
++        station_id: &str,
++        chain: Option<AttestationChain>,
++        store: Arc<dyn LeaseStore>,
++        now: OffsetDateTime,
++    ) -> Self {
++        let license_id = chain.as_ref().map(|c| c.license.body.license_id.clone());
++        let (mut lease, load_fault) = match store.load() {
++            Ok(Some(lease)) => (lease, None),
++            Ok(None) => (LeaseState::new(now), None),
++            Err(e) => {
++                let fault = format!("lease state at {} is unreadable: {e}", store.location());
++                tracing::error!(%fault, "lease state not loaded; licensed certificates will be marked evaluation");
++                (LeaseState::new(now), Some(fault))
++            }
++        };
++        if let Some(id) = license_id {
++            if lease.license_id.as_deref() != Some(id.as_str()) {
++                lease.erasures_used = 0;
++                lease.license_id = Some(id);
++            }
++        }
++        Self::build(chain, station_id, lease, store, load_fault)
++    }
++
++    fn build(
++        chain: Option<AttestationChain>,
++        station_id: &str,
++        lease: LeaseState,
++        store: Arc<dyn LeaseStore>,
++        load_fault: Option<String>,
++    ) -> Self {
+         Self {
+-            chain: Some(chain),
++            chain,
+             fingerprint: machine_fingerprint(station_id),
+             lease: RwLock::new(lease),
++            store,
++            load_fault,
++            save_fault: Mutex::new(None),
++            save_lock: Mutex::new(()),
+         }
+     }
+ 
+@@ -57,6 +135,58 @@ impl LicenseContext {
+         self.lease.read().clone()
+     }
+ 
++    /// Where lease state lives and whether it survives reboot, for the
++    /// operator. Names the fault when the stored state is unusable.
++    pub fn lease_persistence(&self) -> LeasePersistence {
++        let tier = self.store.tier();
++        let mut detail = self.store.detail();
++        if let Some(fault) = self.fault() {
++            detail.push_str(&format!(
++                " Lease state is unavailable ({fault}); licensed certificates are marked \
++                 evaluation until this is fixed."
++            ));
++        }
++        LeasePersistence {
++            tier,
++            survives_reboot: tier.survives_reboot(),
++            location: self.store.location(),
++            detail,
++        }
++    }
++
++    /// The current lease I/O fault, if any: a sticky load fault first, else
++    /// the last save's error.
++    fn fault(&self) -> Option<String> {
++        self.load_fault
++            .clone()
++            .or_else(|| self.save_fault.lock().clone())
++    }
++
++    /// Save the current lease state. Never overwrites a file that failed to
++    /// load. Returns whether lease state is now trustworthy.
++    fn persist(&self) -> bool {
++        if self.load_fault.is_some() {
++            return false;
++        }
++        let _guard = self.save_lock.lock();
++        let snapshot = self.lease.read().clone();
++        match self.store.save(&snapshot) {
++            Ok(()) => {
++                *self.save_fault.lock() = None;
++                true
++            }
++            Err(e) => {
++                let fault = format!(
++                    "lease state at {} was not saved: {e}",
++                    self.store.location()
++                );
++                tracing::error!(%fault, "lease state not saved; licensed certificates will be marked evaluation");
++                *self.save_fault.lock() = Some(fault);
++                false
++            }
++        }
++    }
++
+     /// Fold an observed clock reading into the anti-rollback watermark.
+     ///
+     /// Called on every evaluation so the watermark tracks the highest time
+@@ -66,13 +196,17 @@ impl LicenseContext {
+         self.lease.write().observe(now);
+     }
+ 
+-    /// Record a successful erasure against the local usage count.
++    /// Record a successful erasure against the local usage count, and save.
+     ///
+     /// Best-effort by construction: this is a local counter, and ADR-0005 §3
+-    /// is explicit that offline consumption is not provable.
++    /// is explicit that offline consumption is not provable. A failed save is
++    /// logged and retried by the next save.
+     pub fn record_erasure(&self) {
+-        let mut lease = self.lease.write();
+-        lease.erasures_used = lease.erasures_used.saturating_add(1);
++        {
++            let mut lease = self.lease.write();
++            lease.erasures_used = lease.erasures_used.saturating_add(1);
++        }
++        self.persist();
+     }
+ 
+     pub fn status(&self, now: OffsetDateTime) -> LeaseStatus {
+@@ -82,13 +216,33 @@ impl LicenseContext {
+         let status = evaluate(self.entitlements(), &state, &self.fingerprint, now);
+         drop(state);
+         self.observe_now(now);
+-        status
++        self.with_fault(status)
++    }
++
++    /// A licensed station whose lease state cannot be trusted reports that
++    /// first: every other verdict was computed from it.
++    fn with_fault(&self, status: LeaseStatus) -> LeaseStatus {
++        if self.chain.is_none() {
++            return status;
++        }
++        match self.fault() {
++            Some(detail) => LeaseStatus::LeaseStateUnavailable { detail },
++            None => status,
++        }
+     }
+ 
+     /// What the certificate generator needs: whether to mark the cert as
+     /// evaluation, and the attestation chain to staple on if not.
++    ///
++    /// Saves the lease state (the watermark just moved) before answering; a
++    /// failed save makes this decision `evaluation`, never an error.
+     pub fn signing_decision(&self, now: OffsetDateTime) -> SigningDecision {
+-        let status = self.status(now);
++        let state = self.lease.read().clone();
++        let evaluated = evaluate(self.entitlements(), &state, &self.fingerprint, now);
++        drop(state);
++        self.observe_now(now);
++        self.persist();
++        let status = self.with_fault(evaluated);
+         if status.permits_licensed_signing() {
+             if let Some(chain) = &self.chain {
+                 return SigningDecision {
+diff --git a/crates/wipe-server/src/store.rs b/crates/wipe-server/src/store.rs
+index aeba59f..f2129a7 100644
+--- a/crates/wipe-server/src/store.rs
++++ b/crates/wipe-server/src/store.rs
+@@ -10,13 +10,22 @@
+ //!
+ //! The tier is *detected*, not configured. An operator should not have to know
+ //! whether the root filesystem they booted is writable.
++//!
++//! Lease state (ADR-0005 §3a: the clock watermark and local erasure count) is
++//! kept beside the topology in its own file, `lease-state.json`, through a
++//! separate [`LeaseStore`]. It is licensing state, not configuration, so it
++//! never enters the topology document and `--ephemeral-config` does not apply
++//! to it. Its tiers are local file or RAM-only: no control-plane transport
++//! carries lease state.
+ 
+ use std::path::{Path, PathBuf};
++use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::Arc;
+ 
+ use parking_lot::RwLock;
+ use serde::{Deserialize, Serialize};
+ use wipe_common::BayTopology;
++use wipe_license::LeaseState;
+ 
+ #[derive(Debug, thiserror::Error)]
+ pub enum StoreError {
+@@ -388,3 +397,209 @@ pub fn status_of(store: &Arc<dyn TopologyStore>) -> StoreStatus {
+         detail: store.detail(),
+     }
+ }
++
++// ---------------------------------------------------------------------------
++// Lease state (ADR-0005 §3a)
++// ---------------------------------------------------------------------------
++
++/// File name of the lease state, in the same directory as the topology.
++pub const LEASE_STATE_FILE: &str = "lease-state.json";
++
++/// Where a station's anti-rollback lease state lives.
++///
++/// Separate from [`TopologyStore`]: lease state is licensing enforcement, not
++/// operator configuration, and must never ride along in the topology document.
++pub trait LeaseStore: Send + Sync {
++    fn tier(&self) -> StoreTier;
++    fn location(&self) -> String;
++    /// Whether and why lease state survives reboot. Written for an operator.
++    fn detail(&self) -> String;
++    /// `Ok(None)` when nothing has been saved yet. A file that exists but
++    /// cannot be read or parsed is an error, never a fresh state.
++    fn load(&self) -> Result<Option<LeaseState>, StoreError>;
++    fn save(&self, state: &LeaseState) -> Result<(), StoreError>;
++}
++
++/// What an operator needs to know about lease persistence.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct LeasePersistence {
++    pub tier: StoreTier,
++    pub survives_reboot: bool,
++    /// A path, or "memory (this boot only)".
++    pub location: String,
++    pub detail: String,
++}
++
++/// Lease state in one JSON file, written atomically.
++pub struct LocalFileLeaseStore {
++    path: PathBuf,
++}
++
++impl LocalFileLeaseStore {
++    pub fn new(path: PathBuf) -> Self {
++        Self { path }
++    }
++
++    pub fn path(&self) -> &Path {
++        &self.path
++    }
++}
++
++impl LeaseStore for LocalFileLeaseStore {
++    fn tier(&self) -> StoreTier {
++        StoreTier::LocalFile
++    }
++
++    fn location(&self) -> String {
++        self.path.display().to_string()
++    }
++
++    fn detail(&self) -> String {
++        format!(
++            "Licence quota count and clock-rollback watermark are saved to {} on this \
++             station. Survives reboot.",
++            self.path.display()
++        )
++    }
++
++    fn load(&self) -> Result<Option<LeaseState>, StoreError> {
++        let raw = match std::fs::read_to_string(&self.path) {
++            Ok(raw) => raw,
++            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
++            Err(e) => {
++                return Err(StoreError::Io(std::io::Error::new(
++                    e.kind(),
++                    format!("reading {}: {e}", self.path.display()),
++                )))
++            }
++        };
++        serde_json::from_str(&raw)
++            .map(Some)
++            .map_err(|e| StoreError::Parse(format!("{}: {e}", self.path.display())))
++    }
++
++    /// Temp file, `sync_all`, rename, then (on Unix) fsync the directory so
++    /// the rename itself survives a power loss. A half-written lease must
++    /// never be read back as a smaller count or an earlier watermark.
++    fn save(&self, state: &LeaseState) -> Result<(), StoreError> {
++        let body =
++            serde_json::to_string_pretty(state).map_err(|e| StoreError::Parse(e.to_string()))?;
++        let dir = match self.path.parent() {
++            Some(d) if !d.as_os_str().is_empty() => d,
++            _ => Path::new("."),
++        };
++        let name = self
++            .path
++            .file_name()
++            .map(|s| s.to_string_lossy().to_string())
++            .unwrap_or_else(|| LEASE_STATE_FILE.into());
++        static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
++        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
++        let tmp = dir.join(format!(".{name}.tmp-{}-{seq}", std::process::id()));
++        let write = || -> std::io::Result<()> {
++            use std::io::Write;
++            std::fs::create_dir_all(dir)?;
++            let mut f = std::fs::OpenOptions::new()
++                .write(true)
++                .create_new(true)
++                .open(&tmp)?;
++            f.write_all(body.as_bytes())?;
++            f.sync_all()?;
++            std::fs::rename(&tmp, &self.path)?;
++            #[cfg(unix)]
++            std::fs::File::open(dir)?.sync_all()?;
++            Ok(())
++        };
++        write().map_err(|e| {
++            let _ = std::fs::remove_file(&tmp);
++            StoreError::Io(std::io::Error::new(
++                e.kind(),
++                format!("writing {}: {e}", self.path.display()),
++            ))
++        })
++    }
++}
++
++/// Lease state in RAM only. Signing works; the count and watermark do not
++/// survive a restart, and [`detail`](LeaseStore::detail) says so.
++pub struct EphemeralLeaseStore {
++    held: RwLock<Option<LeaseState>>,
++    reason: String,
++}
++
++impl EphemeralLeaseStore {
++    pub fn new(reason: String) -> Self {
++        Self {
++            held: RwLock::new(None),
++            reason,
++        }
++    }
++}
++
++impl LeaseStore for EphemeralLeaseStore {
++    fn tier(&self) -> StoreTier {
++        StoreTier::Ephemeral
++    }
++
++    fn location(&self) -> String {
++        "memory (this boot only)".into()
++    }
++
++    fn detail(&self) -> String {
++        format!(
++            "{} Lease state is held in memory only, so the licence quota count and \
++             clock-rollback protection reset on reboot.",
++            self.reason
++        )
++    }
++
++    fn load(&self) -> Result<Option<LeaseState>, StoreError> {
++        Ok(self.held.read().clone())
++    }
++
++    fn save(&self, state: &LeaseState) -> Result<(), StoreError> {
++        *self.held.write() = Some(state.clone());
++        Ok(())
++    }
++}
++
++/// `lease-state.json` in the directory the topology store resolves: the
++/// parent of `--bay-topology` if given, else of [`default_config_path`].
++pub fn lease_state_path(cfg: &StoreConfig) -> PathBuf {
++    let topology = cfg
++        .explicit_path
++        .clone()
++        .unwrap_or_else(default_config_path);
++    match topology.parent() {
++        Some(d) if !d.as_os_str().is_empty() => d.join(LEASE_STATE_FILE),
++        _ => PathBuf::from(LEASE_STATE_FILE),
++    }
++}
++
++/// Local file if that directory passes the write probe, else RAM-only with
++/// the reason stated. Never fails. A control plane does not hold lease state.
++pub fn detect_lease_store(cfg: &StoreConfig) -> Arc<dyn LeaseStore> {
++    let path = lease_state_path(cfg);
++    match LocalFileStore::probe(&path) {
++        Ok(()) => {
++            tracing::info!(path = %path.display(), "lease store: local file");
++            Arc::new(LocalFileLeaseStore::new(path))
++        }
++        Err(e) => {
++            tracing::warn!(
++                path = %path.display(), error = %e,
++                "lease store: directory not writable, lease state is RAM-only"
++            );
++            let mut reason = format!(
++                "This station cannot write {} ({e}).",
++                path.parent().unwrap_or_else(|| Path::new(".")).display()
++            );
++            if let Some(url) = &cfg.control_plane_url {
++                reason.push_str(&format!(
++                    " The control plane at {url} does not hold lease state."
++                ));
++            }
++            Arc::new(EphemeralLeaseStore::new(reason))
++        }
++    }
++}
+diff --git a/crates/wipe-server/tests/lease_store.rs b/crates/wipe-server/tests/lease_store.rs
+new file mode 100644
+index 0000000..282cabe
+--- /dev/null
++++ b/crates/wipe-server/tests/lease_store.rs
+@@ -0,0 +1,430 @@
++//! Lease state persistence (ADR-0005 §3a through the ADR-0003 tiers).
++//!
++//! A restart must neither reset the clock watermark nor refill a `Count`
++//! quota, and a lease file that cannot be read or saved must only ever mark
++//! certificates `evaluation` — never stop an erasure or a signature.
++
++use std::path::{Path, PathBuf};
++use std::sync::Arc;
++use std::time::Duration as StdDuration;
++
++use time::{Duration, OffsetDateTime};
++use uuid::Uuid;
++
++use wipe_common::{Classification, DeviceId, Intent, JobSpec, OperatorRef};
++use wipe_license::{AttestationChain, LeaseState, LeaseStatus, Quota};
++use wipe_server::store::{
++    detect_lease_store, lease_state_path, EphemeralLeaseStore, LeaseStore, LocalFileLeaseStore,
++    StoreConfig, StoreTier,
++};
++use wipe_server::{AppState, LicenseContext};
++
++const RESET_WORDING: &str = "quota count and clock-rollback protection reset on reboot";
++
++fn tmpdir(name: &str) -> PathBuf {
++    let dir = std::env::temp_dir().join(format!(
++        "wipestation-lease-test-{name}-{}",
++        std::process::id()
++    ));
++    let _ = std::fs::remove_dir_all(&dir);
++    std::fs::create_dir_all(&dir).unwrap();
++    dir
++}
++
++fn cfg_in(dir: &Path) -> StoreConfig {
++    StoreConfig {
++        explicit_path: Some(dir.join("bay-topology.json")),
++        control_plane_url: None,
++        station_id: "station-1".into(),
++    }
++}
++
++fn now() -> OffsetDateTime {
++    OffsetDateTime::now_utc()
++}
++
++fn chain(license_id: &str, quota: Quota, instance_key_id: &str) -> AttestationChain {
++    let root = wipe_license::VendorRoot::generate();
++    let ent = wipe_license::Entitlements {
++        customer_id: "c".into(),
++        customer_name: "C".into(),
++        quota,
++        scope: wipe_license::Scope::Site {
++            site_id: "s".into(),
++        },
++        not_before: now() - Duration::days(30),
++        not_after: now() + Duration::days(30),
++        features: vec![],
++        allowed_methods: wipe_license::AllowedMethods::All,
++        machine_binding: None,
++    };
++    AttestationChain::new(root.issue(license_id, instance_key_id, ent, now()).unwrap())
++}
++
++fn unlimited(license_id: &str) -> AttestationChain {
++    chain(license_id, Quota::Unlimited, "ed25519:test")
++}
++
++fn stored(license_id: Option<&str>, used: u64, watermark: OffsetDateTime) -> LeaseState {
++    let mut s = LeaseState::new(watermark);
++    s.erasures_used = used;
++    s.license_id = license_id.map(str::to_string);
++    s
++}
++
++fn nix_running_as_root() -> bool {
++    std::env::var("USER").map(|u| u == "root").unwrap_or(false)
++}
++
++#[cfg(unix)]
++fn set_mode(dir: &Path, mode: u32) {
++    use std::os::unix::fs::PermissionsExt;
++    let mut p = std::fs::metadata(dir).unwrap().permissions();
++    p.set_mode(mode);
++    std::fs::set_permissions(dir, p).unwrap();
++}
++
++// --- matrix rows -------------------------------------------------------------
++
++#[test]
++fn first_start_is_fresh_and_writes_the_file_on_the_first_signing_decision() {
++    let dir = tmpdir("first");
++    let cfg = cfg_in(&dir);
++    let path = lease_state_path(&cfg);
++    assert_eq!(path, dir.join("lease-state.json"));
++
++    let t = now();
++    let ctx = LicenseContext::open(
++        "station-1",
++        Some(unlimited("lic")),
++        detect_lease_store(&cfg),
++        t,
++    );
++    let lease = ctx.lease_state();
++    assert_eq!(lease.erasures_used, 0);
++    assert_eq!(lease.time_watermark, t);
++    assert!(!lease.counter_is_monotonic, "a file is not hardware-backed");
++    assert!(!path.exists(), "nothing written before a signing decision");
++
++    let decision = ctx.signing_decision(t);
++    assert!(!decision.evaluation, "{:?}", decision.status);
++    let on_disk: LeaseState =
++        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++    assert_eq!(on_disk.license_id.as_deref(), Some("lic"));
++
++    let p = ctx.lease_persistence();
++    assert_eq!(p.tier, StoreTier::LocalFile);
++    assert!(p.survives_reboot);
++    assert_eq!(p.location, path.display().to_string());
++    // Only the lease file: no temp files left beside it.
++    let names: Vec<_> = std::fs::read_dir(&dir)
++        .unwrap()
++        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
++        .collect();
++    assert_eq!(names, vec!["lease-state.json".to_string()]);
++}
++
++#[test]
++fn a_restart_keeps_the_count_and_the_watermark() {
++    let dir = tmpdir("restart");
++    let cfg = cfg_in(&dir);
++    let w = now() - Duration::hours(1);
++    LocalFileLeaseStore::new(lease_state_path(&cfg))
++        .save(&stored(Some("lic"), 3, w))
++        .unwrap();
++
++    let ctx = LicenseContext::open(
++        "station-1",
++        Some(unlimited("lic")),
++        detect_lease_store(&cfg),
++        now(),
++    );
++    let lease = ctx.lease_state();
++    assert_eq!(lease.erasures_used, 3);
++    assert_eq!(lease.time_watermark, w);
++}
++
++#[test]
++fn a_clock_rolled_back_after_restart_is_still_detected() {
++    let dir = tmpdir("rollback");
++    let cfg = cfg_in(&dir);
++    let w = now();
++    LocalFileLeaseStore::new(lease_state_path(&cfg))
++        .save(&stored(Some("lic"), 0, w))
++        .unwrap();
++
++    let rewound = w - Duration::days(1);
++    let ctx = LicenseContext::open(
++        "station-1",
++        Some(unlimited("lic")),
++        detect_lease_store(&cfg),
++        rewound,
++    );
++    match ctx.status(rewound) {
++        LeaseStatus::ClockRollback { watermark, .. } => assert_eq!(watermark, w),
++        other => panic!("expected ClockRollback, got {other:?}"),
++    }
++    let decision = ctx.signing_decision(rewound);
++    assert!(decision.evaluation);
++    assert!(matches!(decision.status, LeaseStatus::ClockRollback { .. }));
++    assert_eq!(ctx.lease_state().time_watermark, w, "watermark stays W");
++}
++
++#[test]
++fn a_different_licence_resets_the_count_and_keeps_the_watermark() {
++    let dir = tmpdir("relicence");
++    let cfg = cfg_in(&dir);
++    let w = now() - Duration::hours(2);
++    LocalFileLeaseStore::new(lease_state_path(&cfg))
++        .save(&stored(Some("old"), 5, w))
++        .unwrap();
++
++    let ctx = LicenseContext::open(
++        "station-1",
++        Some(unlimited("new")),
++        detect_lease_store(&cfg),
++        now(),
++    );
++    let lease = ctx.lease_state();
++    assert_eq!(lease.erasures_used, 0);
++    assert_eq!(lease.time_watermark, w);
++    assert_eq!(lease.license_id.as_deref(), Some("new"));
++}
++
++#[test]
++fn an_unlicensed_start_leaves_a_licensed_count_alone() {
++    let dir = tmpdir("unlicensed");
++    let cfg = cfg_in(&dir);
++    let w = now() - Duration::hours(2);
++    LocalFileLeaseStore::new(lease_state_path(&cfg))
++        .save(&stored(Some("old"), 5, w))
++        .unwrap();
++
++    let ctx = LicenseContext::open("station-1", None, detect_lease_store(&cfg), now());
++    let decision = ctx.signing_decision(now());
++    assert!(decision.evaluation);
++    assert_eq!(decision.status, LeaseStatus::Unlicensed);
++    let lease = ctx.lease_state();
++    assert_eq!(lease.erasures_used, 5);
++    assert_eq!(lease.license_id.as_deref(), Some("old"));
++
++    // And what it saved still holds the licensed count.
++    let back = LocalFileLeaseStore::new(lease_state_path(&cfg))
++        .load()
++        .unwrap()
++        .unwrap();
++    assert_eq!(back.erasures_used, 5);
++    assert_eq!(back.license_id.as_deref(), Some("old"));
++}
++
++#[test]
++fn a_corrupt_lease_file_marks_licensed_certificates_evaluation_and_is_never_overwritten() {
++    let dir = tmpdir("corrupt");
++    let cfg = cfg_in(&dir);
++    let path = lease_state_path(&cfg);
++    std::fs::write(&path, b"not json").unwrap();
++
++    let ctx = LicenseContext::open(
++        "station-1",
++        Some(unlimited("lic")),
++        detect_lease_store(&cfg),
++        now(),
++    );
++    let decision = ctx.signing_decision(now());
++    assert!(decision.evaluation);
++    match &decision.status {
++        LeaseStatus::LeaseStateUnavailable { detail } => {
++            assert!(detail.contains(&path.display().to_string()), "{detail}")
++        }
++        other => panic!("expected LeaseStateUnavailable, got {other:?}"),
++    }
++    assert!(decision
++        .status
++        .operator_message()
++        .contains(&path.display().to_string()));
++    ctx.record_erasure();
++    ctx.signing_decision(now());
++    assert_eq!(std::fs::read(&path).unwrap(), b"not json", "file untouched");
++    assert!(ctx
++        .lease_persistence()
++        .detail
++        .contains(&path.display().to_string()));
++}
++
++#[cfg(unix)]
++#[test]
++fn a_failed_save_marks_that_decision_evaluation_and_the_next_save_retries() {
++    if nix_running_as_root() {
++        return; // mode bits do not stop root
++    }
++    let dir = tmpdir("save-fails");
++    let cfg = cfg_in(&dir);
++    let ctx = LicenseContext::open(
++        "station-1",
++        Some(unlimited("lic")),
++        detect_lease_store(&cfg),
++        now(),
++    );
++    assert!(!ctx.signing_decision(now()).evaluation);
++
++    set_mode(&dir, 0o500);
++    let failed = ctx.signing_decision(now());
++    set_mode(&dir, 0o700);
++
++    assert!(failed.evaluation);
++    assert!(
++        matches!(failed.status, LeaseStatus::LeaseStateUnavailable { .. }),
++        "{:?}",
++        failed.status
++    );
++
++    // Writable again: the next save succeeds and licensed signing returns.
++    let recovered = ctx.signing_decision(now());
++    assert!(!recovered.evaluation, "{:?}", recovered.status);
++}
++
++#[test]
++fn an_unwritable_directory_runs_lease_state_in_ram_and_says_what_resets() {
++    let cfg = StoreConfig {
++        explicit_path: Some(PathBuf::from("/proc/definitely/not/writable/x.json")),
++        control_plane_url: Some("https://hub.example.com".into()),
++        station_id: "station-1".into(),
++    };
++    let store = detect_lease_store(&cfg);
++    assert_eq!(store.tier(), StoreTier::Ephemeral);
++
++    let ctx = LicenseContext::open("station-1", Some(unlimited("lic")), store, now());
++    // RAM-only is not a fault: licensed signing still works this boot.
++    assert!(!ctx.signing_decision(now()).evaluation);
++    let p = ctx.lease_persistence();
++    assert_eq!(p.tier, StoreTier::Ephemeral);
++    assert!(!p.survives_reboot);
++    assert!(p.detail.contains(RESET_WORDING), "{}", p.detail);
++    assert!(
++        p.detail.contains("does not hold lease state"),
++        "{}",
++        p.detail
++    );
++}
++
++#[cfg(unix)]
++#[test]
++fn a_read_only_config_directory_is_detected_as_ram_only() {
++    if nix_running_as_root() {
++        return;
++    }
++    let dir = tmpdir("ro-dir");
++    set_mode(&dir, 0o500);
++    let store = detect_lease_store(&cfg_in(&dir));
++    set_mode(&dir, 0o700);
++    assert_eq!(store.tier(), StoreTier::Ephemeral);
++    assert!(store.detail().contains(RESET_WORDING));
++}
++
++#[tokio::test]
++async fn with_no_store_wired_lease_state_is_ram_only_and_says_so() {
++    let p = LicenseContext::unlicensed("station-1", now()).lease_persistence();
++    assert_eq!(p.tier, StoreTier::Ephemeral);
++    assert!(!p.survives_reboot);
++    assert!(p.detail.contains(RESET_WORDING), "{}", p.detail);
++
++    let backend = Arc::new(wipe_engine_mock::MockBackend::fast_catalog());
++    let key = Arc::new(wipe_cert::SigningKey::generate());
++    let state = AppState::new(backend, None, key);
++    let p = state.license().lease_persistence();
++    assert_eq!(p.tier, StoreTier::Ephemeral);
++    assert!(p.detail.contains(RESET_WORDING), "{}", p.detail);
++
++    let ephemeral = EphemeralLeaseStore::new("x.".into());
++    assert!(ephemeral.load().unwrap().is_none());
++}
++
++// --- end to end: a Count quota survives a restart ------------------------------
++
++fn spec(device: &str) -> JobSpec {
++    JobSpec {
++        device_id: DeviceId(device.into()),
++        classification: Classification::High,
++        intent: Intent::Reuse,
++        operator: OperatorRef {
++            id: "op-1".into(),
++            display_name: "Alice".into(),
++            email: "alice@example.com".into(),
++        },
++        asset_tag: None,
++        site_label: None,
++        ticket_ref: None,
++        work_order_ref: None,
++        customer_ref: None,
++        contract_ref: None,
++        sanitization_profile_ref: None,
++    }
++}
++
++/// A station built from `dir`, as `wipestation serve` builds one.
++fn station(dir: &Path, key: &Arc<wipe_cert::SigningKey>, chain: &AttestationChain) -> AppState {
++    let backend = Arc::new(wipe_engine_mock::MockBackend::fast_catalog());
++    let ctx = LicenseContext::open(
++        "station-1",
++        Some(chain.clone()),
++        detect_lease_store(&cfg_in(dir)),
++        now(),
++    );
++    AppState::new(backend, None, key.clone()).with_license(Arc::new(ctx))
++}
++
++/// Erase `device` to a signed certificate; returns its `evaluation` flag.
++async fn erase_to_certificate(state: &AppState, device: &str) -> bool {
++    let id: Uuid = state.runner.create_job(spec(device)).await.unwrap();
++    state.runner.start(id).unwrap();
++    for _ in 0..400 {
++        if let Some(signed) = state.certs.read().get(&id) {
++            return signed.certificate.evaluation;
++        }
++        tokio::time::sleep(StdDuration::from_millis(25)).await;
++    }
++    panic!(
++        "no certificate for {device}; job state {:?}",
++        state.runner.get(id).map(|j| j.state)
++    );
++}
++
++#[tokio::test]
++async fn a_count_quota_used_up_before_a_restart_stays_used_up_after_it() {
++    let dir = tmpdir("quota-e2e");
++    let key = Arc::new(wipe_cert::SigningKey::generate());
++    let chain = chain(
++        "lic-count",
++        Quota::Count { erasures: 3 },
++        &key.public_key_id(),
++    );
++
++    let first = station(&dir, &key, &chain);
++    for device in ["dev-nvme-0", "dev-nvme-1", "dev-hdd-0"] {
++        assert!(
++            !erase_to_certificate(&first, device).await,
++            "{device} should be licensed"
++        );
++    }
++    assert_eq!(first.license().lease_state().erasures_used, 3);
++    let watermark = first.license().lease_state().time_watermark;
++    drop(first);
++
++    // "Reboot": a new station (and a fresh mock) over the same config
++    // directory. dev-sata-0 is the mock's simulated failure, so it is not used.
++    let second = station(&dir, &key, &chain);
++    let lease = second.license().lease_state();
++    assert_eq!(lease.erasures_used, 3, "restart must not refill the quota");
++    assert_eq!(lease.time_watermark, watermark);
++    assert_eq!(
++        second.license().status(now()),
++        LeaseStatus::QuotaExhausted {
++            used: 3,
++            allowed: 3
++        }
++    );
++    assert!(
++        erase_to_certificate(&second, "dev-nvme-0").await,
++        "the next certificate is evaluation"
++    );
++}
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index 9d1174f..de3b135 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -478,8 +478,9 @@ build.** Three frontends, one engine.
+ 
+ The chain is built and tested (ADR-0005): vendor
+ root → licence certificate → instance key → erasure certificate, Ed25519 over
+-canonical JSON, entitlements, offline lease with a monotonic watermark (held in RAM only, so it resets on
+-restart — see `.scratch/licensing-as-built`) and
++canonical JSON, entitlements, offline lease with a monotonic watermark (~~held in RAM only, so it resets on
++restart~~ persisted in `lease-state.json` since 2026-11-08, RAM-only where the
++config directory is not writable — see `.scratch/licensing-as-built`) and
+ clock-skew tolerance, `evaluation` marked inside the signed payload, and
+ `verify-cert --require-licensed`. What does *not* exist is the product around
+ it: three tiers a customer can buy, activate, renew and outgrow.
+diff --git a/docs/adr/0003-station-config-persistence.md b/docs/adr/0003-station-config-persistence.md
+index 8f52dba..b188a4a 100644
+--- a/docs/adr/0003-station-config-persistence.md
++++ b/docs/adr/0003-station-config-persistence.md
+@@ -144,3 +144,31 @@ This is the difference between a stub and a seam: nothing pretends to succeed.
+ - `wipe-server` gains a filesystem dependency it did not have. Confined behind
+   the `TopologyStore` trait so the Tauri and future TUI hosts can substitute
+   their own.
++
++## Amendment (2026-11-08): lease state uses the same directory, not the same document
++
++ADR-0005 §3a says the licence lease (the clock watermark and the local count of
++licensed erasures) persists "through the ADR-0003 tiered store". As built
++(licensing-as-built story 2) it reuses this ADR's directory resolution and
++write probe, and nothing else:
++
++- It is a third kind of local state beside the two in §1: **licensing
++  enforcement**, not evidence and not configuration. It carries no customer
++  data or asset record.
++- It lives in its own file, `lease-state.json`, in the directory that holds
++  `bay-topology.json` (the parent of `--bay-topology`, else
++  `$WIPESTATION_CONFIG_DIR`, else `~/.config/wipestation`), behind its own
++  `LeaseStore` trait in `crates/wipe-server/src/store.rs`. It never enters the
++  topology document, and `save_bay_topology` does not touch it.
++- Writes are temp file, `sync_all`, rename and (on Unix) a directory fsync.
++- Two tiers only: local file, or RAM-only when the probe fails. There is no
++  control-plane transport for lease state, so `--control-plane-url` does not
++  change it, and the start-up line says the control plane does not hold it.
++  There is no operator prompt (tier 3) either: running RAM-only does not need
++  a decision, only a statement.
++- `--ephemeral-config` does not apply: it keeps *configuration* in RAM for
++  demos, and following it would let any customer refill a quota with one flag.
++- Unlike §4's rule for a corrupt topology, a lease file that exists but cannot
++  be read or parsed is never overwritten: the station keeps running, licensed
++  certificates are marked `evaluation`, and the operator message names the
++  file.
+diff --git a/docs/adr/0005-licensing-and-attestation.md b/docs/adr/0005-licensing-and-attestation.md
+index 9a2d92d..2020db5 100644
+--- a/docs/adr/0005-licensing-and-attestation.md
++++ b/docs/adr/0005-licensing-and-attestation.md
+@@ -237,6 +237,21 @@ how a certificate is marked when the station is unlicensed.
+    local count a `Count` quota is checked against. The doc comment on
+    `LeaseState` (`crates/wipe-license/src/lease.rs`) says it is stored
+    through the ADR-0003 tiered store; it is not.
++   *Resolved 2026-11-08 (licensing-as-built story 2):* `wipestation serve`
++   loads lease state from `lease-state.json` in the directory the ADR-0003
++   detection resolves (`LicenseContext::open`, `detect_lease_store` in
++   `crates/wipe-server/src/store.rs`) and saves it, atomically, after each
++   signing decision and each counted erasure, so a restart keeps the
++   watermark and the count. Where that directory is not writable it runs
++   RAM-only and its start-up line says the quota count and clock-rollback
++   protection reset on reboot; the desktop shell, which wires no store, is
++   RAM-only too. A file that cannot be read or saved marks licensed
++   certificates `evaluation` (`LeaseStatus::LeaseStateUnavailable`) and
++   never stops an erasure; an unreadable file is never overwritten. Under
++   a licence with a different id the watermark is kept and the count
++   restarts at 0. The counter is still a file a customer can edit, so
++   `counter_is_monotonic` stays false (§3b), and no API route or UI shows
++   the lease yet.
+ 2. **§3b, counters.** The `MonotonicCounter` trait exists (`lease.rs`), but
+    `FileCounter` is named only in a comment and does not exist. `TpmCounter`
+    returns `Unsupported` from `read` and `increment`, as written, but its

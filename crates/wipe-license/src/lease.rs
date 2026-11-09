@@ -20,11 +20,14 @@ use crate::{LicenseError, LicenseResult};
 /// negative jumps that are not attacks.
 pub const CLOCK_SKEW_ALLOWANCE: Duration = Duration::minutes(5);
 
-/// Persisted anti-rollback state.
+/// Anti-rollback state: the clock watermark and the local erasure count.
 ///
-/// Stored through the ADR-0003 tiered config store, so on a PXE station with
-/// no writable storage it lives only for the boot — which is itself worth
-/// surfacing rather than hiding.
+/// This type is only the data. Whether it survives a restart depends on the
+/// host: `wipestation serve` keeps it in its own file (`lease-state.json`) in
+/// the directory the ADR-0003 tier detection resolves, and holds it in RAM
+/// only when that directory is not writable — which it says at start-up
+/// rather than hiding. A host that wires no store (the desktop shell, tests)
+/// holds it in RAM for the life of the process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseState {
     /// Highest wall-clock time this station has ever observed. A clock
@@ -37,6 +40,11 @@ pub struct LeaseState {
     /// rewind. False for the file-backed counter.
     #[serde(default)]
     pub counter_is_monotonic: bool,
+    /// The licence `erasures_used` counts against. A station that starts
+    /// under a different licence keeps the watermark (a fact about the
+    /// clock) and resets the count. `None` until a licence has been seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_id: Option<String>,
 }
 
 impl LeaseState {
@@ -45,6 +53,7 @@ impl LeaseState {
             time_watermark: now,
             erasures_used: 0,
             counter_is_monotonic: false,
+            license_id: None,
         }
     }
 
@@ -242,6 +251,10 @@ pub enum LeaseStatus {
     },
     /// No licence at all — free tier (ADR-0005 §5).
     Unlicensed,
+    /// The station's persisted lease state could not be read or saved, so
+    /// the watermark and count it would check against cannot be trusted.
+    /// `detail` names the file and the error.
+    LeaseStateUnavailable { detail: String },
 }
 
 impl LeaseStatus {
@@ -291,6 +304,10 @@ impl LeaseStatus {
                  certificates are valid, but are marked as unlicensed."
                     .into()
             }
+            Self::LeaseStateUnavailable { detail } => format!(
+                "Licence state could not be read or saved ({detail}). Erasure still works; \
+                 certificates will be marked evaluation until this is fixed."
+            ),
         }
     }
 }

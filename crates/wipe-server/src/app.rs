@@ -217,7 +217,20 @@ impl AppState {
         let mut rx = self.runner.subscribe();
         let state = self.clone();
         tokio::spawn(async move {
-            while let Ok(b) = rx.recv().await {
+            loop {
+                let b = match rx.recv().await {
+                    Ok(b) => b,
+                    // Falling behind must not end certification for good:
+                    // the skipped broadcasts are lost, later ones still sign.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(
+                            skipped = n,
+                            "certificate generator lagged; broadcasts skipped"
+                        );
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
                 let (job_id, new_state) = match b {
                     JobBroadcast::JobStateChanged { job_id, to, .. } => (job_id, to),
                     _ => continue,
@@ -261,9 +274,23 @@ impl AppState {
                 // ADR-0005: licensing decides how the cert is *marked*, never
                 // whether the erasure happened. An unlicensed, expired or
                 // quota-exhausted station still signs — the cert just says so.
-                let decision = state
-                    .license()
-                    .signing_decision(time::OffsetDateTime::now_utc());
+                // Lease saves touch the disk (up to LEASE_SAVE_TIMEOUT), so
+                // they run off the async workers.
+                let license = state.license();
+                let decision = match tokio::task::spawn_blocking(move || {
+                    license.signing_decision(time::OffsetDateTime::now_utc())
+                })
+                .await
+                {
+                    Ok(decision) => decision,
+                    Err(e) => crate::licensing::SigningDecision {
+                        evaluation: true,
+                        attestation: None,
+                        status: wipe_license::LeaseStatus::LeaseStateUnavailable {
+                            detail: format!("the licence check did not complete: {e}"),
+                        },
+                    },
+                };
                 let cert = if destroyed {
                     let run = job
                         .manifest_id
@@ -311,7 +338,12 @@ impl AppState {
                         }
                         // Only drives that were erased count, as at baseline.
                         if !decision.evaluation && job.latest_erasure().is_some() {
-                            state.license().record_erasure();
+                            let license = state.license();
+                            if let Err(e) =
+                                tokio::task::spawn_blocking(move || license.record_erasure()).await
+                            {
+                                tracing::error!(?e, %job_id, "erasure not recorded against the lease");
+                            }
                         }
                         info!(%job_id, ?new_state, evaluation = decision.evaluation,
                               "certificate signed and stored");

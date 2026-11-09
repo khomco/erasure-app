@@ -409,6 +409,30 @@ fn small_backwards_jumps_are_tolerated_as_clock_skew() {
 }
 
 #[test]
+fn unavailable_lease_state_does_not_permit_licensed_signing() {
+    let status = LeaseStatus::LeaseStateUnavailable {
+        detail: "lease state at /cfg/lease-state.json is unreadable".into(),
+    };
+    assert!(!status.permits_licensed_signing());
+    let msg = status.operator_message();
+    assert!(msg.contains("/cfg/lease-state.json"), "{msg}");
+    assert!(msg.contains("Erasure still works"), "{msg}");
+    assert!(msg.contains("evaluation"), "{msg}");
+}
+
+#[test]
+fn lease_state_json_without_a_licence_id_still_parses() {
+    // Written before `license_id` existed: must load, with no licence id.
+    let old = r#"{"time_watermark":"2026-05-28T20:26:40Z","erasures_used":3,"counter_is_monotonic":false}"#;
+    let s: LeaseState = serde_json::from_str(old).unwrap();
+    assert_eq!(s.erasures_used, 3);
+    assert_eq!(s.license_id, None);
+    // And a state with no licence id writes no `license_id` key.
+    let back = serde_json::to_string(&s).unwrap();
+    assert!(!back.contains("license_id"), "{back}");
+}
+
+#[test]
 fn a_fresh_lease_state_does_not_claim_a_monotonic_counter() {
     // The guarantee is only as strong as the anchor; a counter that claimed
     // to be monotonic while living in a rewritable file would be a lie.

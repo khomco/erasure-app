@@ -478,8 +478,9 @@ build.** Three frontends, one engine.
 
 The chain is built and tested (ADR-0005): vendor
 root → licence certificate → instance key → erasure certificate, Ed25519 over
-canonical JSON, entitlements, offline lease with a monotonic watermark (held in RAM only, so it resets on
-restart — see `.scratch/licensing-as-built`) and
+canonical JSON, entitlements, offline lease with a monotonic watermark (~~held in RAM only, so it resets on
+restart~~ persisted in `lease-state.json` since 2026-11-08, RAM-only where the
+config directory is not writable — see `.scratch/licensing-as-built`) and
 clock-skew tolerance, `evaluation` marked inside the signed payload, and
 `verify-cert --require-licensed`. What does *not* exist is the product around
 it: three tiers a customer can buy, activate, renew and outgrow.

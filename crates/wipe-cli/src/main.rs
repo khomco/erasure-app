@@ -74,7 +74,9 @@ enum Cmd {
         #[arg(long, env = "WIPESTATION_CONTROL_PLANE_URL")]
         control_plane_url: Option<String>,
         /// Skip store detection and keep configuration in RAM only. For
-        /// demos and for reproducing what a PXE station sees.
+        /// demos and for reproducing what a PXE station sees. Licence lease
+        /// state is still saved to `lease-state.json` in the config
+        /// directory when it is writable.
         #[arg(long)]
         ephemeral_config: bool,
         /// Path to a vendor-issued licence (ADR-0005). Without one the
@@ -479,18 +481,12 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
 
     // Work out where saved configuration goes before serving, so the tier is
     // in the startup log next to everything else an operator checks (ADR-0003).
-    let store: Arc<dyn wipe_server::TopologyStore> = if force_ephemeral {
-        Arc::new(wipe_server::store::EphemeralStore::new(
-            "Started with --ephemeral-config.".into(),
-            false,
-        ))
-    } else {
-        wipe_server::store::detect_store(&wipe_server::store::StoreConfig {
-            explicit_path: bay_topology_path,
-            control_plane_url,
-            station_id: resolved_station_id.clone(),
-        })
+    let store_cfg = wipe_server::store::StoreConfig {
+        explicit_path: bay_topology_path,
+        control_plane_url,
+        station_id: resolved_station_id.clone(),
     };
+    let (store, lease_store) = serve_stores(&store_cfg, force_ephemeral);
     let store_status = wipe_server::store::status_of(&store);
     println!(
         "config store: {:?} at {} — {}",
@@ -507,7 +503,9 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         vendor_root_b64,
         &signing_key.public_key_id(),
         &resolved_station_id,
+        lease_store,
     )?;
+    println!("{}", lease_store_line(&license_ctx.lease_persistence()));
 
     let mut state = AppState::with_static_dir(backend.clone(), fleet, signing_key, resolved_dist)
         .with_license(Arc::new(license_ctx))
@@ -841,6 +839,41 @@ fn load_or_create_signing_key(path: Option<PathBuf>) -> Result<SigningKey> {
     }
 }
 
+/// The topology store and the lease store `wipestation serve` runs with.
+///
+/// `--ephemeral-config` keeps *configuration* in RAM; lease state is detected
+/// whatever it says, because lease state is licensing enforcement, not
+/// configuration (ADR-0005 §3a). That only stops this flag from refilling a
+/// quota: deleting or moving `lease-state.json`, or pointing `--bay-topology`
+/// or `WIPESTATION_CONFIG_DIR` at an empty directory, still starts a fresh
+/// lease — the speed bump ADR-0005 §3a admits.
+fn serve_stores(
+    cfg: &wipe_server::store::StoreConfig,
+    force_ephemeral: bool,
+) -> (
+    Arc<dyn wipe_server::TopologyStore>,
+    Arc<dyn wipe_server::LeaseStore>,
+) {
+    let topology: Arc<dyn wipe_server::TopologyStore> = if force_ephemeral {
+        Arc::new(wipe_server::store::EphemeralStore::new(
+            "Started with --ephemeral-config.".into(),
+            false,
+        ))
+    } else {
+        wipe_server::store::detect_store(cfg)
+    };
+    (topology, wipe_server::detect_lease_store(cfg))
+}
+
+/// The start-up line saying where lease state lives and whether it survives
+/// reboot. Same shape as the `config store:` line above it.
+fn lease_store_line(lease: &wipe_server::LeasePersistence) -> String {
+    format!(
+        "lease store: {:?} at {} — {}",
+        lease.tier, lease.location, lease.detail
+    )
+}
+
 /// Build the station's licensing state from `--license` / `--vendor-root-b64`.
 ///
 /// A licence that fails to verify, or that names another station's key, is a
@@ -852,11 +885,17 @@ fn build_license_context(
     vendor_root_b64: Vec<String>,
     station_key_id: &str,
     station_id: &str,
+    lease_store: Arc<dyn wipe_server::LeaseStore>,
 ) -> Result<wipe_server::LicenseContext> {
     let now = time::OffsetDateTime::now_utc();
     let Some(path) = license_path else {
         println!("licence: none — free tier, certificates will be marked evaluation");
-        return Ok(wipe_server::LicenseContext::unlicensed(station_id, now));
+        return Ok(wipe_server::LicenseContext::open(
+            station_id,
+            None,
+            lease_store,
+            now,
+        ));
     };
 
     if vendor_root_b64.is_empty() {
@@ -880,11 +919,7 @@ fn build_license_context(
     );
 
     let chain = wipe_license::AttestationChain::new(license);
-    let ctx = wipe_server::LicenseContext::licensed(
-        station_id,
-        chain,
-        wipe_license::LeaseState::new(now),
-    );
+    let ctx = wipe_server::LicenseContext::open(station_id, Some(chain), lease_store, now);
     println!("  {}", ctx.status(now).operator_message());
     Ok(ctx)
 }
@@ -1067,6 +1102,149 @@ mod tests {
             }
         }
         all
+    }
+
+    fn lease_tmpdir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "wipestation-cli-lease-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn store_cfg_in(dir: &std::path::Path) -> wipe_server::store::StoreConfig {
+        wipe_server::store::StoreConfig {
+            explicit_path: Some(dir.join("bay-topology.json")),
+            control_plane_url: None,
+            station_id: "station-1".into(),
+        }
+    }
+
+    #[test]
+    fn ephemeral_config_keeps_topology_in_ram_but_still_persists_lease_state() {
+        let dir = lease_tmpdir("ephemeral-config");
+        let cfg = store_cfg_in(&dir);
+
+        let (topology, lease) = serve_stores(&cfg, true);
+        assert_eq!(topology.tier(), wipe_server::StoreTier::Ephemeral);
+        assert_eq!(lease.tier(), wipe_server::StoreTier::LocalFile);
+        assert_eq!(
+            lease.location(),
+            dir.join("lease-state.json").display().to_string()
+        );
+
+        let (topology, lease) = serve_stores(&cfg, false);
+        assert_eq!(topology.tier(), wipe_server::StoreTier::LocalFile);
+        assert_eq!(lease.tier(), wipe_server::StoreTier::LocalFile);
+    }
+
+    #[test]
+    fn an_unlicensed_station_saves_its_lease_after_a_signing_decision() {
+        let dir = lease_tmpdir("unlicensed");
+        let path = dir.join("lease-state.json");
+        let store = Arc::new(wipe_server::LocalFileLeaseStore::new(path.clone()));
+        let ctx =
+            build_license_context(None, Vec::new(), "ed25519:test", "station-1", store).unwrap();
+        assert_eq!(
+            ctx.lease_persistence().tier,
+            wipe_server::StoreTier::LocalFile
+        );
+
+        let decision = ctx.signing_decision(time::OffsetDateTime::now_utc());
+        assert!(decision.evaluation);
+        let saved: wipe_license::LeaseState =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.erasures_used, 0);
+
+        let line = lease_store_line(&ctx.lease_persistence());
+        assert!(line.starts_with("lease store: LocalFile at "), "{line}");
+        assert!(line.contains(&path.display().to_string()), "{line}");
+    }
+
+    #[test]
+    fn a_licensed_station_starts_from_its_saved_lease_count() {
+        let dir = lease_tmpdir("licensed");
+        let now = time::OffsetDateTime::now_utc();
+        let root = wipe_license::VendorRoot::generate();
+        let ent = wipe_license::Entitlements {
+            customer_id: "c".into(),
+            customer_name: "C".into(),
+            quota: wipe_license::Quota::Count { erasures: 10 },
+            scope: wipe_license::Scope::Site {
+                site_id: "s".into(),
+            },
+            not_before: now - time::Duration::days(1),
+            not_after: now + time::Duration::days(30),
+            features: vec![],
+            allowed_methods: wipe_license::AllowedMethods::All,
+            machine_binding: None,
+        };
+        let license = root.issue("lic-cli", "ed25519:test", ent, now).unwrap();
+        let license_path = dir.join("licence.json");
+        wipe_license::save_license(&license_path, &license).unwrap();
+
+        let lease_path = dir.join("lease-state.json");
+        let mut seeded = wipe_license::LeaseState::new(now - time::Duration::hours(1));
+        seeded.erasures_used = 2;
+        seeded.license_id = Some("lic-cli".into());
+        let store = Arc::new(wipe_server::LocalFileLeaseStore::new(lease_path));
+        wipe_server::LeaseStore::save(store.as_ref(), &seeded).unwrap();
+
+        let ctx = build_license_context(
+            Some(license_path),
+            vec![root.verifying_key().to_base64()],
+            "ed25519:test",
+            "station-1",
+            store,
+        )
+        .unwrap();
+        assert_eq!(ctx.lease_state().erasures_used, 2);
+        assert_eq!(
+            ctx.lease_persistence().tier,
+            wipe_server::StoreTier::LocalFile
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serve_stores_on_a_read_only_directory_runs_the_lease_in_ram_and_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = lease_tmpdir("read-only");
+        let set = |mode| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode));
+        set(0o500).unwrap();
+        let probe = dir.join(".mode-probe");
+        if std::fs::write(&probe, b"x").is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            set(0o700).unwrap();
+            return; // mode bits do not stop this user (root)
+        }
+        let (_, lease) = serve_stores(&store_cfg_in(&dir), false);
+        set(0o700).unwrap();
+        assert_eq!(lease.tier(), wipe_server::StoreTier::Ephemeral);
+        let ctx =
+            build_license_context(None, Vec::new(), "ed25519:test", "station-1", lease).unwrap();
+        let line = lease_store_line(&ctx.lease_persistence());
+        assert!(
+            line.contains("quota count and clock-rollback protection reset on reboot"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn the_start_up_line_says_what_a_ram_only_lease_loses_on_reboot() {
+        let store = Arc::new(wipe_server::EphemeralLeaseStore::new(
+            "This station cannot write /ro.".into(),
+        ));
+        let ctx =
+            build_license_context(None, Vec::new(), "ed25519:test", "station-1", store).unwrap();
+        let line = lease_store_line(&ctx.lease_persistence());
+        assert!(line.starts_with("lease store: Ephemeral at "), "{line}");
+        assert!(
+            line.contains("quota count and clock-rollback protection reset on reboot"),
+            "{line}"
+        );
     }
 
     #[test]

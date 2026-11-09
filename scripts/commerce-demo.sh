@@ -233,7 +233,9 @@ sha256_of() {
 start_station() {
   local log="$1"
   shift
-  "$WIPESTATION_BIN" serve \
+  # --ephemeral-config keeps configuration in RAM, but lease state is still
+  # saved; keep it in the run's work directory, not ~/.config/wipestation.
+  WIPESTATION_CONFIG_DIR="$WORK/station-config" "$WIPESTATION_BIN" serve \
     --addr "127.0.0.1:${STATION_PORT}" \
     --station-id "$STATION_ID" \
     --key-path "$WORK/station.key" \

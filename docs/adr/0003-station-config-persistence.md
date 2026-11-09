@@ -144,3 +144,43 @@ This is the difference between a stub and a seam: nothing pretends to succeed.
 - `wipe-server` gains a filesystem dependency it did not have. Confined behind
   the `TopologyStore` trait so the Tauri and future TUI hosts can substitute
   their own.
+
+## Amendment (2026-11-08): lease state uses the same directory, not the same document
+
+ADR-0005 §3a says the licence lease (the clock watermark and the local count of
+licensed erasures) persists "through the ADR-0003 tiered store". As built
+(licensing-as-built story 2) it reuses this ADR's directory resolution and
+write probe, and nothing else:
+
+- It is a third kind of local state beside the two in §1: **licensing
+  enforcement**, not evidence and not configuration. It carries no customer
+  data or asset record.
+- It lives in its own file, `lease-state.json`, in the directory that holds
+  `bay-topology.json` (the parent of `--bay-topology`, else
+  `$WIPESTATION_CONFIG_DIR`, else `~/.config/wipestation`), behind its own
+  `LeaseStore` trait in `crates/wipe-server/src/store.rs`. It never enters the
+  topology document, and `save_bay_topology` does not touch it.
+- Writes are temp file, `sync_all`, rename and (on Unix) a directory fsync.
+- Two tiers only: local file, or RAM-only when the probe fails. There is no
+  control-plane transport for lease state, so `--control-plane-url` does not
+  change it, and the start-up line says the control plane does not hold it.
+  There is no operator prompt (tier 3) either: running RAM-only does not need
+  a decision, only a statement.
+- If the probe fails but a `lease-state.json` is already there and readable,
+  the RAM-only lease starts from it, so a read-only boot does not start the
+  count again at 0; changes since start-up are not saved back, and the
+  start-up line says so.
+- `--ephemeral-config` does not apply: it keeps *configuration* in RAM for
+  demos, and following it would let that one flag refill a quota. This is not
+  a guarantee that nothing can: deleting or moving `lease-state.json`, or
+  pointing `--bay-topology` or `WIPESTATION_CONFIG_DIR` at an empty
+  directory, starts a fresh lease. That is the speed bump ADR-0005 §3a
+  already admits, not a control.
+- Saves run on one writer thread, in order; a status check or signing
+  decision waits at most 2 s for its save, and a save that fails or takes
+  longer marks that decision `evaluation`. A hung disk never holds a
+  certificate up indefinitely.
+- Unlike §4's rule for a corrupt topology, a lease file that exists but cannot
+  be read or parsed is never overwritten: the station keeps running, licensed
+  certificates are marked `evaluation`, and the operator message names the
+  file and says to repair it and restart the station.

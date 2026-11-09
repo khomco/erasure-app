@@ -237,6 +237,29 @@ how a certificate is marked when the station is unlicensed.
    local count a `Count` quota is checked against. The doc comment on
    `LeaseState` (`crates/wipe-license/src/lease.rs`) says it is stored
    through the ADR-0003 tiered store; it is not.
+   *Resolved 2026-11-08 (licensing-as-built story 2):* `wipestation serve`
+   loads lease state from `lease-state.json` in the directory the ADR-0003
+   detection resolves (`LicenseContext::open`, `detect_lease_store` in
+   `crates/wipe-server/src/store.rs`) and saves it, atomically, after each
+   status check, signing decision and counted erasure, so a restart keeps
+   the watermark and the count. Saves run on one writer thread and a
+   decision waits at most 2 s for its save; a slower one marks that
+   decision `evaluation`. Where that directory is not writable it runs
+   RAM-only and its start-up line says the quota count and clock-rollback
+   protection reset on reboot; the desktop shell, which wires no store, is
+   RAM-only too. A file that cannot be read or saved marks licensed
+   certificates `evaluation` (`LeaseStatus::LeaseStateUnavailable`) and
+   never stops an erasure; an unreadable file is never overwritten. Under
+   a licence with a different id the watermark is kept and the count
+   restarts at 0. The counter is still a file a customer can edit, so
+   `counter_is_monotonic` stays false (§3b); deleting or moving it, or
+   pointing `--bay-topology` / `WIPESTATION_CONFIG_DIR` at an empty
+   directory, starts a fresh lease — §3a's speed bump, as stated above.
+   A watermark saved while the clock was set far into the future now
+   survives restarts too, so every licensed certificate stays `evaluation`
+   (`ClockRollback`) after the clock is corrected. Recovery: correct the
+   clock, then remove `lease-state.json` (which also restarts the count)
+   and restart the station. No API route or UI shows the lease yet.
 2. **§3b, counters.** The `MonotonicCounter` trait exists (`lease.rs`), but
    `FileCounter` is named only in a comment and does not exist. `TpmCounter`
    returns `Unsupported` from `read` and `increment`, as written, but its
