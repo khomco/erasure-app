@@ -10,6 +10,7 @@ import { DevicesPage } from "./pages/DevicesPage";
 import { JobsPage } from "./pages/JobsPage";
 import { JobDetailPage } from "./pages/JobDetailPage";
 import { CertificatePage } from "./pages/CertificatePage";
+import { InboxPage } from "./pages/InboxPage";
 import { FleetPage } from "./pages/FleetPage";
 import { ManifestsPage } from "./pages/ManifestsPage";
 import { BenchSetupPage } from "./pages/BenchSetupPage";
@@ -36,6 +37,12 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   component: DevicesPage,
+});
+
+const inboxRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/inbox",
+  component: InboxPage,
 });
 
 const jobsRoute = createRoute({
@@ -82,6 +89,7 @@ const benchSetupRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  inboxRoute,
   jobsRoute,
   jobDetailRoute,
   certRoute,

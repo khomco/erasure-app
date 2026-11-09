@@ -11,6 +11,7 @@ import {
   concurrencePreviewKey,
   readyToComplete,
   readyToConcur,
+  runAnchorId,
   runDriveLabels,
   toLocalInput,
   concurrenceSignerProblem,
@@ -231,7 +232,7 @@ function RunList({
 function RunCard({ run, jobs }: { run: DestructionManifest; jobs: Job[] }) {
   const done = run.state === "completed";
   return (
-    <div className={classNames("card", done && "border-emerald-700/40")}>
+    <div id={runAnchorId(run.id)} className={classNames("card", done && "border-emerald-700/40")}>
       <div className="flex items-center gap-2">
         {done ? (
           <CheckCircle2 className="h-4 w-4 text-emerald-400" />

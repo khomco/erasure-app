@@ -460,7 +460,10 @@ build.** Three frontends, one engine.
   tray in one gesture.
 
 **O2 — Not losing drives**
-- O2.1 Exception inbox: failures, quarantine, pending destruction, runs awaiting completion or concurrence.
+- ~~O2.1 Exception inbox: failures, quarantine, pending destruction, runs awaiting completion or concurrence.~~
+  *Shipped 2026-11-09 (bench-throughput-inbox story 2; CONTEXT §8, §10.2): an Inbox page
+  (`/inbox`) and nav count derived client-side from the Jobs and runs lists, each item
+  linking to where it is resolved; a run counts once for all its drives.*
 - O2.2 Failure routing (CONTEXT §11 v0.3 #13) surfaced in the inbox.
 - O2.3 Reboot/session recovery UX (O-R7).
 - O2.4 Label + offline-verifiable QR printing.

@@ -1,13 +1,15 @@
 import { useState } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { FileSignature, HardDrive, LogOut, Network, ScanLine, ScrollText, Shield, ShieldCheck, SlidersHorizontal, UserCircle2 } from "lucide-react";
+import { FileSignature, HardDrive, Inbox, LogOut, Network, ScanLine, ScrollText, Shield, ShieldCheck, SlidersHorizontal, UserCircle2 } from "lucide-react";
 
 import { api, classNames } from "@/api/client";
 import { useEventStream } from "@/api/ws";
 import { useOperator } from "@/operator/context";
 import { SignInModal } from "@/operator/SignInModal";
 import { LicenceBanner } from "./LicenceBanner";
+import { navInboxCount } from "@/pages/inbox";
+import { useInboxQueries } from "@/pages/InboxPage";
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const station = useQuery({ queryKey: ["station"], queryFn: api.station });
@@ -145,19 +147,24 @@ function OperatorBadge({
 
 function NavBar() {
   const state = useRouterState({ select: (s) => s.location.pathname });
+  const { jobs, manifests } = useInboxQueries();
+  const waiting = navInboxCount(jobs, manifests);
   const Item = ({
     to,
     icon,
     label,
+    count,
   }: {
     to: string;
     icon: React.ReactNode;
     label: string;
+    count?: number | null;
   }) => {
     const active = state === to || (to !== "/" && state.startsWith(to));
     return (
       <Link
         to={to}
+        aria-label={count ? `${label}, ${count} waiting` : undefined}
         className={classNames(
           "inline-flex items-center gap-2 rounded-md px-2 py-1 text-sm",
           active ? "bg-slate-800 text-slate-100" : "text-slate-400 hover:text-slate-200"
@@ -165,12 +172,18 @@ function NavBar() {
       >
         {icon}
         {label}
+        {count ? (
+          <span className="pill pill-warning px-1.5 py-0 text-[10px] font-semibold" aria-hidden="true">
+            {count}
+          </span>
+        ) : null}
       </Link>
     );
   };
   return (
     <nav className="flex items-center gap-1">
       <Item to="/" icon={<HardDrive className="h-4 w-4" />} label="Devices" />
+      <Item to="/inbox" icon={<Inbox className="h-4 w-4" />} label="Inbox" count={waiting} />
       <Item to="/jobs" icon={<ScrollText className="h-4 w-4" />} label="Jobs" />
       <Item to="/destruction/record" icon={<ScanLine className="h-4 w-4" />} label="Record for destruction" />
       <Item to="/manifests" icon={<FileSignature className="h-4 w-4" />} label="Destruction runs" />

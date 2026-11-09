@@ -18,6 +18,14 @@ function trimmed(v: string | null | undefined): string | null {
   return t === "" ? null : t;
 }
 
+/**
+ * The DOM id of a run's card on the Destruction runs page, so a link to
+ * `/manifests#run-<id>` lands on it. The one place that anchor is spelled.
+ */
+export function runAnchorId(runId: string): string {
+  return `run-${runId}`;
+}
+
 /** The operator-facing state of a run. */
 export function runStatusLabel(run: Pick<DestructionManifest, "state" | "required_concurrence">): string {
   switch (run.state) {
