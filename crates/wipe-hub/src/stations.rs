@@ -414,7 +414,10 @@ pub fn is_instance_key_id(id: &str) -> bool {
         && B64.decode(rest).is_ok_and(|bytes| bytes.len() == 16)
 }
 
-fn optional_text(field: &str, value: Option<&str>) -> Result<Option<String>, StationError> {
+pub(crate) fn optional_text(
+    field: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, StationError> {
     let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
         return Ok(None);
     };

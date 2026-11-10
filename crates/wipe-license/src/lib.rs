@@ -16,11 +16,13 @@
 //! * [`entitlement`] — what the vendor signature makes uneditable.
 //! * [`lease`] — offline expiry, anti-rollback watermark, counter seam.
 //! * [`client`] — online reconciliation seam (no server built).
+//! * [`enrollment`] — what a station signs to enroll with the hub (ADR-0008).
 //! * [`anchor`] — optional public timestamping seam (not licensing).
 
 pub mod anchor;
 pub mod chain;
 pub mod client;
+pub mod enrollment;
 pub mod entitlement;
 pub mod install;
 pub mod lease;

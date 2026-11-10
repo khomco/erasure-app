@@ -6,7 +6,10 @@
 //! own limits; invitations (story 4) also charge `mail:org:<organization id>`.
 //! Sales-lead form submissions (lead-capture story 1) charge
 //! `lead-form:ip:<peer>` ([`LEAD_KEY_PREFIX`]; never `lead:`, which is the
-//! audit subject of a sales lead itself). Email sends and lead submissions are always final,
+//! audit subject of a sales lead itself). Station enrollment starts
+//! (station-enrollment story 1) charge `enroll:ip:<peer>`
+//! ([`ENROLL_KEY_PREFIX`]). Email sends, lead submissions and enrollment
+//! starts are always final,
 //! so their charges are confirmed in the same transaction instead of waiting
 //! for a check.
 //!
@@ -73,6 +76,17 @@ pub const LEAD_LOCKOUT: Duration = Duration::from_secs(60 * 60);
 /// `lead:`, so an audit subject `lead:<uuid>` always means a sales lead and
 /// never a throttle key carrying a peer IP.
 pub const LEAD_KEY_PREFIX: &str = "lead-form:";
+
+/// Station enrollment starts per client IP (or IPv6 /64) per window: the
+/// sign-in per-IP figure.
+pub const ENROLL_IP_LIMIT: i32 = 20;
+/// The fixed window enrollment starts are counted in.
+pub const ENROLL_WINDOW: Duration = Duration::from_secs(60 * 60);
+/// How long an enrollment-start lock lasts once engaged.
+pub const ENROLL_LOCKOUT: Duration = Duration::from_secs(60 * 60);
+/// Every enrollment-start throttle key starts with this. It is not
+/// `enrollment:`, the audit subject of an enrollment itself.
+pub const ENROLL_KEY_PREFIX: &str = "enroll:";
 
 /// Rows whose window started longer ago than this, and whose lock (if any)
 /// has elapsed, are deleted by [`purge_stale`]. Every window passed to
@@ -348,6 +362,20 @@ mod tests {
     }
 
     #[test]
+    fn enroll_constants() {
+        assert_eq!(ENROLL_IP_LIMIT, 20);
+        assert_eq!(ENROLL_WINDOW.as_secs(), 3600);
+        assert_eq!(ENROLL_LOCKOUT.as_secs(), 3600);
+        assert!(ENROLL_WINDOW <= PURGE_AFTER);
+        assert_eq!(ENROLL_KEY_PREFIX, "enroll:");
+        assert!(!format!("{ENROLL_KEY_PREFIX}ip:192.0.2.1").starts_with("enrollment:"));
+        for other in [MAIL_KEY_PREFIX, LEAD_KEY_PREFIX, "email:", "ip:"] {
+            assert!(!ENROLL_KEY_PREFIX.starts_with(other), "{other}");
+            assert!(!other.starts_with(ENROLL_KEY_PREFIX), "{other}");
+        }
+    }
+
+    #[test]
     fn summaries_only_for_refusals() {
         assert_eq!(LockSummary::from_row("k".into(), 0, None), None);
         let s = LockSummary::from_row("k".into(), 3, Some("t".into())).unwrap();
@@ -376,5 +404,6 @@ mod tests {
         check_charge_args(MAIL_IP_LIMIT, MAIL_WINDOW);
         check_charge_args(MAIL_ORG_LIMIT, MAIL_WINDOW);
         check_charge_args(LEAD_IP_LIMIT, LEAD_WINDOW);
+        check_charge_args(ENROLL_IP_LIMIT, ENROLL_WINDOW);
     }
 }

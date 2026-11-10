@@ -110,6 +110,16 @@ const ROUTES: &[(&str, &str, Class)] = &[
     ),
     (
         "POST",
+        "/api/enrollments",
+        Anonymous("a station asks to enroll its own signed key; answers only its new codes"),
+    ),
+    (
+        "POST",
+        "/api/enrollments/poll",
+        Anonymous("the secret device code and the station key's signature are the credential"),
+    ),
+    (
+        "POST",
         "/api/payments/webhook",
         Anonymous("the provider's signature is the credential; answers only {received}"),
     ),

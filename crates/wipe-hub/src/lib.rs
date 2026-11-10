@@ -22,6 +22,8 @@ pub mod db;
 pub mod deployment;
 pub mod download_routes;
 pub mod downloads;
+pub mod enrollment_routes;
+pub mod enrollments;
 pub mod entitlements;
 pub mod health;
 pub mod lapse_policy;
@@ -110,6 +112,7 @@ pub fn router(state: AppState) -> Router {
         .merge(order_routes::routes())
         .merge(station_routes::routes())
         .merge(download_routes::routes())
+        .merge(enrollment_routes::routes())
         // Unknown API paths are JSON 404s, portal or not: a typo in a client
         // must never get `index.html` back with a 200.
         .route("/api", any(api_not_found))

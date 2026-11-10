@@ -533,7 +533,8 @@ pub(crate) fn with_peer(mut detail: serde_json::Value, peer: Option<&str>) -> se
 }
 
 /// The audit action for a summary of `key`'s refusals: email-send keys
-/// (`mail:…`), sales-lead submission keys (`lead-form:…`) and sign-in keys are
+/// (`mail:…`), sales-lead submission keys (`lead-form:…`), enrollment-start
+/// keys (`enroll:…`) and sign-in keys are
 /// summarised under their own actions. [`throttle::purge_stale`] returns
 /// every kind of key, so each prefix must be mapped here.
 fn lock_summary_action(key: &str) -> &'static str {
@@ -541,6 +542,8 @@ fn lock_summary_action(key: &str) -> &'static str {
         "auth.mail_lock_summary"
     } else if key.starts_with(throttle::LEAD_KEY_PREFIX) {
         "lead.submit_lock_summary"
+    } else if key.starts_with(throttle::ENROLL_KEY_PREFIX) {
+        "enrollment.start_lock_summary"
     } else {
         "auth.sign_in_lock_summary"
     }
@@ -1516,6 +1519,18 @@ mod tests {
         );
         assert_eq!(
             lock_summary_action("email:lead-form:x@b.co"),
+            "auth.sign_in_lock_summary"
+        );
+        assert_eq!(
+            lock_summary_action("enroll:ip:192.0.2.1"),
+            "enrollment.start_lock_summary"
+        );
+        assert_eq!(
+            lock_summary_action("enroll:ip:2001:db8::/64"),
+            "enrollment.start_lock_summary"
+        );
+        assert_eq!(
+            lock_summary_action("email:enroll:x@b.co"),
             "auth.sign_in_lock_summary"
         );
     }
