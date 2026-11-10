@@ -17,6 +17,10 @@
 //! never enters the topology document and `--ephemeral-config` does not apply
 //! to it. Its tiers are local file or RAM-only: no control-plane transport
 //! carries lease state.
+//!
+//! Station settings (ADR-0008 §5: the hub address `wipestation enroll`
+//! saves) are a third file in the same directory, `station-settings.json`
+//! ([`StationSettings`]): local file or not saved at all.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -671,5 +675,141 @@ pub fn detect_lease_store(cfg: &StoreConfig) -> Arc<dyn LeaseStore> {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Station settings (ADR-0008 §5)
+// ---------------------------------------------------------------------------
+
+/// File name of the station settings, in the same directory as the topology
+/// and the lease state.
+pub const STATION_SETTINGS_FILE: &str = "station-settings.json";
+
+/// Station configuration that is neither the bay topology nor licence state:
+/// today only the hub address `wipestation enroll` saved (ADR-0008 §5).
+///
+/// Kept in its own file beside `lease-state.json`, on the local-file tier or
+/// not at all: the control-plane tier cannot hold the address used to reach
+/// it. Unknown fields are ignored on read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StationSettings {
+    /// The hub's origin, `scheme://host[:port]`, as `enroll` validated it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_origin: Option<String>,
+}
+
+/// `station-settings.json` in the directory [`lease_state_path`] uses: the
+/// parent of `--bay-topology` if given, else of [`default_config_path`].
+pub fn station_settings_path(cfg: &StoreConfig) -> PathBuf {
+    lease_state_path(cfg).with_file_name(STATION_SETTINGS_FILE)
+}
+
+/// The settings saved at `path`; `Ok(None)` when there is no file. A file
+/// that cannot be read or parsed is an error, naming neither the path (the
+/// caller does).
+pub fn load_station_settings(path: &Path) -> Result<Option<StationSettings>, StoreError> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(StoreError::Io(e)),
+    };
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|e| StoreError::Parse(e.to_string()))
+}
+
+/// Save `settings` to `path` atomically (temp file beside it, then rename),
+/// as [`LocalFileStore`] saves the topology. Creates the directory if needed.
+pub fn save_station_settings(path: &Path, settings: &StationSettings) -> Result<(), StoreError> {
+    let body =
+        serde_json::to_string_pretty(settings).map_err(|e| StoreError::Parse(e.to_string()))?;
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(dir)?;
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| STATION_SETTINGS_FILE.into());
+    let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
+    let write = || -> std::io::Result<()> {
+        std::fs::write(&tmp, body.as_bytes())?;
+        std::fs::rename(&tmp, path)
+    };
+    write().map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        StoreError::Io(e)
+    })
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "wipestation-settings-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn settings_live_beside_the_lease_state() {
+        let cfg = StoreConfig {
+            explicit_path: Some(PathBuf::from("/etc/ws/bay-topology.json")),
+            ..StoreConfig::default()
+        };
+        assert_eq!(
+            station_settings_path(&cfg),
+            PathBuf::from("/etc/ws/station-settings.json")
+        );
+        let cfg = StoreConfig {
+            explicit_path: Some(PathBuf::from("bay-topology.json")),
+            ..StoreConfig::default()
+        };
+        assert_eq!(
+            station_settings_path(&cfg),
+            PathBuf::from("station-settings.json")
+        );
+    }
+
+    #[test]
+    fn settings_round_trip_and_ignore_unknown_fields() {
+        let dir = tmpdir("round-trip");
+        let path = dir.join(STATION_SETTINGS_FILE);
+        assert_eq!(load_station_settings(&path).unwrap(), None);
+        let saved = StationSettings {
+            hub_origin: Some("https://hub.example".into()),
+        };
+        save_station_settings(&path, &saved).unwrap();
+        assert_eq!(load_station_settings(&path).unwrap(), Some(saved));
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            raw,
+            serde_json::json!({"hub_origin": "https://hub.example"})
+        );
+        // No temp file left behind.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+
+        std::fs::write(&path, r#"{"hub_origin":"https://h","later":1}"#).unwrap();
+        assert_eq!(
+            load_station_settings(&path)
+                .unwrap()
+                .unwrap()
+                .hub_origin
+                .as_deref(),
+            Some("https://h")
+        );
+        std::fs::write(&path, "not json").unwrap();
+        assert!(matches!(
+            load_station_settings(&path),
+            Err(StoreError::Parse(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -12,13 +12,19 @@
 # email through Mailpit, buys the offering, publishes and downloads a release
 # (checking its SHA-256), registers the station, downloads the licence and
 # installs it by restarting the station (the ADR-0005 offline path), runs an
-# erasure and verifies the certificate offline against the vendor root.
+# erasure and verifies the certificate offline against the vendor root. Then a
+# second station enrolls itself (ADR-0008): `wipestation enroll` prints a code,
+# the customer (an owner) approves it through the hub API, and enroll verifies
+# the licence against the vendor root and installs it into the running second
+# station, whose certificate is verified the same way. No licence file is
+# copied for the second station.
 #
 # Localhost only: the hub, the station, compose Postgres (127.0.0.1:55432) and
 # Mailpit (127.0.0.1:8025). The first failed step prints
 # `FAILED: <step>: <reason>`, keeps the work directory and tails both logs.
 #
-# Env: HUB_PORT (default 7910), STATION_PORT (default 7890).
+# Env: HUB_PORT (default 7910), STATION_PORT (default 7890), STATION2_PORT
+# (default 7891).
 
 set -Eeuo pipefail
 
@@ -42,11 +48,14 @@ fi
 
 HUB_PORT="${HUB_PORT:-7910}"
 STATION_PORT="${STATION_PORT:-7890}"
+STATION2_PORT="${STATION2_PORT:-7891}"
 HUB="http://127.0.0.1:${HUB_PORT}"
 STATION="http://127.0.0.1:${STATION_PORT}"
+STATION2="http://127.0.0.1:${STATION2_PORT}"
 MAILPIT="http://127.0.0.1:8025"
 PG_PORT=55432
 STATION_ID="demo-bench-1"
+STATION2_ID="demo-bench-2"
 PASSWORD="demo-password-$(date +%s)"
 
 # Set after the build, from cargo's own idea of the target dir
@@ -68,6 +77,8 @@ STEP="start"
 WORK=""
 HUB_PID=""
 STATION_PID=""
+STATION2_PID=""
+ENROLL_PID=""
 DB_CREATED=""
 FAILED_REPORTED=""
 SUCCEEDED=""
@@ -123,6 +134,8 @@ cleanup() {
   if [[ $rc -ne 0 && -z "$FAILED_REPORTED" ]]; then
     echo "FAILED: ${STEP}: unexpected error (exit ${rc})" >&2
   fi
+  stop_pid "$ENROLL_PID"
+  stop_pid "$STATION2_PID"
   stop_pid "$STATION_PID"
   stop_pid "$HUB_PID"
   if [[ -n "$DB_CREATED" ]]; then
@@ -134,7 +147,8 @@ cleanup() {
     if [[ -n "$SUCCEEDED" ]]; then
       rm -rf "$WORK"
     else
-      for log in "$WORK"/hub.log "$WORK"/station-unlicensed.log "$WORK"/station.log; do
+      for log in "$WORK"/hub.log "$WORK"/station-unlicensed.log "$WORK"/station.log \
+        "$WORK"/station2.log "$WORK"/enroll.log; do
         if [[ -f "$log" ]]; then
           echo "---- last lines of $log ----" >&2
           tail -n 25 "$log" >&2
@@ -226,36 +240,83 @@ sha256_of() {
   fi
 }
 
-# start_station LOG [EXTRA ARGS...]: start the station on the mock backend and
-# wait until *this* station answers: its /api/public_key must be the key its
-# log printed (with --no-fleet, /api/station only says "standalone", so a
-# stale station on the port would pass that check). Sets STATION_PID.
-start_station() {
-  local log="$1"
-  shift
+# launch_station PIDVAR PORT KEY CONFIG_DIR STATION_ID LOG [EXTRA ARGS...]:
+# start a station on the mock backend, store its pid in the variable named
+# PIDVAR at once (so cleanup stops it even if start-up fails), and wait until
+# *this* station answers: its /api/public_key must be the key its log printed
+# (with --no-fleet, /api/station only says "standalone", so a stale station on
+# the port would pass that check).
+launch_station() {
+  local pidvar="$1" port="$2" key="$3" conf="$4" sid="$5" log="$6"
+  shift 6
   # --ephemeral-config keeps configuration in RAM, but lease state is still
   # saved; keep it in the run's work directory, not ~/.config/wipestation.
-  WIPESTATION_CONFIG_DIR="$WORK/station-config" "$WIPESTATION_BIN" serve \
-    --addr "127.0.0.1:${STATION_PORT}" \
-    --station-id "$STATION_ID" \
-    --key-path "$WORK/station.key" \
+  WIPESTATION_CONFIG_DIR="$conf" "$WIPESTATION_BIN" serve \
+    --addr "127.0.0.1:${port}" \
+    --station-id "$sid" \
+    --key-path "$key" \
     --no-fleet \
     --fast \
     --ephemeral-config \
     "$@" >"$log" 2>&1 &
-  STATION_PID=$!
+  local pid=$!
+  printf -v "$pidvar" '%s' "$pid"
   local want="" got=""
   for _ in $(seq 1 75); do
-    kill -0 "$STATION_PID" 2>/dev/null ||
+    kill -0 "$pid" 2>/dev/null ||
       fail "the station exited during start-up (see $log): $(tail -n 5 "$log")"
     want=$(sed -n 's/^signing key public id: //p' "$log" | head -n 1) || true
     # `|| true` is load-bearing: under `set -e` the first connection refused
     # would end the run before the loop could retry.
-    got=$(curl -fsS "$STATION/api/public_key" 2>/dev/null | jq -r '.public_key_id // empty') || true
+    got=$(curl -fsS "http://127.0.0.1:${port}/api/public_key" 2>/dev/null | jq -r '.public_key_id // empty') || true
     [[ -n "$want" && "$got" == "$want" ]] && return 0
     sleep 0.2
   done
-  fail "the station did not answer on :${STATION_PORT} with key '${want}' within 15 s (got '${got}')"
+  fail "the station did not answer on :${port} with key '${want}' within 15 s (got '${got}')"
+}
+
+# start_station LOG [EXTRA ARGS...]: the first station. Sets STATION_PID.
+start_station() {
+  local log="$1"
+  shift
+  launch_station STATION_PID "$STATION_PORT" "$WORK/station.key" "$WORK/station-config" \
+    "$STATION_ID" "$log" "$@"
+}
+
+# run_erasure BASE ASSET_TAG CERT: run an erasure on the station at BASE (mock
+# backend), wait for `erased`, and save its certificate to CERT. Sets JOB_ID.
+JOB_ID=""
+run_erasure() {
+  local base="$1" tag="$2" cert="$3" state="" cert_status=""
+  JOB_ID=$(curl -fsS -X POST "$base/api/jobs" -H 'Content-Type: application/json' -d "$(
+    jq -nc --arg t "$tag" '{
+      device_id: "dev-nvme-0",
+      classification: "high",
+      intent: "reuse",
+      verify: true,
+      verify_samples: 4,
+      operator: {id: "demo-op", display_name: "Demo Operator", email: "demo@wipestation.dev"},
+      asset_tag: $t,
+      site_label: "DemoSite",
+      ticket_ref: "DEMO-COMMERCE"
+    }')" | jq -r '.job_id // empty') || true
+  [[ -n "$JOB_ID" ]] || fail "POST /api/jobs on ${base} returned no job_id"
+  curl -fsS -X POST "$base/api/jobs/${JOB_ID}/start" >/dev/null || fail "POST /api/jobs/${JOB_ID}/start failed"
+  for _ in $(seq 1 100); do
+    state=$(curl -fsS "$base/api/jobs/${JOB_ID}" | jq -r '.state.state') || true
+    case "$state" in
+      erased | destroyed | quarantined | aborted) break ;;
+    esac
+    sleep 0.3
+  done
+  [[ "$state" == "erased" ]] || fail "job ${JOB_ID} ended in '${state}', expected 'erased'"
+  # Signing happens after `erased`, asynchronously: poll, don't sleep.
+  for _ in $(seq 1 50); do
+    cert_status=$(curl -sS -o "$cert" -w '%{http_code}' "$base/api/jobs/${JOB_ID}/certificate") || true
+    [[ "$cert_status" == "200" ]] && break
+    sleep 0.2
+  done
+  [[ "$cert_status" == "200" ]] || fail "GET /api/jobs/${JOB_ID}/certificate returned ${cert_status} after 10 s"
 }
 
 # ---------------------------------------------------------------------------
@@ -275,9 +336,9 @@ wait_for mailpit_up ||
   fail "Mailpit is not reachable on ${MAILPIT}: run \`docker compose up -d\`"
 wait_for port_open 1025 ||
   fail "Mailpit SMTP is not reachable on 127.0.0.1:1025: run \`docker compose up -d\`"
-for port in "$HUB_PORT" "$STATION_PORT"; do
+for port in "$HUB_PORT" "$STATION_PORT" "$STATION2_PORT"; do
   if port_open "$port"; then
-    fail "port ${port} already in use; find the owner with \`lsof -nP -iTCP:${port} -sTCP:LISTEN\`, or set HUB_PORT / STATION_PORT"
+    fail "port ${port} already in use; find the owner with \`lsof -nP -iTCP:${port} -sTCP:LISTEN\`, or set HUB_PORT / STATION_PORT / STATION2_PORT"
   fi
 done
 
@@ -375,14 +436,14 @@ hub_post "$ADMIN_JAR" /api/auth/sign-in \
 
 step "create and publish an offering"
 OFFERING_BODY=$(jq -nc '{
-  name: "Station — annual, 1 seat (demo)",
-  description: "One station, unlimited erasures.",
+  name: "Station — annual, 2 seats (demo)",
+  description: "Two stations, unlimited erasures.",
   price_minor: 120000,
   currency: "usd",
   interval: "annual",
   grants: {
     scope: "machine",
-    seats: 1,
+    seats: 2,
     quota_erasures: null,
     features: ["pdf_certificates", "hub_sync"],
     term_months: 12
@@ -505,37 +566,9 @@ KEY_AFTER=$(curl -fsS "$STATION/api/public_key" | jq -r '.public_key_id // empty
 # 17. Erasure (mock backend)
 
 step "run an erasure on the mock backend and fetch the certificate"
-JOB_ID=$(curl -fsS -X POST "$STATION/api/jobs" -H 'Content-Type: application/json' -d '{
-    "device_id":"dev-nvme-0",
-    "classification":"high",
-    "intent":"reuse",
-    "verify":true,
-    "verify_samples":4,
-    "operator":{"id":"demo-op","display_name":"Demo Operator","email":"demo@wipestation.dev"},
-    "asset_tag":"DEMO-COMMERCE-1",
-    "site_label":"DemoSite",
-    "ticket_ref":"DEMO-COMMERCE"
-  }' | jq -r '.job_id // empty') || true
-[[ -n "$JOB_ID" ]] || fail "POST /api/jobs on the station returned no job_id"
-curl -fsS -X POST "$STATION/api/jobs/${JOB_ID}/start" >/dev/null || fail "POST /api/jobs/${JOB_ID}/start failed"
-STATE=""
-for _ in $(seq 1 100); do
-  STATE=$(curl -fsS "$STATION/api/jobs/${JOB_ID}" | jq -r '.state.state') || true
-  case "$STATE" in
-    erased | destroyed | quarantined | aborted) break ;;
-  esac
-  sleep 0.3
-done
-[[ "$STATE" == "erased" ]] || fail "job ${JOB_ID} ended in '${STATE}', expected 'erased'"
-# Signing happens after `erased`, asynchronously: poll, don't sleep.
 CERT="$WORK/certificate.json"
-CERT_STATUS=""
-for _ in $(seq 1 50); do
-  CERT_STATUS=$(curl -sS -o "$CERT" -w '%{http_code}' "$STATION/api/jobs/${JOB_ID}/certificate") || true
-  [[ "$CERT_STATUS" == "200" ]] && break
-  sleep 0.2
-done
-[[ "$CERT_STATUS" == "200" ]] || fail "GET /api/jobs/${JOB_ID}/certificate returned ${CERT_STATUS} after 10 s"
+run_erasure "$STATION" "DEMO-COMMERCE-1" "$CERT"
+JOB1_ID="$JOB_ID"
 
 # ---------------------------------------------------------------------------
 # 18. Certificate content
@@ -581,7 +614,91 @@ grep -q 'attestation chain INVALID' "$WORK/wrong-root.out" ||
 echo "    OK: rejected ($(grep -m1 'attestation chain INVALID' "$WORK/wrong-root.out"))"
 
 # ---------------------------------------------------------------------------
-# 21. Summary
+# 21. A second station, enrolled from the bench (ADR-0008)
+
+step "start a second station on :${STATION2_PORT} (own key, no licence)"
+launch_station STATION2_PID "$STATION2_PORT" "$WORK/station2.key" "$WORK/station2-config" \
+  "$STATION2_ID" "$WORK/station2.log" --vendor-root-b64 "$ROOT_B64"
+KEY2_ID=$(curl -fsS "$STATION2/api/public_key" | jq -r '.public_key_id // empty') || true
+STATION2_PK=$(curl -fsS "$STATION2/api/public_key" | jq -r '.public_key_b64 // empty') || true
+[[ -n "$KEY2_ID" && -n "$STATION2_PK" ]] || fail "GET /api/public_key on the second station returned no key"
+[[ "$KEY2_ID" != "$KEY_ID" ]] || fail "the second station has the first station's key"
+echo "    instance key: $KEY2_ID"
+
+step "run wipestation enroll for the second station"
+# Same configuration directory as the second station, so the saved hub
+# address and licence land beside its lease state.
+WIPESTATION_CONFIG_DIR="$WORK/station2-config" "$WIPESTATION_BIN" enroll \
+  --hub "$HUB" \
+  --key-path "$WORK/station2.key" \
+  --vendor-root-b64 "$ROOT_B64" \
+  --station-id "$STATION2_ID" \
+  --label "Demo bench 2" \
+  --station "$STATION2" >"$WORK/enroll.log" 2>&1 &
+ENROLL_PID=$!
+USER_CODE=""
+for _ in $(seq 1 75); do
+  USER_CODE=$(sed -n 's/^user code: //p' "$WORK/enroll.log" | head -n 1) || true
+  [[ -n "$USER_CODE" ]] && break
+  kill -0 "$ENROLL_PID" 2>/dev/null ||
+    fail "enroll exited before printing a code: $(tail -n 5 "$WORK/enroll.log")"
+  sleep 0.2
+done
+[[ -n "$USER_CODE" ]] || fail "enroll printed no 'user code:' line within 15 s"
+grep -q "^open: ${HUB}/activate?code=${USER_CODE}\$" "$WORK/enroll.log" ||
+  fail "enroll did not print the activation link for ${USER_CODE}: $(cat "$WORK/enroll.log")"
+echo "    user code: $USER_CODE"
+
+step "approve the code as the organization owner"
+hub_post "$CUSTOMER_JAR" /api/enrollments/approve \
+  "$(jq -nc --arg c "$USER_CODE" --arg e "$ENTITLEMENT_ID" '{code: $c, entitlement_id: $e}')" 201
+jq_field '.licence.id'
+LICENCE2_ID="$FIELD"
+echo "    licence: $LICENCE2_ID"
+
+step "wait for enroll to collect, verify and install the licence"
+# It polls every 5 s; allow a few intervals.
+for _ in $(seq 1 150); do
+  kill -0 "$ENROLL_PID" 2>/dev/null || break
+  sleep 0.2
+done
+kill -0 "$ENROLL_PID" 2>/dev/null && fail "enroll still running 30 s after approval: $(tail -n 5 "$WORK/enroll.log")"
+if wait "$ENROLL_PID"; then ENROLL_RC=0; else ENROLL_RC=$?; fi
+ENROLL_PID=""
+[[ "$ENROLL_RC" -eq 0 ]] || fail "enroll exited ${ENROLL_RC}: $(tail -n 5 "$WORK/enroll.log")"
+sed 's/^/    | /' "$WORK/enroll.log"
+grep -q "^Installed into the station at ${STATION2}" "$WORK/enroll.log" ||
+  fail "enroll did not install the licence into the second station"
+SAVED2=$(jq -r '.body.license_id // empty' "$WORK/station2-config/enrolled-licence.json" 2>/dev/null) || true
+[[ "$SAVED2" == "$LICENCE2_ID" ]] || fail "enrolled-licence.json names '${SAVED2}', expected '${LICENCE2_ID}'"
+SAVED_HUB=$(jq -r '.hub_origin // empty' "$WORK/station2-config/station-settings.json" 2>/dev/null) || true
+[[ "$SAVED_HUB" == "$HUB" ]] || fail "station-settings.json names hub '${SAVED_HUB}', expected '${HUB}'"
+LIC2=$(curl -fsS "$STATION2/api/license") || fail "GET /api/license on the second station failed"
+[[ "$(printf '%s' "$LIC2" | jq -r '.status.status')" == "valid" ]] ||
+  fail "the second station's licence is not valid: ${LIC2}"
+[[ "$(printf '%s' "$LIC2" | jq -r '.instance_public_key_id')" == "$KEY2_ID" ]] ||
+  fail "the second station's licence names another key: ${LIC2}"
+
+step "run an erasure on the second station and verify its certificate offline"
+CERT2="$WORK/certificate2.json"
+run_erasure "$STATION2" "DEMO-COMMERCE-2" "$CERT2"
+JOB2_ID="$JOB_ID"
+[[ "$(jq -r '.certificate.evaluation' "$CERT2")" == "false" ]] ||
+  fail "the second station's certificate is marked evaluation (unlicensed)"
+CERT2_LICENCE=$(jq -r '.attestation.license.body.license_id // empty' "$CERT2")
+[[ "$CERT2_LICENCE" == "$LICENCE2_ID" ]] ||
+  fail "the second certificate carries licence '${CERT2_LICENCE}', expected '${LICENCE2_ID}'"
+VERIFY2_OUT=$("$WIPESTATION_BIN" verify-cert "$CERT2" \
+  --public-key-b64 "$STATION2_PK" \
+  --vendor-root-b64 "$ROOT_B64" \
+  --require-licensed 2>&1) || fail "verify-cert failed on the second certificate: ${VERIFY2_OUT}"
+grep -q '^LICENSED' <<<"$VERIFY2_OUT" || fail "verify-cert did not print LICENSED for the second certificate"
+grep -qF "  license:  ${LICENCE2_ID}" <<<"$VERIFY2_OUT" ||
+  fail "verify-cert did not name licence '${LICENCE2_ID}': ${VERIFY2_OUT}"
+echo "    OK: job ${JOB2_ID}, LICENSED under ${LICENCE2_ID}"
+
+# ---------------------------------------------------------------------------
+# 22. Summary
 
 SUCCEEDED=1
 step "done"
@@ -589,9 +706,11 @@ echo
 echo "============================================================"
 echo "  Wipestation commerce demo complete."
 echo "  Customer:  ${ORG_NAME} (${CUSTOMER_EMAIL})"
-echo "  Licence:   ${LICENCE_ID}"
+echo "  Licence:   ${LICENCE_ID} (portal registration, file installed)"
+echo "  Licence:   ${LICENCE2_ID} (wipestation enroll, approved by the owner)"
 echo "  Release:   ${RELEASE_VERSION} (${PLATFORM}), SHA-256 matched"
-echo "  Cert:      job ${JOB_ID}, LICENSED, verified offline to the vendor root"
-echo "  The station ran the MOCK backend: no real drive was touched, and this"
+echo "  Certs:     jobs ${JOB1_ID} and ${JOB2_ID}, LICENSED, verified offline"
+echo "             to the vendor root"
+echo "  The stations ran the MOCK backend: no real drive was touched, and this"
 echo "  demo makes no claim about sanitizing hardware."
 echo "============================================================"

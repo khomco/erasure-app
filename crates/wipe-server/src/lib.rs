@@ -8,6 +8,7 @@
 pub mod app;
 pub mod bootstrap;
 pub mod handlers;
+pub mod hub_client;
 pub mod licensing;
 pub mod store;
 pub mod ws;

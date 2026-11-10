@@ -1,0 +1,34 @@
+Register this station with an organization on the hub (ADR-0008).
+
+Prints a code that an owner of the organization approves in the portal, waits for the approval, checks the licence the hub sends against --vendor-root-b64 only, saves it, and installs it into the running station (`POST /api/license`). With no station running, the saved file can be given to `serve --license`. Uses HTTPS_PROXY and NO_PROXY to reach an https hub.
+
+Usage: wipestation enroll [OPTIONS] --key-path <KEY_PATH>
+
+Options:
+      --hub <HUB>
+          The hub's address, e.g. `https://hub.example.com` (http only on a loopback host). Defaults to the address an earlier enroll saved in the station settings
+
+      --key-path <KEY_PATH>
+          The station's signing key seed: the file `serve --key-path` uses. It must already exist; enroll never creates a key
+
+      --vendor-root-b64 <VENDOR_ROOT_B64>
+          Published vendor root public key(s), base64. At least one is required: the station trusts only these, and refuses a licence they do not verify, whatever the hub says
+
+      --station-id <STATION_ID>
+          Station identifier. Must match `serve --station-id` (whose default is also `standalone`), since a machine licence is bound to it
+          
+          [default: standalone]
+
+      --label <LABEL>
+          A label shown to the owner who approves, e.g. `Bench 3`
+
+      --station <STATION>
+          Address of the running station to install the licence into
+          
+          [default: http://127.0.0.1:7878]
+
+      --license-out <LICENSE_OUT>
+          Where to save the verified licence. Defaults to `enrolled-licence.json` in the station's configuration directory ($WIPESTATION_CONFIG_DIR, else ~/.config/wipestation)
+
+  -h, --help
+          Print help (see a summary with '-h')

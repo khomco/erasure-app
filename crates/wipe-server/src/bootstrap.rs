@@ -192,7 +192,7 @@ pub fn build_station(cfg: StationConfig, report: &mut dyn FnMut(String)) -> Resu
 
     // Work out where saved configuration goes before serving, so the tier is
     // in the startup log next to everything else an operator checks (ADR-0003).
-    let (store, lease_store) = match persistence {
+    let (store, lease_store, settings_path) = match persistence {
         Persistence::Detect {
             control_plane_url,
             ephemeral_config,
@@ -204,13 +204,18 @@ pub fn build_station(cfg: StationConfig, report: &mut dyn FnMut(String)) -> Resu
                 control_plane_url,
                 station_id: resolved_station_id.clone(),
             };
-            serve_stores(&store_cfg, ephemeral_config)
+            let (topology, lease) = serve_stores(&store_cfg, ephemeral_config);
+            (
+                topology,
+                lease,
+                Some(crate::store::station_settings_path(&store_cfg)),
+            )
         }
         Persistence::InMemory { reason } => {
             let topology: Arc<dyn TopologyStore> =
                 Arc::new(EphemeralStore::new(reason.clone(), false));
             let lease: Arc<dyn LeaseStore> = Arc::new(EphemeralLeaseStore::new(reason));
-            (topology, lease)
+            (topology, lease, None)
         }
     };
     let store_status = crate::store::status_of(&store);
@@ -240,6 +245,7 @@ pub fn build_station(cfg: StationConfig, report: &mut dyn FnMut(String)) -> Resu
     report(lease_store_line(&license_ctx.lease_persistence()));
     report(lease_counts_line(&license_ctx.lease_state()));
     report(runtime_install_line(vendor_roots.len()));
+    report(hub_line(settings_path.as_deref()));
 
     let state = AppState::with_static_dir(backend.clone(), fleet, signing_key, resolved_dist);
     let mut state = apply_licensing(state, license_ctx, vendor_roots)
@@ -643,6 +649,34 @@ fn runtime_install_line(roots: usize) -> String {
             "runtime licence install: enabled (POST /api/license, checked against {roots} vendor \
              root(s)); an installed licence lasts until restart"
         )
+    }
+}
+
+/// The start-up line naming the hub `wipestation enroll` saved in the
+/// station settings (ADR-0008 §5). Only reported: an unreadable or invalid
+/// file never fails start-up. `None`: the station keeps nothing on disk.
+fn hub_line(settings_path: Option<&Path>) -> String {
+    const NONE: &str = "hub: none — run wipestation enroll --hub <origin> to register this station";
+    let Some(path) = settings_path else {
+        return NONE.to_string();
+    };
+    match crate::store::load_station_settings(path) {
+        Ok(Some(crate::store::StationSettings {
+            hub_origin: Some(raw),
+        })) => match crate::hub_client::HubOrigin::parse(&raw) {
+            Ok(origin) => format!("hub: {origin} (from {})", path.display()),
+            Err(e) => format!(
+                "hub: none — {} holds a hub address this station refuses ({e}); run wipestation \
+                 enroll --hub <origin> to register this station",
+                path.display()
+            ),
+        },
+        Ok(_) => NONE.to_string(),
+        Err(e) => format!(
+            "hub: none — {} could not be read ({e}); run wipestation enroll --hub <origin> to \
+             register this station",
+            path.display()
+        ),
     }
 }
 
@@ -1103,6 +1137,75 @@ mod tests {
             line.contains("quota count and clock-rollback protection reset on reboot"),
             "{line}"
         );
+    }
+
+    #[test]
+    fn the_hub_line_names_a_saved_hub_and_its_file() {
+        let none = "hub: none — run wipestation enroll --hub <origin> to register this station";
+        assert_eq!(hub_line(None), none);
+        let dir = lease_tmpdir("hub-line");
+        let path = crate::store::station_settings_path(&store_cfg_in(&dir));
+        assert_eq!(hub_line(Some(&path)), none, "no file yet");
+        crate::store::save_station_settings(
+            &path,
+            &crate::store::StationSettings {
+                hub_origin: Some("https://hub.example".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            hub_line(Some(&path)),
+            format!("hub: https://hub.example (from {})", path.display())
+        );
+        fs::write(&path, "{}").unwrap();
+        assert_eq!(hub_line(Some(&path)), none, "no address saved");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_settings_file_is_reported_in_the_hub_line_not_fatal() {
+        let dir = lease_tmpdir("hub-line-bad");
+        let path = crate::store::station_settings_path(&store_cfg_in(&dir));
+        fs::write(&path, "not json").unwrap();
+        let line = hub_line(Some(&path));
+        assert!(line.starts_with("hub: none — "), "{line}");
+        assert!(line.contains("could not be read"), "{line}");
+        assert!(line.contains(&path.display().to_string()), "{line}");
+
+        fs::write(&path, r#"{"hub_origin":"http://hub.example"}"#).unwrap();
+        let line = hub_line(Some(&path));
+        assert!(
+            line.contains("holds a hub address this station refuses"),
+            "{line}"
+        );
+
+        // build_station reports the line and still starts.
+        let mut cfg = StationConfig::new("127.0.0.1:0".parse().unwrap());
+        cfg.persistence = Persistence::Detect {
+            control_plane_url: None,
+            ephemeral_config: true,
+            config_dir: Some(dir.clone()),
+        };
+        let mut lines = Vec::new();
+        build_station(cfg, &mut |l| lines.push(l)).unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("hub: none — ") && l.contains(&path.display().to_string())),
+            "{lines:#?}"
+        );
+
+        // A saved hub is named with its file.
+        fs::write(&path, r#"{"hub_origin":"https://hub.example"}"#).unwrap();
+        let mut cfg = StationConfig::new("127.0.0.1:0".parse().unwrap());
+        cfg.persistence = Persistence::Detect {
+            control_plane_url: None,
+            ephemeral_config: true,
+            config_dir: Some(dir.clone()),
+        };
+        let mut lines = Vec::new();
+        build_station(cfg, &mut |l| lines.push(l)).unwrap();
+        let want = format!("hub: https://hub.example (from {})", path.display());
+        assert!(lines.contains(&want), "{lines:#?}");
     }
 
     #[test]

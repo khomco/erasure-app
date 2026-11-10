@@ -2,6 +2,10 @@
 //!   * `serve`        — run the Axum API + fleet on a TCP port
 //!   * `verify-cert`  — verify a signed certificate JSON against a public key
 //!   * `inspect`      — enumerate mock devices and print as JSON
+//!   * `enroll`       — register this station with the hub by device
+//!     authorization (ADR-0008) and install the licence it is issued
+//!   * `bay-presets`  — list or dump bay-topology presets
+//!   * `license`      — vendor licensing tools (ADR-0005)
 
 use std::{
     fs,
@@ -129,6 +133,45 @@ enum Cmd {
     },
     /// Print the catalog of devices the mock backend would expose.
     Inspect,
+    /// Register this station with an organization on the hub (ADR-0008).
+    ///
+    /// Prints a code that an owner of the organization approves in the
+    /// portal, waits for the approval, checks the licence the hub sends
+    /// against --vendor-root-b64 only, saves it, and installs it into the
+    /// running station (`POST /api/license`). With no station running, the
+    /// saved file can be given to `serve --license`. Uses HTTPS_PROXY and
+    /// NO_PROXY to reach an https hub.
+    Enroll {
+        /// The hub's address, e.g. `https://hub.example.com` (http only on a
+        /// loopback host). Defaults to the address an earlier enroll saved
+        /// in the station settings.
+        #[arg(long)]
+        hub: Option<String>,
+        /// The station's signing key seed: the file `serve --key-path` uses.
+        /// It must already exist; enroll never creates a key.
+        #[arg(long)]
+        key_path: PathBuf,
+        /// Published vendor root public key(s), base64. At least one is
+        /// required: the station trusts only these, and refuses a licence
+        /// they do not verify, whatever the hub says.
+        #[arg(long)]
+        vendor_root_b64: Vec<String>,
+        /// Station identifier. Must match `serve --station-id` (whose default
+        /// is also `standalone`), since a machine licence is bound to it.
+        #[arg(long, default_value = "standalone")]
+        station_id: String,
+        /// A label shown to the owner who approves, e.g. `Bench 3`.
+        #[arg(long)]
+        label: Option<String>,
+        /// Address of the running station to install the licence into.
+        #[arg(long, default_value = "http://127.0.0.1:7878")]
+        station: String,
+        /// Where to save the verified licence. Defaults to
+        /// `enrolled-licence.json` in the station's configuration directory
+        /// ($WIPESTATION_CONFIG_DIR, else ~/.config/wipestation).
+        #[arg(long)]
+        license_out: Option<PathBuf>,
+    },
     /// Vendor licensing tools (ADR-0005).
     ///
     /// `new-root` and `issue` are *vendor-side* operations. In production the
@@ -209,6 +252,26 @@ async fn main() -> Result<()> {
             require_licensed,
         } => cmd_verify_cert(cert, public_key_b64, vendor_root_b64, require_licensed),
         Cmd::Inspect => cmd_inspect().await,
+        Cmd::Enroll {
+            hub,
+            key_path,
+            vendor_root_b64,
+            station_id,
+            label,
+            station,
+            license_out,
+        } => {
+            cmd_enroll(EnrollArgs {
+                hub,
+                key_path,
+                vendor_root_b64,
+                station_id,
+                label,
+                station,
+                license_out,
+            })
+            .await
+        }
         Cmd::BayPresets { dump } => cmd_bay_presets(dump),
         Cmd::License(sub) => cmd_license(sub),
     }
@@ -613,6 +676,224 @@ fn report_attestation(
         }
     }
     Ok(())
+}
+
+/// `enroll`'s flags.
+struct EnrollArgs {
+    hub: Option<String>,
+    key_path: PathBuf,
+    vendor_root_b64: Vec<String>,
+    station_id: String,
+    label: Option<String>,
+    station: String,
+    license_out: Option<PathBuf>,
+}
+
+/// File name of the licence `enroll` saves, in the configuration directory.
+const ENROLLED_LICENCE_FILE: &str = "enrolled-licence.json";
+
+/// `wipestation enroll` (ADR-0008, station-enrollment story 3). Everything
+/// that can be refused without the hub (roots, key file, hub address,
+/// station address) is refused before any request is sent.
+async fn cmd_enroll(args: EnrollArgs) -> Result<()> {
+    use wipe_server::hub_client::{
+        enroll, install_on_station, Enrollment, HubClient, HubOrigin, ProxySettings,
+        StationInstall, SystemClock,
+    };
+    use wipe_server::store::{
+        load_station_settings, save_station_settings, station_settings_path, StoreConfig,
+    };
+
+    if args.vendor_root_b64.is_empty() {
+        return Err(anyhow!(
+            "enroll needs at least one --vendor-root-b64: this station trusts only the vendor \
+             roots it is given, and refuses any licence they do not verify"
+        ));
+    }
+    let roots = decode_keys("vendor-root-b64", args.vendor_root_b64.clone())?;
+    let key = load_existing_key(&args.key_path)?;
+    let station = args.station.trim_end_matches('/').to_string();
+    if !(station.starts_with("http://") || station.starts_with("https://")) {
+        return Err(anyhow!(
+            "--station must be the running station's http(s) address, such as \
+             http://127.0.0.1:7878; got `{}`",
+            args.station
+        ));
+    }
+
+    // The directory the lease store uses when serve is given no
+    // --bay-topology: $WIPESTATION_CONFIG_DIR, else ~/.config/wipestation.
+    let settings_path = station_settings_path(&StoreConfig::default());
+    let raw_hub = match args.hub {
+        Some(h) => h,
+        None => match load_station_settings(&settings_path) {
+            Ok(Some(wipe_server::store::StationSettings {
+                hub_origin: Some(h),
+            })) => h,
+            Ok(_) => {
+                return Err(anyhow!(
+                    "no hub address: pass --hub <origin> (none is saved in {})",
+                    settings_path.display()
+                ))
+            }
+            Err(e) => {
+                return Err(anyhow!(
+                    "no hub address: pass --hub <origin> ({} could not be read: {e})",
+                    settings_path.display()
+                ))
+            }
+        },
+    };
+    let origin = HubOrigin::parse(&raw_hub).map_err(|e| anyhow!("{e}"))?;
+    let licence_out = args
+        .license_out
+        .clone()
+        .unwrap_or_else(|| settings_path.with_file_name(ENROLLED_LICENCE_FILE));
+    let client =
+        HubClient::new(origin.clone(), &ProxySettings::from_env()).map_err(|e| anyhow!("{e}"))?;
+
+    println!(
+        "Enrolling station `{}` (instance key {}) with the hub at {origin}",
+        args.station_id,
+        key.public_key_id()
+    );
+    let who = Enrollment {
+        key: &key,
+        station_id: &args.station_id,
+        label: args.label.as_deref(),
+        roots: &roots,
+    };
+    let enrolled = enroll(&client, &who, &mut SystemClock::default(), &mut |s| {
+        println!();
+        println!("An owner of your organization approves this station in the portal.");
+        println!("Open this link on any phone or computer signed in to the portal:");
+        println!("open: {}", s.verification_uri_complete);
+        println!("or go to the address and enter the code:");
+        println!("address: {}", s.verification_uri);
+        println!("user code: {}", s.user_code);
+        println!();
+        println!(
+            "The code expires in {} minutes. Waiting for approval...",
+            s.expires_in.div_ceil(60)
+        );
+    })
+    .await
+    .map_err(|e| anyhow!("{e}"))?;
+
+    let body = &enrolled.licence.body;
+    println!(
+        "Approved: licence {} for {} ({}), valid {} to {}, verified against the vendor root.",
+        body.license_id,
+        body.entitlements.customer_name,
+        body.entitlements.customer_id,
+        body.entitlements.not_before.date(),
+        body.entitlements.not_after.date()
+    );
+
+    let saved = save_enrolled_licence(&licence_out, &enrolled.licence_json);
+    match &saved {
+        Ok(()) => println!("Licence saved to {}", licence_out.display()),
+        Err(e) => println!(
+            "warning: the licence could not be saved to {}: {e:#}",
+            licence_out.display()
+        ),
+    }
+
+    let mut settings = load_station_settings(&settings_path)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    settings.hub_origin = Some(origin.to_string());
+    match save_station_settings(&settings_path, &settings) {
+        Ok(()) => println!("Hub address saved to {}", settings_path.display()),
+        Err(e) => println!(
+            "The hub address was not saved: {} cannot be written ({e}). Pass --hub again next \
+             time.",
+            settings_path.display()
+        ),
+    }
+
+    match install_on_station(&station, &enrolled.licence_json).await {
+        StationInstall::Installed { operator_message } => {
+            println!("Installed into the station at {station}: {operator_message}");
+            match &saved {
+                Ok(()) => println!(
+                    "The station holds it until it restarts; to keep it, start serve with \
+                     --license {}.",
+                    licence_out.display()
+                ),
+                Err(_) => {
+                    println!(
+                        "The station holds it until it restarts. The licence could not be saved; \
+                         keep its JSON, which follows, to start serve with --license:"
+                    );
+                    println!("{}", enrolled.licence_json);
+                }
+            }
+            Ok(())
+        }
+        StationInstall::NoStation { reason } => {
+            println!("No station answered at {station} ({reason}), so nothing was installed now.");
+            if saved.is_err() {
+                println!("The licence, which could not be saved, follows:");
+                println!("{}", enrolled.licence_json);
+                return Err(anyhow!(
+                    "the licence could be neither saved nor installed; its JSON is printed above"
+                ));
+            }
+            let roots = args
+                .vendor_root_b64
+                .iter()
+                .map(|r| format!(" --vendor-root-b64 {r}"))
+                .collect::<String>();
+            println!(
+                "It is saved at {path}. Start the station with it:\n  wipestation serve \
+                 --license {path}{roots} --key-path {key} --station-id {id}",
+                path = licence_out.display(),
+                key = args.key_path.display(),
+                id = args.station_id,
+            );
+            Ok(())
+        }
+        StationInstall::Refused { status, error } => {
+            let kept = match &saved {
+                Ok(()) => format!(" The licence is saved at {}.", licence_out.display()),
+                Err(_) => {
+                    println!("The licence, which could not be saved, follows:");
+                    println!("{}", enrolled.licence_json);
+                    " The licence could not be saved; its JSON is printed above.".to_string()
+                }
+            };
+            Err(anyhow!(
+                "the station at {station} refused the licence (HTTP {status}): {error}{kept}"
+            ))
+        }
+    }
+}
+
+/// The station's signing key from `path`, which must already exist and hold
+/// a 32-byte seed. Unlike `serve`, never creates one: a new key would be a
+/// different station.
+fn load_existing_key(path: &Path) -> Result<SigningKey> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => load_seed(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(anyhow!(
+            "the signing key {} does not exist. enroll uses the station's existing key (the \
+             file `serve --key-path` reads) and never creates one; start `wipestation serve \
+             --key-path {}` once to create it",
+            path.display(),
+            path.display()
+        )),
+        Err(e) => Err(e).with_context(|| format!("reading signing key {}", path.display())),
+    }
+}
+
+/// Write the licence JSON to `path`, creating its directory.
+fn save_enrolled_licence(path: &Path, json: &str) -> Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    fs::write(path, json).with_context(|| format!("writing {}", path.display()))
 }
 
 async fn cmd_inspect() -> Result<()> {

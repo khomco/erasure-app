@@ -142,7 +142,9 @@ pub fn decode_public_key(public_key_b64: &str) -> Result<VerifyingKey, Enrollmen
         .map_err(|_| EnrollmentSignatureError::BadPublicKey)
 }
 
-fn verify(
+/// Strict Ed25519 verification of `signature_b64` (64 bytes, unpadded
+/// standard base64) over `message`; shared with [`crate::station_request`].
+pub(crate) fn verify(
     key: &VerifyingKey,
     message: &[u8],
     signature_b64: &str,

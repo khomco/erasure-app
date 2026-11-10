@@ -6496,6 +6496,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "wipe-cert",
  "wipe-common",

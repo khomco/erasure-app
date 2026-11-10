@@ -302,6 +302,7 @@ async fn a_cli_station_reports_its_start_up_lines_in_order() {
         "lease store: LocalFile at ",
         "lease counts: ",
         "runtime licence install: disabled",
+        "hub: none — run wipestation enroll --hub <origin> to register this station",
         "destruction concurrence policy: none",
     ];
     assert_eq!(lines.len(), expected.len(), "{lines:#?}");
