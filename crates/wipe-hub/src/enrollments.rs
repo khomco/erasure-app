@@ -1,8 +1,8 @@
 //! Station enrollment by device authorization (station-enrollment story 1,
 //! CAP-1, ADR-0008 §1; RFC 8628, the "enter this code on your phone" flow):
-//! a station asks to be registered and polls for the outcome. The only code
-//! that writes the `enrollments` table (migration 0019) until approval
-//! (story 2) arrives.
+//! a station asks to be registered and polls for the outcome, and an
+//! organization owner approves or denies it (story 2, CAP-2). The only code
+//! that writes the `enrollments` table (migration 0019).
 //!
 //! - **Start** ([`validate`], [`start`]): the station sends its instance
 //!   public key, station id and optional label, signed with that key
@@ -43,22 +43,43 @@
 //!   signed licence file parsed as JSON, and becomes `collected`, in one
 //!   transaction. Every poll that reaches the interval check records its
 //!   arrival.
+//! - **Approval** (story 2, CAP-2; [`find_pending`], [`approve`], [`deny`]):
+//!   an organization owner enters the user code in the portal. A code
+//!   matches only an enrollment that is `pending` and unexpired, read
+//!   `FOR UPDATE`; anything else (malformed, unknown, expired, approved,
+//!   denied, collected) is one 404 [`MSG_NO_ENROLLMENT`], which reveals
+//!   nothing about other organizations. A lookup shows the
+//!   [`PendingEnrollment`] (never its row id or any device-code material).
+//!   Approval registers the station in the approver's organization through
+//!   [`stations::register`] (the enrollment's key, station id and label, no
+//!   site), then marks the enrollment `approved` with its approver,
+//!   organization, station and licence and audits `enrollment.approved`
+//!   (actor `user:<id>`, subject `enrollment:<id>`, detail `{station,
+//!   licence, entitlement_id, instance_key_id}`), in one transaction: any
+//!   refusal of `register` comes back unchanged and leaves the enrollment
+//!   `pending`. Denial marks it `denied` and audits `enrollment.denied`
+//!   (detail `{instance_key_id, station_id}`); the station's next poll is
+//!   `access_denied`. Who may approve and the per-user code throttle are the
+//!   routes' ([`crate::enrollment_routes`]).
 //!
 //! Every time is the database's `now()`.
 
 use rand::rngs::OsRng;
 use rand::Rng;
+use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::postgres::PgConnection;
 use uuid::Uuid;
 use wipe_license::enrollment::{
     verify_poll, verify_start, EnrollmentSignatureError, PollRequest, StartRequest,
 };
+use wipe_license::VendorRoot;
 
 use crate::accounts;
+use crate::admin::RFC3339_UTC;
 use crate::audit::{self, AuditEntry, AuditError};
-use crate::auth::with_peer;
-use crate::stations::{self, Station, StationError};
+use crate::auth::{actor, with_peer};
+use crate::stations::{self, NewStation, Registered, Station, StationError};
 use crate::throttle;
 
 /// Seconds from start to expiry (`expires_in`).
@@ -85,6 +106,13 @@ pub const MSG_STATION_ID_REQUIRED: &str =
     "the station id is required: the --station-id the station runs with";
 pub const MSG_START_LOCKED: &str =
     "too many enrollment requests from this network; try again later";
+/// Every code that matches no pending, unexpired enrollment, whatever the
+/// reason.
+pub const MSG_NO_ENROLLMENT: &str = "no station is waiting with this code; check the code the \
+     station shows, or start again on the station if it has expired";
+pub const MSG_LOOKUP_LOCKED: &str = "too many wrong enrollment codes; try again later";
+pub const MSG_OWNER_ONLY_ENROLLMENTS: &str =
+    "only an organization owner can approve or deny a station's enrollment";
 
 /// Draws of a fresh user code before giving up (a collision among pending
 /// codes is about one in 2^34 per pending enrollment).
@@ -447,6 +475,171 @@ pub async fn poll(
         station: Box::new(station),
         licence,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Approval
+
+/// A pending enrollment as the approving owner sees it: what is asking, from
+/// where and when. Never its row id or any device-code material. Times are
+/// RFC 3339 UTC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow)]
+pub struct PendingEnrollment {
+    /// `XXXX-XXXX`.
+    pub user_code: String,
+    /// The bench's `--station-id`.
+    pub station_id: String,
+    pub label: Option<String>,
+    pub instance_key_id: String,
+    /// The address the request came from; `None` when the hub saw no peer.
+    pub requested_from: Option<String>,
+    pub requested_at: String,
+    pub expires_at: String,
+}
+
+/// A pending enrollment a code matched, locked `FOR UPDATE` in the caller's
+/// transaction.
+#[derive(Debug, Clone)]
+pub struct FoundEnrollment {
+    pub id: Uuid,
+    pub enrollment: PendingEnrollment,
+}
+
+#[derive(sqlx::FromRow)]
+struct FoundRow {
+    id: Uuid,
+    #[sqlx(flatten)]
+    enrollment: PendingEnrollment,
+}
+
+/// The pending, unexpired enrollment `code` names (as an owner typed it; see
+/// [`normalize_user_code`]), locked `FOR UPDATE`; `None` for anything else.
+pub async fn find_pending(
+    conn: &mut PgConnection,
+    code: &str,
+) -> Result<Option<FoundEnrollment>, sqlx::Error> {
+    let Some(code) = normalize_user_code(code) else {
+        return Ok(None);
+    };
+    let row: Option<FoundRow> = sqlx::query_as(&format!(
+        "SELECT id, user_code, station_id, label, instance_key_id, requested_from, \
+                to_char(created_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS requested_at, \
+                to_char(expires_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS expires_at \
+         FROM enrollments \
+         WHERE user_code = $1 AND status = 'pending' AND expires_at > now() \
+         FOR UPDATE"
+    ))
+    .bind(&code)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row.map(|r| {
+        let mut enrollment = r.enrollment;
+        enrollment.user_code = format_user_code(&enrollment.user_code);
+        FoundEnrollment {
+            id: r.id,
+            enrollment,
+        }
+    }))
+}
+
+/// Approve `found` (from [`find_pending`] in this transaction) on behalf of
+/// `user_id`, registering its station in `organization_id` against
+/// `entitlement_id` with [`stations::register`] and signing the licence with
+/// `root`; the caller commits. A refusal of `register` is returned as is,
+/// and the caller's rollback leaves the enrollment `pending`.
+pub async fn approve(
+    conn: &mut PgConnection,
+    root: &VendorRoot,
+    organization_id: Uuid,
+    user_id: Uuid,
+    found: &FoundEnrollment,
+    entitlement_id: Uuid,
+) -> Result<Registered, StationError> {
+    let e = &found.enrollment;
+    let registered = stations::register(
+        &mut *conn,
+        root,
+        organization_id,
+        user_id,
+        &NewStation {
+            entitlement_id,
+            instance_key_id: e.instance_key_id.clone(),
+            station_id: Some(e.station_id.clone()),
+            label: e.label.clone(),
+            site: None,
+        },
+    )
+    .await?;
+    let updated = sqlx::query(
+        "UPDATE enrollments \
+         SET status = 'approved', approved_by = $2, approved_at = now(), \
+             organization_id = $3, registered_station = $4, licence_id = $5 \
+         WHERE id = $1 AND status = 'pending'",
+    )
+    .bind(found.id)
+    .bind(user_id)
+    .bind(organization_id)
+    .bind(registered.station.id)
+    .bind(registered.licence.id)
+    .execute(&mut *conn)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(StationError::Issue(format!(
+            "enrollment {} was no longer pending",
+            found.id
+        )));
+    }
+    audit::record(
+        &mut *conn,
+        &AuditEntry {
+            actor: &actor(user_id),
+            action: "enrollment.approved",
+            subject: &enrollment_subject(found.id),
+            detail: json!({
+                "station": registered.station.id,
+                "licence": registered.licence.id,
+                "entitlement_id": entitlement_id,
+                "instance_key_id": e.instance_key_id,
+            }),
+        },
+    )
+    .await?;
+    Ok(registered)
+}
+
+/// Deny `found` (from [`find_pending`] in this transaction) on behalf of
+/// `user_id`, audited; the caller commits.
+pub async fn deny(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    found: &FoundEnrollment,
+) -> Result<(), EnrollmentError> {
+    let updated = sqlx::query(
+        "UPDATE enrollments SET status = 'denied' WHERE id = $1 AND status = 'pending'",
+    )
+    .bind(found.id)
+    .execute(&mut *conn)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(EnrollmentError::Internal(format!(
+            "enrollment {} was no longer pending",
+            found.id
+        )));
+    }
+    audit::record(
+        &mut *conn,
+        &AuditEntry {
+            actor: &actor(user_id),
+            action: "enrollment.denied",
+            subject: &enrollment_subject(found.id),
+            detail: json!({
+                "instance_key_id": found.enrollment.instance_key_id,
+                "station_id": found.enrollment.station_id,
+            }),
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

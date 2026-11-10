@@ -58,7 +58,7 @@ function retryAfter(res: Response): number | null {
 }
 
 /** A 429's `Retry-After` as "N minute(s)", rounded up; `null` for anything else. */
-function waitFor(error: unknown): string | null {
+export function waitFor(error: unknown): string | null {
   if (error instanceof HubError && error.status === 429 && error.retryAfterSecs !== null) {
     const minutes = Math.max(1, Math.ceil(error.retryAfterSecs / 60));
     return `${minutes} minute${minutes === 1 ? "" : "s"}`;

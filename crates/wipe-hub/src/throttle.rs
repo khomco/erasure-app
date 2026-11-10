@@ -8,8 +8,10 @@
 //! `lead-form:ip:<peer>` ([`LEAD_KEY_PREFIX`]; never `lead:`, which is the
 //! audit subject of a sales lead itself). Station enrollment starts
 //! (station-enrollment story 1) charge `enroll:ip:<peer>`
-//! ([`ENROLL_KEY_PREFIX`]). Email sends, lead submissions and enrollment
-//! starts are always final,
+//! ([`ENROLL_KEY_PREFIX`]); an owner's enrollment code lookups, approvals
+//! and denials (story 2) charge `enroll:user:<user id>`
+//! ([`ENROLL_USER_KEY_PREFIX`]), refunded when the code matches. Email
+//! sends, lead submissions and enrollment starts are always final,
 //! so their charges are confirmed in the same transaction instead of waiting
 //! for a check.
 //!
@@ -87,6 +89,18 @@ pub const ENROLL_LOCKOUT: Duration = Duration::from_secs(60 * 60);
 /// Every enrollment-start throttle key starts with this. It is not
 /// `enrollment:`, the audit subject of an enrollment itself.
 pub const ENROLL_KEY_PREFIX: &str = "enroll:";
+
+/// Wrong enrollment codes an owner may enter per window (a matching code is
+/// refunded, so only codes that match nothing count).
+pub const ENROLL_LOOKUP_LIMIT: i32 = 10;
+/// The fixed window enrollment code entries are counted in.
+pub const ENROLL_LOOKUP_WINDOW: Duration = Duration::from_secs(15 * 60);
+/// How long an enrollment code-entry lock lasts once engaged.
+pub const ENROLL_LOOKUP_LOCKOUT: Duration = Duration::from_secs(15 * 60);
+/// Every enrollment code-entry throttle key starts with this, followed by
+/// the signed-in user's id. It also starts with [`ENROLL_KEY_PREFIX`], so
+/// anything telling the two apart checks this one first.
+pub const ENROLL_USER_KEY_PREFIX: &str = "enroll:user:";
 
 /// Rows whose window started longer ago than this, and whose lock (if any)
 /// has elapsed, are deleted by [`purge_stale`]. Every window passed to
@@ -372,6 +386,23 @@ mod tests {
         for other in [MAIL_KEY_PREFIX, LEAD_KEY_PREFIX, "email:", "ip:"] {
             assert!(!ENROLL_KEY_PREFIX.starts_with(other), "{other}");
             assert!(!other.starts_with(ENROLL_KEY_PREFIX), "{other}");
+        }
+    }
+
+    #[test]
+    fn enroll_lookup_constants() {
+        assert_eq!(ENROLL_LOOKUP_LIMIT, 10);
+        assert_eq!(ENROLL_LOOKUP_WINDOW.as_secs(), 15 * 60);
+        assert_eq!(ENROLL_LOOKUP_LOCKOUT.as_secs(), 15 * 60);
+        assert!(ENROLL_LOOKUP_WINDOW <= PURGE_AFTER);
+        assert_eq!(ENROLL_USER_KEY_PREFIX, "enroll:user:");
+        // Under the start prefix (so `lock_summary_action` checks it first),
+        // and never an audit subject or another family's key.
+        assert!(ENROLL_USER_KEY_PREFIX.starts_with(ENROLL_KEY_PREFIX));
+        assert!(!ENROLL_USER_KEY_PREFIX.starts_with("enrollment:"));
+        for other in [MAIL_KEY_PREFIX, LEAD_KEY_PREFIX, "email:", "ip:"] {
+            assert!(!ENROLL_USER_KEY_PREFIX.starts_with(other), "{other}");
+            assert!(!other.starts_with(ENROLL_USER_KEY_PREFIX), "{other}");
         }
     }
 

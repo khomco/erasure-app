@@ -14,6 +14,7 @@ import "./index.css";
 import { DevelopmentBanner } from "./DevelopmentBanner";
 import { AcceptInvitePage } from "./pages/AcceptInvitePage";
 import { AccountPage } from "./pages/AccountPage";
+import { ActivatePage } from "./pages/ActivatePage";
 import { AdminLeadPage } from "./pages/AdminLeadPage";
 import { AdminLicenceInspectPage } from "./pages/AdminLicenceInspectPage";
 import { AdminLicencePage } from "./pages/AdminLicencePage";
@@ -38,7 +39,7 @@ import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SeatsPage } from "./pages/SeatsPage";
 import { SignInLinkPage } from "./pages/SignInLinkPage";
 import { StationsPage } from "./pages/StationsPage";
-import { SignInPage } from "./pages/SignInPage";
+import { SignInPage, signInSearch } from "./pages/SignInPage";
 import { SignUpPage } from "./pages/SignUpPage";
 import { UnsubscribePage } from "./pages/UnsubscribePage";
 import { VerifyEmailPage } from "./pages/VerifyEmailPage";
@@ -92,10 +93,16 @@ const signUpRoute = createRoute({
   component: SignUpPage,
 });
 
+// `?next=` is where to go after signing in; `SignInPage` follows it only
+// when it is a same-origin path (`safeNext`).
 const signInRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sign-in",
-  component: SignInPage,
+  validateSearch: signInSearch,
+  component: function SignInRoute() {
+    const { next } = signInRoute.useSearch();
+    return <SignInPage next={next} />;
+  },
 });
 
 // The hub emails `{public_base_url}/verify-email?token=…`.
@@ -214,6 +221,19 @@ const stationsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/stations",
   component: StationsPage,
+});
+
+// A station shows `{public_base_url}/activate` and `…/activate?code=XXXX-XXXX`
+// (crates/wipe-hub/src/enrollment_routes.rs `activation_link`).
+const activateRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/activate",
+  validateSearch: (search: Record<string, unknown>): { code?: string } =>
+    typeof search.code === "string" ? { code: search.code } : {},
+  component: function ActivateRoute() {
+    const { code } = activateRoute.useSearch();
+    return <ActivatePage code={code} />;
+  },
 });
 
 const downloadsRoute = createRoute({
@@ -335,6 +355,7 @@ const routeTree = rootRoute.addChildren([
   orderRoute,
   seatsRoute,
   stationsRoute,
+  activateRoute,
   downloadsRoute,
   fakeCheckoutRoute,
   fakeBillingRoute,

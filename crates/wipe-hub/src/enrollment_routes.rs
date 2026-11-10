@@ -1,5 +1,7 @@
-//! A station's enrollment routes (station-enrollment story 1, CAP-1,
-//! ADR-0008 §1). Neither needs a session, and both are exempt from the CSRF
+//! Station enrollment routes (station-enrollment stories 1 and 2, CAP-1 and
+//! CAP-2, ADR-0008 §1).
+//!
+//! A station's two routes need no session, and both are exempt from the CSRF
 //! check ([`crate::csrf`]): the station has no cookie, and its instance-key
 //! signature is the credential.
 //!
@@ -16,7 +18,30 @@
 //!   with an RFC 6749 §5.2 / RFC 8628 §3.5 code, plus `interval` on
 //!   `slow_down` ([`enrollments::poll`]).
 //!
-//! Every response from both routes, errors included, carries
+//! The owner's three routes need a customer session and the usual CSRF
+//! token. The code travels in the body, never the URL, and every action
+//! re-proves it:
+//!
+//! - `POST /api/enrollments/lookup {code}` — 200 `{enrollment}`, the
+//!   [`enrollments::PendingEnrollment`].
+//! - `POST /api/enrollments/approve {code, entitlement_id}` — 201 `{station,
+//!   licence}`, the `POST /api/stations` shape ([`enrollments::approve`]);
+//!   `stations::register`'s refusals unchanged, the enrollment left pending.
+//! - `POST /api/enrollments/deny {code}` — 200 `{}` ([`enrollments::deny`]).
+//!
+//! Each, in order: 403 [`enrollments::MSG_OWNER_ONLY_ENROLLMENTS`] unless the
+//! caller is an organization owner (members and vendor admins alike), before
+//! the body is read; approve only, 503 [`stations::MSG_ISSUANCE_UNAVAILABLE`]
+//! without a vendor root; the body; a charge against `enroll:user:<user id>`
+//! (429 [`enrollments::MSG_LOOKUP_LOCKED`] with `Retry-After`); the code
+//! ([`enrollments::find_pending`]), 404 [`enrollments::MSG_NO_ENROLLMENT`]
+//! when it matches nothing. A matching code refunds its charge and any other
+//! confirms the failure: 10 failures in 15 minutes lock the user out of all
+//! three for 15 minutes, audited once as `enrollment.lookup_locked` (actor
+//! `user:<id>`, subject the throttle key) and summarised as
+//! `enrollment.lookup_lock_summary`.
+//!
+//! Every response from all five routes, errors included, carries
 //! `Cache-Control: no-store` and `Pragma: no-cache` (RFC 6749 §5.1).
 //!
 //! The start throttle is final, like the sales-lead form's: 20 per address
@@ -34,13 +59,18 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use serde::Deserialize;
 use serde_json::json;
+use sqlx::{Connection, Postgres, Transaction};
 use url::Url;
+use uuid::Uuid;
 use wipe_license::enrollment::{PollRequest, StartRequest};
 
+use crate::accounts::Role;
 use crate::audit::{self, AuditEntry};
-use crate::auth::{self, ApiError, JsonBody};
-use crate::enrollments::{self, EnrollmentError, PollOutcome};
+use crate::auth::{self, actor, ApiError, CurrentUser, JsonBody};
+use crate::enrollments::{self, EnrollmentError, FoundEnrollment, PollOutcome};
+use crate::stations;
 use crate::throttle;
 use crate::AppState;
 
@@ -48,17 +78,27 @@ use crate::AppState;
 pub const ENROLLMENT_START_PATH: &str = "/api/enrollments";
 /// Where a station polls its enrollment.
 pub const ENROLLMENT_POLL_PATH: &str = "/api/enrollments/poll";
+/// Where an owner looks up a pending enrollment by its user code.
+pub const ENROLLMENT_LOOKUP_PATH: &str = "/api/enrollments/lookup";
+/// Where an owner approves an enrollment.
+pub const ENROLLMENT_APPROVE_PATH: &str = "/api/enrollments/approve";
+/// Where an owner denies an enrollment.
+pub const ENROLLMENT_DENY_PATH: &str = "/api/enrollments/deny";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(ENROLLMENT_START_PATH, post(start))
         .route(ENROLLMENT_POLL_PATH, post(poll))
+        .route(ENROLLMENT_LOOKUP_PATH, post(lookup))
+        .route(ENROLLMENT_APPROVE_PATH, post(approve))
+        .route(ENROLLMENT_DENY_PATH, post(deny))
         .layer(axum::middleware::map_response(no_store))
 }
 
 /// `Cache-Control: no-store` and `Pragma: no-cache` on every response from
 /// these routes, success or error (RFC 6749 §5.1, inherited by RFC 8628):
-/// start carries the device code and poll the licence.
+/// start carries the device code, poll and approve the licence, and lookup
+/// what a pending enrollment's code names.
 async fn no_store(mut resp: Response) -> Response {
     let headers = resp.headers_mut();
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -202,6 +242,197 @@ async fn poll(
             (StatusCode::BAD_REQUEST, Json(json!({ "error": code }))).into_response()
         }
     })
+}
+
+// ---------------------------------------------------------------------------
+// An owner's code entry
+
+/// `{code}`: the user code as the owner typed it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodeRequest {
+    pub code: String,
+}
+
+/// `{code, entitlement_id}`: the code and the entitlement whose seat the
+/// station takes.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveRequest {
+    pub code: String,
+    pub entitlement_id: Uuid,
+}
+
+/// 403 [`enrollments::MSG_OWNER_ONLY_ENROLLMENTS`] unless `user` is an
+/// organization owner.
+fn require_owner(user: &CurrentUser) -> Result<(), ApiError> {
+    if user.role == Role::Owner {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            enrollments::MSG_OWNER_ONLY_ENROLLMENTS,
+        ))
+    }
+}
+
+/// The user's code-entry throttle key, `enroll:user:<user id>`.
+fn user_key(user: &CurrentUser) -> String {
+    format!("{}{}", throttle::ENROLL_USER_KEY_PREFIX, user.user_id)
+}
+
+/// Charge one code entry against `key`. `Err(response)` is the 429 while
+/// the key is locked or full.
+async fn charge_code(state: &AppState, key: &str) -> Result<Result<(), Response>, ApiError> {
+    let mut tx = state.pool.begin().await?;
+    let charged = throttle::charge(
+        &mut tx,
+        key,
+        throttle::ENROLL_LOOKUP_LIMIT,
+        throttle::ENROLL_LOOKUP_WINDOW,
+    )
+    .await?;
+    if let Some(s) = &charged.summary {
+        auth::audit_lock_summary(&mut tx, s, None).await?;
+    }
+    tx.commit().await?;
+    Ok(match charged.outcome {
+        throttle::Charge::Refused { retry_after_secs } => Err(auth::locked_response(
+            enrollments::MSG_LOOKUP_LOCKED,
+            retry_after_secs,
+        )),
+        throttle::Charge::Charged => Ok(()),
+    })
+}
+
+/// The pending enrollment `code` names, locked `FOR UPDATE` in `tx`, with
+/// the charge on `key` refunded in `tx`; otherwise the failure confirmed
+/// (the one that locks the key audited as `enrollment.lookup_locked`), `tx`
+/// committed and 404 [`enrollments::MSG_NO_ENROLLMENT`]. Everything runs on
+/// `tx`'s one connection: a handler never holds a connection while waiting
+/// for another from the pool, which concurrent requests would exhaust.
+async fn match_code(
+    mut tx: Transaction<'static, Postgres>,
+    user: &CurrentUser,
+    key: &str,
+    code: &str,
+) -> Result<(Transaction<'static, Postgres>, FoundEnrollment), ApiError> {
+    if let Some(found) = enrollments::find_pending(&mut tx, code).await? {
+        throttle::refund(&mut *tx, key).await?;
+        return Ok((tx, found));
+    }
+    let engaged = throttle::confirm_failure(
+        &mut *tx,
+        key,
+        throttle::ENROLL_LOOKUP_LIMIT,
+        throttle::ENROLL_LOOKUP_LOCKOUT,
+    )
+    .await?;
+    if let Some(until) = engaged {
+        audit::record(
+            &mut *tx,
+            &AuditEntry {
+                actor: &actor(user.user_id),
+                action: "enrollment.lookup_locked",
+                subject: key,
+                detail: json!({ "until": until }),
+            },
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Err(ApiError::new(
+        StatusCode::NOT_FOUND,
+        enrollments::MSG_NO_ENROLLMENT,
+    ))
+}
+
+async fn lookup(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    body: Result<JsonBody<CodeRequest>, ApiError>,
+) -> Result<Response, ApiError> {
+    require_owner(&user)?;
+    let JsonBody(req) = body?;
+    let key = user_key(&user);
+    if let Err(refused) = charge_code(&state, &key).await? {
+        return Ok(refused);
+    }
+    let tx = state.pool.begin().await?;
+    let (tx, found) = match_code(tx, &user, &key, &req.code).await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "enrollment": found.enrollment })).into_response())
+}
+
+async fn approve(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    body: Result<JsonBody<ApproveRequest>, ApiError>,
+) -> Result<Response, ApiError> {
+    require_owner(&user)?;
+    let Some(vendor) = state.config.vendor_root.as_ref() else {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            stations::MSG_ISSUANCE_UNAVAILABLE,
+        ));
+    };
+    let JsonBody(req) = body?;
+    let key = user_key(&user);
+    if let Err(refused) = charge_code(&state, &key).await? {
+        return Ok(refused);
+    }
+    let tx = state.pool.begin().await?;
+    let (mut tx, found) = match_code(tx, &user, &key, &req.code).await?;
+    // The approval runs in a savepoint: a refusal rolls back to it, leaving
+    // the enrollment pending, and the right code's refund is still committed.
+    let mut approval = Connection::begin(&mut *tx).await?;
+    let result = enrollments::approve(
+        &mut approval,
+        &vendor.root,
+        user.organization_id,
+        user.user_id,
+        &found,
+        req.entitlement_id,
+    )
+    .await;
+    let registered = match result {
+        Ok(registered) => {
+            approval.commit().await?;
+            tx.commit().await?;
+            registered
+        }
+        Err(refused) => {
+            approval.rollback().await?;
+            tx.commit().await?;
+            return Err(refused.into());
+        }
+    };
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "station": registered.station,
+            "licence": registered.licence,
+        })),
+    )
+        .into_response())
+}
+
+async fn deny(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    body: Result<JsonBody<CodeRequest>, ApiError>,
+) -> Result<Response, ApiError> {
+    require_owner(&user)?;
+    let JsonBody(req) = body?;
+    let key = user_key(&user);
+    if let Err(refused) = charge_code(&state, &key).await? {
+        return Ok(refused);
+    }
+    let tx = state.pool.begin().await?;
+    let (mut tx, found) = match_code(tx, &user, &key, &req.code).await?;
+    enrollments::deny(&mut tx, user.user_id, &found).await?;
+    tx.commit().await?;
+    Ok(Json(json!({})).into_response())
 }
 
 #[cfg(test)]

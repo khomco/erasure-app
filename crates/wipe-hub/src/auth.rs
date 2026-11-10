@@ -533,8 +533,9 @@ pub(crate) fn with_peer(mut detail: serde_json::Value, peer: Option<&str>) -> se
 }
 
 /// The audit action for a summary of `key`'s refusals: email-send keys
-/// (`mail:…`), sales-lead submission keys (`lead-form:…`), enrollment-start
-/// keys (`enroll:…`) and sign-in keys are
+/// (`mail:…`), sales-lead submission keys (`lead-form:…`), enrollment
+/// code-entry keys (`enroll:user:…`, checked before the start prefix it
+/// begins with), enrollment-start keys (`enroll:…`) and sign-in keys are
 /// summarised under their own actions. [`throttle::purge_stale`] returns
 /// every kind of key, so each prefix must be mapped here.
 fn lock_summary_action(key: &str) -> &'static str {
@@ -542,6 +543,8 @@ fn lock_summary_action(key: &str) -> &'static str {
         "auth.mail_lock_summary"
     } else if key.starts_with(throttle::LEAD_KEY_PREFIX) {
         "lead.submit_lock_summary"
+    } else if key.starts_with(throttle::ENROLL_USER_KEY_PREFIX) {
+        "enrollment.lookup_lock_summary"
     } else if key.starts_with(throttle::ENROLL_KEY_PREFIX) {
         "enrollment.start_lock_summary"
     } else {
@@ -1531,6 +1534,14 @@ mod tests {
         );
         assert_eq!(
             lock_summary_action("email:enroll:x@b.co"),
+            "auth.sign_in_lock_summary"
+        );
+        assert_eq!(
+            lock_summary_action("enroll:user:00000000-0000-0000-0000-000000000000"),
+            "enrollment.lookup_lock_summary"
+        );
+        assert_eq!(
+            lock_summary_action("email:enroll:user:x@b.co"),
             "auth.sign_in_lock_summary"
         );
     }

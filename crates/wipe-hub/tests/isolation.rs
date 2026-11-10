@@ -118,6 +118,9 @@ const ROUTES: &[(&str, &str, Class)] = &[
         "/api/enrollments/poll",
         Anonymous("the secret device code and the station key's signature are the credential"),
     ),
+    ("POST", "/api/enrollments/lookup", Customer),
+    ("POST", "/api/enrollments/approve", Customer),
+    ("POST", "/api/enrollments/deny", Customer),
     (
         "POST",
         "/api/payments/webhook",
@@ -480,6 +483,27 @@ async fn organization_a_never_sees_or_changes_organization_b() {
         "{b_before:?}"
     );
 
+    // A station waits with a code (enrollments belong to no organization
+    // until approved). The sweep has A's owner look it up, try to approve it
+    // with B's entitlement (refused: `tests/enrollment_approval.rs` pins the
+    // 404) and then deny it (deny comes after approve in ROUTES); the final
+    // `denied` status below shows the approval registered nothing.
+    let station_key = wipe_cert::SigningKey::generate();
+    let resp = hub
+        .http
+        .post(hub.url("/api/enrollments"))
+        .json(&wipe_license::enrollment::sign_start(
+            &station_key,
+            "waiting-bench",
+            None,
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let started: Value = resp.json().await.unwrap();
+    let user_code = started["user_code"].as_str().unwrap().to_string();
+
     // Every identifier of B's that a response must not carry.
     let secrets: Vec<String> = vec![
         b.org.to_string(),
@@ -544,6 +568,13 @@ async fn organization_a_never_sees_or_changes_organization_b() {
                     "instance_key_id": wipe_cert::SigningKey::generate().public_key_id(),
                     "station_id": "alpha-bench",
                 })),
+                "/api/enrollments/lookup" | "/api/enrollments/deny" => {
+                    Some(json!({ "code": user_code }))
+                }
+                "/api/enrollments/approve" => Some(json!({
+                    "code": user_code,
+                    "entitlement_id": b_entitlement,
+                })),
                 "/api/organization/invitations" if method == "POST" => {
                     Some(json!({"email": b.member.email, "role": "member"}))
                 }
@@ -599,6 +630,13 @@ async fn organization_a_never_sees_or_changes_organization_b() {
     assert_eq!(swept, expected);
 
     assert_eq!(rows_of(&hub, b.org).await, b_before, "B's records changed");
+    // A's owner denied the waiting enrollment; nothing registered it in B.
+    let status: String = sqlx::query_scalar("SELECT status FROM enrollments WHERE user_code = $1")
+        .bind(user_code.replace('-', ""))
+        .fetch_one(&hub.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "denied");
     // The sweep did reach A: its owner renamed it.
     let a_name: String = sqlx::query_scalar("SELECT name FROM organizations WHERE id = $1")
         .bind(a.org)

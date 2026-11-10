@@ -146,6 +146,7 @@ function StationsSection({ account }: { account: Account }) {
         </p>
       )}
       <FormError error={seats.error} />
+      {owner && <ActivateLink />}
       {owner && stations.data && seats.data && (
         <RegisterForm
           choices={seatChoices(seats.data.entitlements, stations.data)}
@@ -156,6 +157,19 @@ function StationsSection({ account }: { account: Account }) {
       <FormError error={root.error} />
       {root.isSuccess && <VendorRootSection root={root.data} />}
     </>
+  );
+}
+
+/** For owners: register a station that shows a code, with no file to copy. */
+export function ActivateLink() {
+  return (
+    <p className="text-sm text-slate-300">
+      A station showing a code to register with the platform?{" "}
+      <Link to="/activate" className="text-indigo-400 hover:underline">
+        Enter its code
+      </Link>{" "}
+      to approve it. It then collects its licence by itself.
+    </p>
   );
 }
 
