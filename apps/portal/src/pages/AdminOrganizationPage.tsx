@@ -15,7 +15,7 @@ import {
   REASON_MAX_CHARS,
   type AdminLicence,
 } from "@/api/adminLicences";
-import { isInstanceKeyId, LAPSE_POLICY_LABELS } from "@/api/stations";
+import { isInstanceKeyId } from "@/api/stations";
 import { SignInPrompt } from "./AccountPage";
 import { Field, FormError, SubmitButton } from "./AuthForm";
 import { SCOPE_LABELS } from "./OfferingForm";
@@ -82,10 +82,6 @@ export function OrganizationView({ detail }: { detail: AdminOrganizationDetail }
         <h1 className="text-xl font-semibold">{organization.name}</h1>
         <p className="text-sm text-slate-400">
           Created {organization.created_at.slice(0, 10)} · {organization.id}
-        </p>
-        <p className="text-sm">
-          <span className="text-slate-400">When a licence lapses (set by the customer): </span>
-          {LAPSE_POLICY_LABELS[detail.lapse_policy]}
         </p>
       </div>
       <div className="space-y-2">

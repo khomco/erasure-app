@@ -2,8 +2,8 @@
 //! CAP-3, CAP-5, CAP-6):
 //!
 //! - `GET /api/stations` — any role: `{stations}`, the organization's
-//!   stations (released ones last) with each one's latest licence,
-//!   `renewal_available` and `lapse_policy_update_available`.
+//!   stations (released ones last) with each one's latest licence and
+//!   `renewal_available`.
 //! - `POST /api/stations {entitlement_id, instance_key_id, station_id?,
 //!   label?, site?}` — an owner registers a station: 201 `{station,
 //!   licence}`. 503 [`MSG_ISSUANCE_UNAVAILABLE`] when the hub has no vendor
@@ -13,9 +13,8 @@
 //!   [`stations::MSG_ALREADY_RELEASED`] the
 //!   second time.
 //! - `POST /api/stations/:id/reissue` — an owner issues a station whose
-//!   `renewal_available` or `lapse_policy_update_available` is true a new
-//!   licence to its entitlement's current `term_end` with the organization's
-//!   current lapse policy: 201 `{station, licence}`, the old licence superseded
+//!   `renewal_available` is true a new licence to its entitlement's current
+//!   `term_end`: 201 `{station, licence}`, the old licence superseded
 //!   (its file still verifies offline until its own `not_after`). 503
 //!   [`MSG_ISSUANCE_UNAVAILABLE`] when the hub has no vendor root; the other
 //!   refusals are [`stations::reissue`]'s.
@@ -26,11 +25,6 @@
 //!   reach a customer only through the vendor.
 //! - `POST /api/stations/:id/reissue` refuses a station whose latest
 //!   licence is revoked (409 [`stations::MSG_LICENCE_REVOKED`]).
-//! - `GET /api/organization/lapse-policy` — any role: `{lapse_policy}`,
-//!   `evaluation` or `stop` (ADR-0012).
-//! - `POST /api/organization/lapse-policy {lapse_policy}` — an owner: 200
-//!   `{lapse_policy}`; others 403 [`MSG_OWNER_ONLY_LAPSE_POLICY`]. Applies to
-//!   licences issued afterwards only; see [`crate::lapse_policy`].
 //! - `GET /api/licensing/root` — any role: `{root: {public_key_id,
 //!   public_key_b64} | null}`, the vendor root public key a station passes as
 //!   `--vendor-root-b64` and an auditor verifies against.
@@ -38,6 +32,10 @@
 //! Every route needs a session, and the organization is always the
 //! session's: another organization's station, licence or entitlement is a 404
 //! like an unknown one. Owner checks run before the body is read.
+//!
+//! The organization lapse-policy routes are gone (ADR-0013 §5): the setting
+//! is retired and `/api/organization/lapse-policy` is an ordinary unknown
+//! `/api/*` path.
 
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderValue, StatusCode};
@@ -49,10 +47,9 @@ use uuid::Uuid;
 
 use crate::accounts::Role;
 use crate::auth::{ApiError, CurrentUser, JsonBody};
-use crate::lapse_policy::{self, LapsePolicyError, LapsePolicyRequest};
 use crate::stations::{
     self, RegisterRequest, StationError, MSG_ISSUANCE_UNAVAILABLE, MSG_NO_LICENCE, MSG_NO_STATION,
-    MSG_OWNER_ONLY_LAPSE_POLICY, MSG_OWNER_ONLY_STATIONS,
+    MSG_OWNER_ONLY_STATIONS,
 };
 use crate::AppState;
 
@@ -63,10 +60,6 @@ pub fn routes() -> Router<AppState> {
         .route("/api/stations/:id/reissue", post(reissue))
         .route("/api/licences/:id/download", get(download))
         .route("/api/licensing/root", get(root))
-        .route(
-            "/api/organization/lapse-policy",
-            get(get_lapse_policy).post(set_lapse_policy),
-        )
 }
 
 impl From<StationError> for ApiError {
@@ -78,19 +71,6 @@ impl From<StationError> for ApiError {
             StationError::Issue(m) => ApiError::internal(m),
             StationError::Db(e) => e.into(),
             StationError::Audit(e) => e.into(),
-        }
-    }
-}
-
-impl From<LapsePolicyError> for ApiError {
-    fn from(e: LapsePolicyError) -> Self {
-        match e {
-            LapsePolicyError::NotOwner => {
-                ApiError::new(StatusCode::FORBIDDEN, MSG_OWNER_ONLY_LAPSE_POLICY)
-            }
-            LapsePolicyError::Corrupt(m) => ApiError::internal(m),
-            LapsePolicyError::Db(e) => e.into(),
-            LapsePolicyError::Audit(e) => e.into(),
         }
     }
 }
@@ -239,36 +219,4 @@ async fn root(State(state): State<AppState>, _user: CurrentUser) -> Json<serde_j
         })
     });
     Json(json!({ "root": root }))
-}
-
-async fn get_lapse_policy(
-    State(state): State<AppState>,
-    user: CurrentUser,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let policy = lapse_policy::get(&state.pool, user.organization_id).await?;
-    Ok(Json(json!({ "lapse_policy": policy })))
-}
-
-async fn set_lapse_policy(
-    State(state): State<AppState>,
-    user: CurrentUser,
-    body: Result<JsonBody<LapsePolicyRequest>, ApiError>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    if user.role != Role::Owner {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            MSG_OWNER_ONLY_LAPSE_POLICY,
-        ));
-    }
-    let JsonBody(req) = body?;
-    let mut tx = state.pool.begin().await?;
-    let policy = lapse_policy::set(
-        &mut tx,
-        user.organization_id,
-        user.user_id,
-        req.lapse_policy,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(Json(json!({ "lapse_policy": policy })))
 }

@@ -340,9 +340,11 @@ and **0008** (station ↔ hub protocol and the reconciliation contract).
   organization outside entitlements and seats (trial, evaluation, goodwill) with
   a mandatory audited reason, inspects any stored or pasted licence file against
   the hub's root, and records a revocation in the hub (licence-delivery story 3).
-  An owner sets the organization's lapse policy (ADR-0012), which every licence
+  ~~An owner sets the organization's lapse policy (ADR-0012), which every licence
   the hub signs carries, and issues each station an updated licence after a
-  change (licence-delivery story 4).
+  change (licence-delivery story 4).~~ Retired 2026-11-10 (ADR-0013 §5,
+  controlled-licensing story 2): the hub and portal no longer offer the setting
+  and sign every licence without it; reissue is for renewals only.
   Revocation reaches no station (A2.3), and the root is still file-held (A1.5).*
 - A1.3 Vendor console UI: customers, licences, entitlements, issue/inspect.
   *Customers part shipped 2026-11-08: search and audited views (portal-accounts story 5). Offerings part shipped 2026-11-08: vendor admins create, edit, publish and retire offerings, whose grants are what an entitlement will carry (offerings-and-payments story 1). Customers can buy them since 2026-11-08: checkout creates an order that only a verified payment-provider event marks paid, tested end to end with the in-process Fake provider (offerings-and-payments story 2). Since 2026-11-08 they can pay through Stripe: Stripe Checkout, the Stripe billing portal, and a signed `POST /api/payments/webhook` whose events are stored once by id and applied idempotently (offerings-and-payments story 3). Stripe has been exercised only against a local mock of its API and hand-built event fixtures, never a real account, and live payments wait on the sales-tax/VAT decision (DECISIONS D14). Since 2026-11-08 a paid order grants the organization one entitlement (seats, scope, quota, features, term), listed with its available licence seats at `/seats`; annual offerings are Stripe subscriptions whose paid renewals extend the term by a year, an owner cancels in Stripe's billing portal, and a full refund withdraws the seats, none of it touching an issued licence (offerings-and-payments story 4; renewals likewise exercised only against fixtures and the Fake provider's test actions). Issuing licences from entitlements is `licence-delivery`. Licences part shipped 2026-11-08: an organization's page lists every licence it holds and issues a vendor licence; a licence page shows the decoded file, its verification against the hub's root, a download and revocation; `/admin/licences/inspect` decodes and verifies a pasted file (licence-delivery story 3). Releases part shipped 2026-11-08: vendor admins create draft releases (SemVer version, notes, `stable`/`preview` channel), upload one file per platform whose SHA-256 the hub computes while storing it behind an `ArtifactStore` (a local directory for now), publish and withdraw them, and `wipe-hub release publish` does the same in one step from the command line (software-downloads story 1). ~~Customer downloads~~ shipped 2026-11-08: any user of an organization with a current entitlement lists the published releases at `/downloads` with each file's SHA-256 and downloads a file through a five-minute signed link; every download is recorded (user, organization, file, time) and audited, and vendor admins see each release's downloads (software-downloads story 2). Still open: an admin view of an organization's orders and entitlements.*
@@ -589,8 +591,8 @@ distribution and expiry behaviour).
   until restart (licence-visibility story 4). The bench UI still has no activation
   screen, and a licence installed at runtime is not persisted.*
 - ~~L1.4 Licence status surface at the bench (O-R9 / O3.5).~~ Shipped 2026-11-08: a persistent banner above every bench page (licence-visibility story 3).
-- L1.5 Expiry warnings and the drop-to-evaluation transition (L-R5).
-  *Expiry warnings shipped 2026-11-08 (licence-visibility story 3); the `stop` refusal at lapse is licence-visibility story 5.*
+- L1.5 Expiry warnings and refusing starts a licence does not cover (L-R5, ADR-0013).
+  *Expiry warnings shipped 2026-11-08 (licence-visibility story 3); refusing a start the licence does not cover is licence-visibility story 5.*
 - **Exit:** a customer can buy one station, activate it with no network, and
   see licensed certificates — and see plainly when they stop being licensed.
 

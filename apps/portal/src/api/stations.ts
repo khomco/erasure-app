@@ -1,7 +1,8 @@
-// Mirrors the station, licence and lapse-policy routes in
+// Mirrors the station and licence routes in
 // crates/wipe-hub/src/station_routes.rs and the serde shapes
-// `wipe_hub::stations::{Station, Licence}` (crates/wipe-hub/src/stations.rs) and
-// `wipe_license::LapsePolicy`. Change both together.
+// `wipe_hub::stations::{Station, Licence}` (crates/wipe-hub/src/stations.rs).
+// Change both together. The organization lapse-policy setting is retired
+// (ADR-0013 §5): the hub no longer serves it or reports it here.
 //
 // The licence file itself is never parsed here: the browser downloads the
 // hub's stored bytes from `licenceDownloadPath`, exactly as they were signed.
@@ -11,19 +12,6 @@ import { SCOPES, type Scope } from "./adminOfferings";
 
 export const LICENCE_STATUSES = ["active", "superseded", "revoked"] as const;
 export type LicenceStatus = (typeof LICENCE_STATUSES)[number];
-
-/**
- * What a station does once its licence lapses (ADR-0012): `evaluation` keeps
- * erasing and marks certificates evaluation; `stop` refuses to start new jobs.
- */
-export const LAPSE_POLICIES = ["evaluation", "stop"] as const;
-export type LapsePolicy = (typeof LAPSE_POLICIES)[number];
-
-/** How each lapse policy reads in the portal. */
-export const LAPSE_POLICY_LABELS: Record<LapsePolicy, string> = {
-  evaluation: "Keep erasing and mark certificates evaluation (default)",
-  stop: "Stop new jobs",
-};
 
 /**
  * A licence the hub issued to a station (its summary, not the file).
@@ -46,8 +34,6 @@ export interface Licence {
    * keeps working offline until its own expiry. The reason is never shown here.
    */
   revoked_at: string | null;
-  /** The lapse policy signed into the file. */
-  lapse_policy: LapsePolicy;
 }
 
 /** A registered station and its most recently issued licence. */
@@ -72,12 +58,6 @@ export interface Station {
    * entitlement's (renewed) term end. Computed by the hub.
    */
   renewal_available: boolean;
-  /**
-   * A licence carrying the organization's current lapse policy can be issued:
-   * the station is not released, its entitlement is current and its active
-   * licence was signed with another policy. Computed by the hub.
-   */
-  lapse_policy_update_available: boolean;
 }
 
 export interface Registered {
@@ -126,8 +106,7 @@ export function isLicence(v: unknown): v is Licence {
     typeof v.issued_at === "string" &&
     oneOf(LICENCE_STATUSES, v.status) &&
     isNullableString(v.superseded_at) &&
-    isNullableString(v.revoked_at) &&
-    oneOf(LAPSE_POLICIES, v.lapse_policy)
+    isNullableString(v.revoked_at)
   );
 }
 
@@ -145,8 +124,7 @@ export function isStation(v: unknown): v is Station {
     typeof v.registered_at === "string" &&
     isNullableString(v.released_at) &&
     (v.licence === null || isLicence(v.licence)) &&
-    typeof v.renewal_available === "boolean" &&
-    typeof v.lapse_policy_update_available === "boolean"
+    typeof v.renewal_available === "boolean"
   );
 }
 
@@ -162,9 +140,6 @@ const isRegistered = (v: unknown): v is Registered =>
 
 const isStationBody = (v: unknown): v is { station: Station } =>
   isObject(v) && isStation(v.station);
-
-const isPolicyBody = (v: unknown): v is { lapse_policy: LapsePolicy } =>
-  isObject(v) && oneOf(LAPSE_POLICIES, v.lapse_policy);
 
 const isRootBody = (v: unknown): v is { root: VendorRootKey | null } =>
   isObject(v) && (v.root === null || isVendorRootKey(v.root));
@@ -212,35 +187,14 @@ export async function releaseStation(id: string, fetchImpl: Fetch = fetch): Prom
 
 /**
  * `POST /api/stations/{id}/reissue` (owner, 201): the station and its renewed
- * or policy-updated licence, to the entitlement's current term end with the
- * organization's current lapse policy. The old licence is superseded; its file
- * still works until its own expiry.
+ * licence, to the entitlement's current term end. The old licence is
+ * superseded; its file still works until its own expiry.
  */
 export async function reissueStation(id: string, fetchImpl: Fetch = fetch): Promise<Registered> {
   const res = await ensureOk(
     await request(fetchImpl, "POST", `/api/stations/${encodeURIComponent(id)}/reissue`, {}),
   );
   return json(res, isRegistered, "licence reissue");
-}
-
-/** `GET /api/organization/lapse-policy` (any role): the organization's policy. */
-export async function fetchLapsePolicy(fetchImpl: Fetch = fetch): Promise<LapsePolicy> {
-  const res = await ensureOk(await request(fetchImpl, "GET", "/api/organization/lapse-policy"));
-  return (await json(res, isPolicyBody, "lapse policy")).lapse_policy;
-}
-
-/**
- * `POST /api/organization/lapse-policy` (owner): the policy now in force. It
- * applies to licences issued afterwards; no licence is reissued by it.
- */
-export async function setLapsePolicy(
-  policy: LapsePolicy,
-  fetchImpl: Fetch = fetch,
-): Promise<LapsePolicy> {
-  const res = await ensureOk(
-    await request(fetchImpl, "POST", "/api/organization/lapse-policy", { lapse_policy: policy }),
-  );
-  return (await json(res, isPolicyBody, "lapse policy change")).lapse_policy;
 }
 
 /** `GET /api/licensing/root` (any role): the vendor root public key, or `null`. */

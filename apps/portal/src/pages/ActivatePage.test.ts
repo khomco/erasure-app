@@ -101,7 +101,6 @@ const licence: Licence = {
   status: "active",
   superseded_at: null,
   revoked_at: null,
-  lapse_policy: "evaluation",
 };
 
 const station: Station = {
@@ -117,7 +116,6 @@ const station: Station = {
   released_at: null,
   licence,
   renewal_available: false,
-  lapse_policy_update_available: false,
 };
 
 describe("activate page", () => {

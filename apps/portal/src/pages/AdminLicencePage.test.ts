@@ -42,7 +42,6 @@ const licence: AdminLicence = {
   revoked_at: null,
   issue_reason: "evaluation",
   revocation_reason: null,
-  lapse_policy: "evaluation",
 };
 
 const body: LicenseBody = {
@@ -93,24 +92,19 @@ describe("verification", () => {
     expect(t).toContain("Site Floor 2");
     expect(t).toContain("5,000 erasures");
     expect(t).toContain("hub_sync");
-    // A file without the field is evaluation.
-    expect(t).toContain("When it lapses Keep erasing and mark certificates evaluation (default)");
   });
 
-  it("shows a stop policy read-only, from the file and from the record", () => {
+  it("never shows a lapse policy, even one an old file carries (retired, ADR-0013 §5)", () => {
     const verified: Verification = { status: "verified", root_key_id: null, detail: null };
     const t = text(
       renderToStaticMarkup(
         createElement(LicenceBodyView, { body: { ...body, lapse_policy: "stop" }, verification: verified }),
       ),
     );
-    expect(t).toContain("When it lapses Stop new jobs");
-    const r = text(
-      renderToStaticMarkup(
-        withRouter(createElement(LicenceRecord, { licence: { ...licence, lapse_policy: "stop" } })),
-      ),
-    );
-    expect(r).toContain("When it lapses Stop new jobs");
+    expect(t).not.toMatch(/lapse/i);
+    expect(t).not.toContain("Stop new jobs");
+    const r = text(renderToStaticMarkup(withRouter(createElement(LicenceRecord, { licence }))));
+    expect(r).not.toMatch(/lapse/i);
   });
 });
 
@@ -180,14 +174,14 @@ describe("licence rows", () => {
 });
 
 describe("admin organization page", () => {
-  it("shows the customer's lapse policy read-only", () => {
+  it("shows no lapse policy (retired, ADR-0013 §5)", () => {
     const detail = {
       organization: { id: licence.organization.id, name: "Acme Recyclers", created_at: "2026-11-01T00:00:00Z" },
       users: [],
-      lapse_policy: "stop" as const,
     };
     const t = text(renderToStaticMarkup(withRouter(createElement(OrganizationView, { detail }))));
-    expect(t).toContain("When a licence lapses (set by the customer): Stop new jobs");
+    expect(t).toContain("Acme Recyclers");
+    expect(t).not.toMatch(/lapse/i);
     expect(t).not.toContain("Change to");
   });
 });

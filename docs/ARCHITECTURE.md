@@ -354,8 +354,10 @@ What exists today: a station is licensed by a licence file passed with
 without one it runs free-tier and marks every certificate `evaluation`.
 The vendor hub (`wipe-hub`) sells entitlements and issues those licence
 files for customers to download from the portal; stations never contact
-the hub, so air-gapped fleets need nothing extra. Licensing never stops an
-erasure.
+the hub, so air-gapped fleets need nothing extra. Today's stations do not
+refuse starts on licensing; ADR-0013 makes the licence decide at each job
+start (`licence-visibility` story 5) and retires the ADR-0012 lapse-policy
+setting, which the hub and portal no longer offer.
 
 ## Where the code will need to grow
 

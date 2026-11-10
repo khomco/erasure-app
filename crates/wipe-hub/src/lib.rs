@@ -26,7 +26,6 @@ pub mod enrollment_routes;
 pub mod enrollments;
 pub mod entitlements;
 pub mod health;
-pub mod lapse_policy;
 pub mod lead_admin;
 pub mod lead_routes;
 pub mod leads;

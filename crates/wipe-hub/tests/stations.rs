@@ -19,7 +19,7 @@ use wipe_hub::stations::{
     MSG_ALREADY_REGISTERED, MSG_ALREADY_RELEASED, MSG_BAD_INSTANCE_KEY,
     MSG_ENTITLEMENT_NOT_CURRENT, MSG_ISSUANCE_UNAVAILABLE, MSG_LICENCE_REVOKED,
     MSG_LICENCE_UP_TO_DATE, MSG_NO_FREE_SEAT, MSG_NO_LICENCE, MSG_NO_STATION,
-    MSG_OWNER_ONLY_LAPSE_POLICY, MSG_OWNER_ONLY_STATIONS, MSG_STATION_ID_REQUIRED,
+    MSG_OWNER_ONLY_STATIONS, MSG_STATION_ID_REQUIRED,
 };
 use wipe_license::{
     check_installable, evaluate, load_license, machine_fingerprint, AllowedMethods, Feature,
@@ -219,27 +219,15 @@ impl Fixture {
             .clone()
     }
 
-    async fn get_policy(&self, who: &Who) -> Response {
-        self.hub
-            .get("/api/organization/lapse-policy", Some(&who.cookie))
+    /// Store `policy` in the organization's retired `lapse_policy` column
+    /// directly, as the removed setting could have (ADR-0013 §5).
+    async fn store_policy(&self, policy: &str) {
+        sqlx::query("UPDATE organizations SET lapse_policy = $2 WHERE id = $1")
+            .bind(self.org_id)
+            .bind(policy)
+            .execute(&self.hub.db.pool)
             .await
-    }
-
-    async fn post_policy(&self, who: &Who, body: Value) -> Response {
-        self.hub
-            .post("/api/organization/lapse-policy", body, Some(&who.cookie))
-            .await
-    }
-
-    /// The owner sets the organization's lapse policy: 200 echoing it.
-    async fn set_policy(&self, policy: &str) {
-        let v = ok_json(
-            self.post_policy(&self.owner, json!({ "lapse_policy": policy }))
-                .await,
-            StatusCode::OK,
-        )
-        .await;
-        assert_eq!(v, json!({ "lapse_policy": policy }));
+            .unwrap();
     }
 
     async fn stored_policy(&self) -> String {
@@ -320,7 +308,6 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
             "id",
             "instance_key_id",
             "label",
-            "lapse_policy_update_available",
             "licence",
             "offering_name",
             "registered_at",
@@ -338,7 +325,6 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
             "id",
             "instance_key_id",
             "issued_at",
-            "lapse_policy",
             "not_after",
             "revoked_at",
             "root_key_id",
@@ -365,8 +351,6 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
     assert_eq!(licence["root_key_id"], json!(f.root.public_key_id()));
     assert_eq!(licence["superseded_at"], Value::Null);
     assert_eq!(licence["revoked_at"], Value::Null);
-    assert_eq!(licence["lapse_policy"], "evaluation");
-    assert_eq!(station["lapse_policy_update_available"], false);
 
     // Every role downloads the exact stored file.
     let resp = f.download(&f.member, licence_id).await;
@@ -454,7 +438,6 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
             "instance_key_id": key,
             "root_key_id": f.root.public_key_id(),
             "not_after": licence["not_after"],
-            "lapse_policy": "evaluation",
         })
     );
     let downloaded = f.hub.audited("licence.downloaded").await;
@@ -1220,7 +1203,6 @@ async fn a_renewed_station_is_reissued_a_licence_to_the_new_term_end() {
                 "instance_key_id": key,
                 "root_key_id": f.root.public_key_id(),
                 "not_after": licence["not_after"],
-                "lapse_policy": "evaluation",
                 "reissue_of": old,
             }),
         )
@@ -1412,7 +1394,7 @@ async fn concurrent_reissues_of_one_station_issue_one_licence() {
 }
 
 // ---------------------------------------------------------------------------
-// Lapse policy (story 4, CAP-6, ADR-0012)
+// The retired lapse policy (ADR-0013 §5)
 
 /// The signed body of a licence file as JSON, so an absent key is visible.
 fn file_body(file: &str) -> Value {
@@ -1420,259 +1402,151 @@ fn file_body(file: &str) -> Value {
 }
 
 #[tokio::test]
-async fn the_lapse_policy_defaults_to_evaluation_and_licences_omit_it() {
+async fn a_stored_stop_policy_is_ignored_and_licences_omit_it() {
     let f = fixture().await;
-    for who in [&f.owner, &f.member] {
-        let v = ok_json(f.get_policy(who).await, StatusCode::OK).await;
-        assert_eq!(v, json!({ "lapse_policy": "evaluation" }));
-    }
+    f.store_policy("stop").await;
     let key = new_key();
     let v = f.register_machine(&key).await;
-    assert_eq!(v["licence"]["lapse_policy"], "evaluation");
-    assert_eq!(v["station"]["lapse_policy_update_available"], false);
-    let file = f
-        .stored_document(v["licence"]["id"].as_str().unwrap())
-        .await;
-    let body = file_body(&file);
-    assert!(body.get("lapse_policy").is_none(), "{body}");
-    assert_eq!(
-        install(&file, &key, &f.root).body.lapse_policy,
-        LapsePolicy::Evaluation
+    assert!(v["licence"].get("lapse_policy").is_none(), "{v}");
+    assert!(
+        v["station"].get("lapse_policy_update_available").is_none(),
+        "{v}"
     );
-}
-
-#[tokio::test]
-async fn an_owner_sets_the_lapse_policy_and_a_change_is_audited_once() {
-    let f = fixture().await;
-    let audits = f.hub.count("audit_log").await;
-    f.set_policy("stop").await;
-    assert_eq!(f.stored_policy().await, "stop");
-    let changed = f.hub.audited("org.lapse_policy_changed").await;
-    assert_eq!(
-        changed,
-        [(
-            format!("user:{}", f.owner.id),
-            format!("organization:{}", f.org_id),
-            json!({ "old": "evaluation", "new": "stop" }),
-        )]
-    );
-    assert_eq!(f.hub.count("audit_log").await, audits + 1);
-
-    // The same value again: 200, nothing written.
-    f.set_policy("stop").await;
-    assert_eq!(f.hub.count("audit_log").await, audits + 1);
-    let v = ok_json(f.get_policy(&f.member).await, StatusCode::OK).await;
-    assert_eq!(v, json!({ "lapse_policy": "stop" }));
-
-    // And back.
-    f.set_policy("evaluation").await;
-    let changed = f.hub.audited("org.lapse_policy_changed").await;
-    assert_eq!(changed.len(), 2);
-    assert_eq!(changed[1].2, json!({ "old": "stop", "new": "evaluation" }));
-    // No licence was issued by the change.
-    assert_eq!(f.hub.count("licences").await, 0);
-}
-
-#[tokio::test]
-async fn members_and_vendor_admins_cannot_change_the_lapse_policy() {
-    let f = fixture().await;
-    let admin = bootstrap_admin(&f.hub).await;
-    let before = f.counts().await;
-    for who in [&f.member, &admin] {
-        let resp = f.post_policy(who, json!({ "lapse_policy": "stop" })).await;
-        assert_error(resp, StatusCode::FORBIDDEN, MSG_OWNER_ONLY_LAPSE_POLICY).await;
-        // The role check comes before the body is read.
-        let resp = f
-            .post_policy(who, json!({ "lapse_policy": "sometimes" }))
-            .await;
-        assert_error(resp, StatusCode::FORBIDDEN, MSG_OWNER_ONLY_LAPSE_POLICY).await;
-    }
-    assert_eq!(f.counts().await, before);
-    assert_eq!(f.stored_policy().await, "evaluation");
-    let v = ok_json(f.get_policy(&f.member).await, StatusCode::OK).await;
-    assert_eq!(v, json!({ "lapse_policy": "evaluation" }));
-}
-
-#[tokio::test]
-async fn a_bad_lapse_policy_body_is_refused() {
-    let f = fixture().await;
-    let before = f.counts().await;
-    for body in [
-        json!({ "lapse_policy": "sometimes" }),
-        json!({ "lapse_policy": "STOP" }),
-        json!({ "lapse_policy": null }),
-        json!({}),
-        json!({ "lapse_policy": "stop", "also": 1 }),
-        json!("stop"),
-    ] {
-        let resp = f.post_policy(&f.owner, body.clone()).await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
-    }
-    let resp = f
-        .hub
-        .post_req("/api/organization/lapse-policy", Some(&f.owner.cookie))
-        .header(CONTENT_TYPE, "application/json")
-        .body("not json")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(f.counts().await, before);
-    assert_eq!(f.stored_policy().await, "evaluation");
-}
-
-#[tokio::test]
-async fn the_lapse_policy_needs_a_session() {
-    let f = fixture().await;
-    let resp = f.hub.get("/api/organization/lapse-policy", None).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    let resp = f
-        .hub
-        .post(
-            "/api/organization/lapse-policy",
-            json!({ "lapse_policy": "stop" }),
-            None,
-        )
-        .await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(f.stored_policy().await, "evaluation");
-}
-
-#[tokio::test]
-async fn a_station_registered_under_stop_installs_a_stop_licence() {
-    let f = fixture().await;
-    f.set_policy("stop").await;
-    let key = new_key();
-    let v = f.register_machine(&key).await;
     let licence_id = v["licence"]["id"].as_str().unwrap();
-    assert_eq!(v["licence"]["lapse_policy"], "stop");
-    assert_eq!(v["station"]["lapse_policy_update_available"], false);
-
     let file = f.download(&f.owner, licence_id).await.text().await.unwrap();
-    assert_eq!(file_body(&file)["lapse_policy"], "stop");
-    let cert = install(&file, &key, &f.root);
-    assert_eq!(cert.body.lapse_policy, LapsePolicy::Stop);
-    assert_eq!(file, serde_json::to_string_pretty(&cert).unwrap());
-    let now = OffsetDateTime::now_utc();
-    let status = evaluate(
-        Some(&cert.body.entitlements),
-        &LeaseState::new(now),
-        &machine_fingerprint("bench-1"),
-        now,
-    );
-    assert!(matches!(status, LeaseStatus::Valid { .. }), "{status:?}");
-
-    let issued = f.hub.audited("licence.issued").await;
-    assert_eq!(issued.len(), 1);
-    assert_eq!(issued[0].2["lapse_policy"], "stop");
-}
-
-#[tokio::test]
-async fn a_policy_change_flags_stations_and_reissue_updates_their_licence() {
-    let f = fixture().await;
-    let key = new_key();
-    let v = f.register_machine(&key).await;
-    let station = v["station"]["id"].as_str().unwrap();
-    let old = v["licence"]["id"].as_str().unwrap().to_string();
-    let old_cert = install(&f.stored_document(&old).await, &key, &f.root);
-
-    f.set_policy("stop").await;
-    // Every role sees the update; it is not a renewal.
-    let s = f.station(&f.member, station).await;
-    assert_eq!(s["lapse_policy_update_available"], true);
-    assert_eq!(s["renewal_available"], false);
-    assert_eq!(s["licence"]["lapse_policy"], "evaluation");
-    // Members cannot issue it.
-    let resp = f.reissue(&f.member, station).await;
-    assert_error(resp, StatusCode::FORBIDDEN, MSG_OWNER_ONLY_STATIONS).await;
-
-    let r = ok_json(f.reissue(&f.owner, station).await, StatusCode::CREATED).await;
-    let new = r["licence"]["id"].as_str().unwrap().to_string();
-    assert_ne!(new, old);
-    assert_eq!(r["licence"]["lapse_policy"], "stop");
-    assert_eq!(r["station"]["lapse_policy_update_available"], false);
-    assert_eq!(r["station"]["renewal_available"], false);
-    let file = f.download(&f.owner, &new).await.text().await.unwrap();
-    let cert = install(&file, &key, &f.root);
-    assert_eq!(cert.body.lapse_policy, LapsePolicy::Stop);
-    let (ent, old_ent) = (&cert.body.entitlements, &old_cert.body.entitlements);
-    assert_eq!(ent.not_after, f.term_end(&f.machine).await);
-    assert_eq!(ent.scope, old_ent.scope);
-    assert_eq!(ent.quota, old_ent.quota);
-    assert_eq!(ent.features, old_ent.features);
-    assert_eq!(cert.body.instance_public_key_id, key);
-
-    let status: String = sqlx::query_scalar("SELECT status FROM licences WHERE id = $1::uuid")
-        .bind(&old)
-        .fetch_one(&f.hub.db.pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "superseded");
-    let actor = format!("user:{}", f.owner.id);
-    assert_eq!(
-        f.hub.audited("licence.superseded").await,
-        [(
-            actor,
-            format!("licence:{old}"),
-            json!({
-                "station_id": station,
-                "reason": "lapse policy changed",
-                "superseded_by": new,
-            }),
-        )]
-    );
-    let issued = f.hub.audited("licence.issued").await;
-    assert_eq!(issued[1].2["lapse_policy"], "stop");
-    assert_eq!(issued[1].2["reissue_of"], json!(old));
-
-    // Up to date now: refused, nothing written.
-    let before = f.counts().await;
-    let resp = f.reissue(&f.owner, station).await;
-    assert_error(resp, StatusCode::CONFLICT, MSG_LICENCE_UP_TO_DATE).await;
-    assert_eq!(f.counts().await, before);
-
-    // Back to evaluation: the next file has no lapse_policy key.
-    f.set_policy("evaluation").await;
-    assert_eq!(
-        f.station(&f.owner, station).await["lapse_policy_update_available"],
-        true
-    );
-    let r = ok_json(f.reissue(&f.owner, station).await, StatusCode::CREATED).await;
-    let file = f
-        .stored_document(r["licence"]["id"].as_str().unwrap())
-        .await;
     assert!(file_body(&file).get("lapse_policy").is_none(), "{file}");
     assert_eq!(
         install(&file, &key, &f.root).body.lapse_policy,
         LapsePolicy::Evaluation
     );
-    assert_eq!(r["licence"]["lapse_policy"], "evaluation");
-    assert_eq!(r["station"]["lapse_policy_update_available"], false);
+    let issued = f.hub.audited("licence.issued").await;
+    assert_eq!(issued.len(), 1);
+    assert!(issued[0].2.get("lapse_policy").is_none(), "{:?}", issued[0]);
+    // The column is kept, unread.
+    assert_eq!(f.stored_policy().await, "stop");
 }
 
 #[tokio::test]
-async fn a_renewal_with_a_policy_change_is_reissued_as_renewed() {
+async fn the_retired_lapse_policy_routes_are_unknown() {
     let f = fixture().await;
-    let v = f.register_machine(&new_key()).await;
+    f.store_policy("stop").await;
+    let admin = bootstrap_admin(&f.hub).await;
+    let before = f.counts().await;
+    let path = "/api/organization/lapse-policy";
+    let body = json!({ "lapse_policy": "evaluation" });
+    let mut responses = Vec::new();
+    for cookie in [
+        Some(&f.owner.cookie),
+        Some(&f.member.cookie),
+        Some(&admin.cookie),
+        None,
+    ] {
+        responses.push(f.hub.get(path, cookie.map(String::as_str)).await);
+        responses.push(
+            f.hub
+                .post(path, body.clone(), cookie.map(String::as_str))
+                .await,
+        );
+    }
+    for resp in responses {
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let v: Value = resp.json().await.unwrap();
+        assert_eq!(v, json!({ "error": "not found" }));
+    }
+    assert_eq!(f.counts().await, before);
+    assert_eq!(f.stored_policy().await, "stop");
+}
+
+#[tokio::test]
+async fn a_licence_signed_with_stop_is_not_reissued_for_the_policy_alone() {
+    let f = fixture().await;
+    // The organization stays `evaluation` while the active file says `stop`:
+    // the retired "policy differs" reissue would have accepted this.
+    assert_eq!(f.stored_policy().await, "evaluation");
+    let key = new_key();
+    let v = f.register_machine(&key).await;
+    let station = v["station"]["id"].as_str().unwrap();
+    let licence_id = v["licence"]["id"].as_str().unwrap();
+    // An older file signed with `stop`, term unchanged.
+    let cert = install(&f.stored_document(licence_id).await, &key, &f.root);
+    // Stored licences are immutable, so the hub's file is superseded and a
+    // copy signed with `stop` (same window) becomes the active licence.
+    let stop_id = Uuid::new_v4();
+    let stop = f
+        .root
+        .issue_with_lapse_policy(
+            stop_id.to_string(),
+            key.clone(),
+            cert.body.entitlements.clone(),
+            cert.body.issued_at,
+            LapsePolicy::Stop,
+        )
+        .unwrap();
+    sqlx::query(
+        "UPDATE licences SET status = 'superseded', superseded_at = now() WHERE id = $1::uuid",
+    )
+    .bind(licence_id)
+    .execute(&f.hub.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO licences (id, organization_id, station_id, entitlement_id, \
+                               instance_key_id, root_key_id, not_after, issued_at, document, \
+                               source) \
+         SELECT $2, organization_id, station_id, entitlement_id, instance_key_id, \
+                root_key_id, not_after, issued_at, $3, 'station' \
+         FROM licences WHERE id = $1::uuid",
+    )
+    .bind(licence_id)
+    .bind(stop_id)
+    .bind(serde_json::to_string_pretty(&stop).unwrap())
+    .execute(&f.hub.db.pool)
+    .await
+    .unwrap();
+
+    let s = f.station(&f.owner, station).await;
+    assert_eq!(s["licence"]["id"], json!(stop_id));
+    assert_eq!(s["renewal_available"], false);
+    assert!(s.get("lapse_policy_update_available").is_none(), "{s}");
+    assert!(s["licence"].get("lapse_policy").is_none(), "{s}");
+    let before = f.counts().await;
+    let resp = f.reissue(&f.owner, station).await;
+    assert_error(resp, StatusCode::CONFLICT, MSG_LICENCE_UP_TO_DATE).await;
+    assert_eq!(f.counts().await, before);
+}
+
+#[tokio::test]
+async fn a_renewal_under_a_stored_stop_policy_is_reissued_without_it() {
+    let f = fixture().await;
+    f.store_policy("stop").await;
+    let key = new_key();
+    let v = f.register_machine(&key).await;
     let station = v["station"]["id"].as_str().unwrap();
     let old = v["licence"]["id"].as_str().unwrap().to_string();
     f.renew(&f.machine).await;
-    f.set_policy("stop").await;
-    let s = f.station(&f.owner, station).await;
-    assert_eq!(s["renewal_available"], true);
-    assert_eq!(s["lapse_policy_update_available"], true);
+    assert_eq!(
+        f.station(&f.owner, station).await["renewal_available"],
+        true
+    );
     let r = ok_json(f.reissue(&f.owner, station).await, StatusCode::CREATED).await;
-    assert_eq!(r["licence"]["lapse_policy"], "stop");
-    assert_eq!(r["station"]["renewal_available"], false);
-    assert_eq!(r["station"]["lapse_policy_update_available"], false);
+    let new = r["licence"]["id"].as_str().unwrap();
+    assert!(r["licence"].get("lapse_policy").is_none(), "{r}");
+    let file = f.download(&f.owner, new).await.text().await.unwrap();
+    assert!(file_body(&file).get("lapse_policy").is_none(), "{file}");
+    assert_eq!(
+        install(&file, &key, &f.root).body.lapse_policy,
+        LapsePolicy::Evaluation
+    );
     let superseded = f.hub.audited("licence.superseded").await;
     assert_eq!(superseded.len(), 1);
     assert_eq!(superseded[0].1, format!("licence:{old}"));
     assert_eq!(superseded[0].2["reason"], "renewed");
+    let issued = f.hub.audited("licence.issued").await;
+    assert!(issued[1].2.get("lapse_policy").is_none(), "{:?}", issued[1]);
 }
 
 #[tokio::test]
-async fn released_revoked_and_not_current_stations_are_not_flagged() {
+async fn released_revoked_and_not_current_stations_are_not_reissued_under_a_stored_stop() {
     let f = fixture().await;
     let admin = bootstrap_admin(&f.hub).await;
     // Released.
@@ -1718,7 +1592,7 @@ async fn released_revoked_and_not_current_stations_are_not_flagged() {
     .await
     .unwrap();
 
-    f.set_policy("stop").await;
+    f.store_policy("stop").await;
     let before = f.counts().await;
     for (station, refusal) in [
         (&released, MSG_ALREADY_RELEASED),
@@ -1726,39 +1600,12 @@ async fn released_revoked_and_not_current_stations_are_not_flagged() {
         (&refunded, MSG_ENTITLEMENT_NOT_CURRENT),
     ] {
         let s = f.station(&f.owner, station).await;
-        assert_eq!(s["lapse_policy_update_available"], false, "{s}");
+        assert!(s.get("lapse_policy_update_available").is_none(), "{s}");
         assert_eq!(s["renewal_available"], false, "{s}");
         let resp = f.reissue(&f.owner, station).await;
         assert_error(resp, StatusCode::CONFLICT, refusal).await;
     }
     assert_eq!(f.counts().await, before);
-}
-
-#[tokio::test]
-async fn concurrent_reissues_after_a_policy_change_issue_one_licence() {
-    let f = fixture().await;
-    let v = f.register_machine(&new_key()).await;
-    let station = v["station"]["id"].as_str().unwrap();
-    f.set_policy("stop").await;
-    let calls = (0..8).map(|_| f.reissue(&f.owner, station)).collect();
-    let mut created = 0;
-    for resp in futures_join_all(calls).await {
-        match resp.status() {
-            StatusCode::CREATED => created += 1,
-            _ => assert_error(resp, StatusCode::CONFLICT, MSG_LICENCE_UP_TO_DATE).await,
-        }
-    }
-    assert_eq!(created, 1);
-    assert_eq!(f.hub.count("licences").await, 2);
-    let active: Vec<String> = sqlx::query_scalar(
-        "SELECT document FROM licences WHERE station_id = $1::uuid AND status = 'active'",
-    )
-    .bind(station)
-    .fetch_all(&f.hub.db.pool)
-    .await
-    .unwrap();
-    assert_eq!(active.len(), 1);
-    assert_eq!(file_body(&active[0])["lapse_policy"], "stop");
 }
 
 /// A free trial's entitlement registers a station like any other, and its

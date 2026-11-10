@@ -31,7 +31,6 @@ const user: AdminUser = { ...member, organization: { id: org.id, name: org.name 
 const detail: AdminOrganizationDetail = {
   organization: { id: org.id, name: org.name, created_at: org.created_at },
   users: [member],
-  lapse_policy: "evaluation",
 };
 
 interface Call {
@@ -115,14 +114,12 @@ describe("admin organization view", () => {
     ]);
   });
 
-  it("carries the organization's lapse policy, and rejects an unknown one", async () => {
-    const stop = { ...detail, lapse_policy: "stop" };
-    expect(await fetchOrganization(org.id, respond(200, stop).impl)).toEqual(stop);
-    for (const bad of [{ ...detail, lapse_policy: "sometimes" }, { ...detail, lapse_policy: undefined }]) {
-      await expect(fetchOrganization(org.id, respond(200, bad).impl)).rejects.toThrow(
-        "unexpected body",
-      );
-    }
+  it("needs no lapse policy on the organization (retired, ADR-0013 §5)", async () => {
+    expect("lapse_policy" in detail).toBe(false);
+    expect(await fetchOrganization(org.id, respond(200, detail).impl)).toEqual(detail);
+    // A hub not yet redeployed may still send it: still accepted.
+    const old = { ...detail, lapse_policy: "stop" };
+    expect(await fetchOrganization(org.id, respond(200, old).impl)).toEqual(old);
   });
 
   it("an unknown organization is a 404 HubError", async () => {

@@ -275,17 +275,20 @@ export const capabilities: readonly CapabilityDef[] = [
     guardedPhrases: [/\bITAM\b/, /\bServiceNow\b/i, /\bJira\b/i, /\bservice[- ]desk integration\b/i],
   },
   {
-    id: "licence-never-blocks-erasure",
-    label: "Licensing never blocks erasure",
-    status: "in-development",
+    // CAP-2 (ADR-0013 §1): replaces the retired "licensing never blocks erasure"
+    // claim. Planned until the station's start check ships (licence-visibility story 5).
+    id: "licence-decides-at-start",
+    label: "Licensing decides at the start, never mid-erasure",
+    status: "planned",
     summary:
-      "Designed so an unlicensed, expired, revoked or clock-rolled-back station still runs every erasure; only the certificate's marking changes, to evaluation. A licence server having a bad day cannot stop a wipe.",
+      "A station checks its licence before each job starts. A job that started covered is always certified, however long it runs, and a station with a valid licence never needs a network connection to keep working.",
     guardedPhrases: [
-      new RegExp(
-        `\\b(never|not|cannot|(ca|do|does|wo|did)n['’]t) (block|stop|gate)(s|ed|ing)?\\b${GAP(30)}\\b(erasures?|wipes?|wiping)\\b`,
-        "i",
-      ),
-      /\bstill runs every erasure\b/i,
+      /\bdecides at the start\b/i,
+      /\bnever mid-erasure\b/i,
+      /\bchecks its licen[cs]e before each job\b/i,
+      /\bstarted covered is always certified\b/i,
+      // Its body says "certified"; guarding the shared word lets this item own it.
+      CERTIFICATION,
     ],
   },
   {

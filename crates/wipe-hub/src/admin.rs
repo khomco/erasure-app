@@ -176,10 +176,6 @@ pub struct AdminMember {
 pub struct AdminOrganizationDetail {
     pub organization: AdminOrganizationRecord,
     pub users: Vec<AdminMember>,
-    /// `evaluation` or `stop`: what the organization's stations do when a
-    /// licence lapses (ADR-0012). Read-only here: only the customer's owner
-    /// changes it.
-    pub lapse_policy: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -343,14 +339,14 @@ pub async fn organization_detail(
     admin: &VendorAdmin,
     organization_id: Uuid,
 ) -> Result<Option<AdminOrganizationDetail>, AdminReadError> {
-    let org: Option<(Uuid, String, String, String)> = sqlx::query_as(&format!(
-        "SELECT id, name, to_char(created_at AT TIME ZONE 'UTC', {RFC3339_UTC}), lapse_policy \
+    let org: Option<(Uuid, String, String)> = sqlx::query_as(&format!(
+        "SELECT id, name, to_char(created_at AT TIME ZONE 'UTC', {RFC3339_UTC}) \
          FROM organizations WHERE id = $1 AND NOT is_vendor"
     ))
     .bind(organization_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((id, name, created_at, lapse_policy)) = org else {
+    let Some((id, name, created_at)) = org else {
         return Ok(None);
     };
     let rows: Vec<(Uuid, String, String, String, bool, String)> = sqlx::query_as(&format!(
@@ -391,7 +387,6 @@ pub async fn organization_detail(
             created_at,
         },
         users,
-        lapse_policy,
     }))
 }
 

@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { HubError, resetCsrfCache } from "./auth";
 import {
-  fetchLapsePolicy,
   fetchStations,
   fetchVendorRoot,
   isInstanceKeyId,
@@ -13,7 +12,6 @@ import {
   registerStation,
   reissueStation,
   releaseStation,
-  setLapsePolicy,
   type Licence,
   type Station,
 } from "./stations";
@@ -31,7 +29,6 @@ const licence: Licence = {
   status: "active",
   superseded_at: null,
   revoked_at: null,
-  lapse_policy: "evaluation",
 };
 
 const station: Station = {
@@ -47,7 +44,6 @@ const station: Station = {
   released_at: null,
   licence,
   renewal_available: false,
-  lapse_policy_update_available: false,
 };
 
 interface Call {
@@ -104,8 +100,12 @@ describe("guards", () => {
     ).toBe(true);
     expect(isStation(station)).toBe(true);
     expect(isStation({ ...station, renewal_available: true })).toBe(true);
-    expect(isStation({ ...station, lapse_policy_update_available: true })).toBe(true);
+    // The retired lapse-policy fields are no longer required (ADR-0013 §5).
+    expect("lapse_policy" in licence).toBe(false);
+    expect("lapse_policy_update_available" in station).toBe(false);
+    // A hub not yet redeployed may still send them: still accepted.
     expect(isLicence({ ...licence, lapse_policy: "stop" })).toBe(true);
+    expect(isStation({ ...station, lapse_policy_update_available: true })).toBe(true);
     expect(isStation({ ...station, licence: null, scope: "site", station_id: null })).toBe(true);
     expect(isVendorRootKey({ public_key_id: KEY, public_key_b64: "abc" })).toBe(true);
   });
@@ -120,9 +120,6 @@ describe("guards", () => {
     expect(isStation({ ...station, label: 3 })).toBe(false);
     expect(isStation({ ...station, renewal_available: undefined })).toBe(false);
     expect(isStation({ ...station, renewal_available: "true" })).toBe(false);
-    expect(isStation({ ...station, lapse_policy_update_available: undefined })).toBe(false);
-    expect(isLicence({ ...licence, lapse_policy: "sometimes" })).toBe(false);
-    expect(isLicence({ ...licence, lapse_policy: undefined })).toBe(false);
     expect(isVendorRootKey({ public_key_id: KEY })).toBe(false);
   });
 
@@ -210,9 +207,7 @@ describe("calls", () => {
   });
 
   it("surfaces a refused reissue", async () => {
-    const message =
-      "this station's licence already runs to the end of its entitlement's term and carries " +
-      "your organization's lapse policy";
+    const message = "this station's licence already runs to the end of its entitlement's term";
     const e = await rejection(reissueStation(station.id, respond(409, { error: message }).impl));
     expect(e).toBeInstanceOf(HubError);
     expect((e as HubError).status).toBe(409);
@@ -226,38 +221,6 @@ describe("calls", () => {
     await expect(fetchVendorRoot(respond(200, { root: "x" }).impl)).rejects.toThrow(
       "vendor root returned an unexpected body",
     );
-  });
-
-  it("reads the lapse policy with a GET", async () => {
-    const f = respond(200, { lapse_policy: "stop" });
-    expect(await fetchLapsePolicy(f.impl)).toBe("stop");
-    expect(f.calls).toEqual([
-      { url: "/api/organization/lapse-policy", method: "GET", body: undefined, csrf: null },
-    ]);
-    await expect(
-      fetchLapsePolicy(respond(200, { lapse_policy: "sometimes" }).impl),
-    ).rejects.toThrow("lapse policy returned an unexpected body");
-  });
-
-  it("sets the lapse policy with a POST and CSRF", async () => {
-    const f = respond(200, { lapse_policy: "stop" });
-    expect(await setLapsePolicy("stop", f.impl)).toBe("stop");
-    expect(f.calls).toEqual([
-      {
-        url: "/api/organization/lapse-policy",
-        method: "POST",
-        body: { lapse_policy: "stop" },
-        csrf: "csrf-1",
-      },
-    ]);
-  });
-
-  it("surfaces a member's refused policy change", async () => {
-    const message = "only an organization owner can change what stations do when a licence lapses";
-    const e = await rejection(setLapsePolicy("stop", respond(403, { error: message }).impl));
-    expect(e).toBeInstanceOf(HubError);
-    expect((e as HubError).status).toBe(403);
-    expect((e as HubError).message).toBe(message);
   });
 
   it("downloads from the licence's path", () => {

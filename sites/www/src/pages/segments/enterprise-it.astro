@@ -52,11 +52,12 @@ import { body, grid, h1, h2, h3, item, prose, secondaryLink, section } from "../
           without contacting the vendor.
         </p>
       </Capability>
-      <Capability id="licence-never-blocks-erasure" as="li" badge="start" class={item}>
-        <h3 class={h3}>A licence problem never stops a refresh</h3>
+      <Capability id="licence-decides-at-start" as="li" badge="start" class={item}>
+        <h3 class={h3}>Licensing decides at the start, never mid-erasure.</h3>
         <p class={body}>
-          Licensing never blocks erasure: designed so an expired station still runs every erasure
-          and marks the certificate as evaluation.
+          A station checks its licence before each job starts. A job that started covered is always
+          certified, however long it runs, and a station with a valid licence never needs a network
+          connection to keep working.
         </p>
       </Capability>
       <Capability id="fleet-coordination" as="li" badge="start" class={item}>

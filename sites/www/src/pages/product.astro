@@ -156,11 +156,12 @@ import { body, grid, h1, h2, h3, item, link, notice, prose, secondaryLink, secti
           failures, aborts and re-runs are free.
         </p>
       </Capability>
-      <Capability id="licence-never-blocks-erasure" as="li" badge="start" class={item}>
-        <h3 class={h3}>Licensing never blocks erasure</h3>
+      <Capability id="licence-decides-at-start" as="li" badge="start" class={item}>
+        <h3 class={h3}>Licensing decides at the start, never mid-erasure.</h3>
         <p class={body}>
-          Designed so an unlicensed, expired or revoked station still runs every erasure; only
-          the certificate's marking changes, to evaluation.
+          A station checks its licence before each job starts. A job that started covered is always
+          certified, however long it runs, and a station with a valid licence never needs a network
+          connection to keep working.
         </p>
       </Capability>
     </ul>

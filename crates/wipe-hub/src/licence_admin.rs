@@ -249,8 +249,6 @@ pub struct AdminLicence {
     pub issue_reason: Option<String>,
     /// Vendor-internal: never shown to the customer.
     pub revocation_reason: Option<String>,
-    /// `evaluation` or `stop`: the lapse policy signed into the file.
-    pub lapse_policy: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -272,7 +270,6 @@ struct Row {
     revoked_at: Option<String>,
     issue_reason: Option<String>,
     revocation_reason: Option<String>,
-    lapse_policy: String,
 }
 
 impl From<Row> for AdminLicence {
@@ -299,7 +296,6 @@ impl From<Row> for AdminLicence {
             revoked_at: r.revoked_at,
             issue_reason: r.issue_reason,
             revocation_reason: r.revocation_reason,
-            lapse_policy: r.lapse_policy,
         }
     }
 }
@@ -316,11 +312,10 @@ fn select_licences() -> String {
                 l.status, \
                 to_char(l.superseded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS superseded_at, \
                 to_char(l.revoked_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS revoked_at, \
-                l.issue_reason, l.revocation_reason, {} AS lapse_policy \
+                l.issue_reason, l.revocation_reason \
          FROM licences l \
          JOIN organizations o ON o.id = l.organization_id \
-         LEFT JOIN stations s ON s.id = l.station_id",
-        crate::stations::licence_lapse_policy("l")
+         LEFT JOIN stations s ON s.id = l.station_id"
     )
 }
 

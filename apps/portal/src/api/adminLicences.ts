@@ -10,12 +10,15 @@
 
 import { ensureOk, isObject, isOrganization, json, request, type Fetch, type Organization } from "./auth";
 import { FEATURES, SCOPES, type Feature, type Scope } from "./adminOfferings";
-import {
-  LAPSE_POLICIES,
-  LICENCE_STATUSES,
-  type LapsePolicy,
-  type LicenceStatus,
-} from "./stations";
+import { LICENCE_STATUSES, type LicenceStatus } from "./stations";
+
+/**
+ * `wipe_license::LapsePolicy`: a signed field ADR-0012 added and ADR-0013 §5
+ * retired. Older files may still carry it, so a decoded body accepts it; the
+ * portal never displays it.
+ */
+export const LAPSE_POLICIES = ["evaluation", "stop"] as const;
+export type LapsePolicy = (typeof LAPSE_POLICIES)[number];
 
 /** Where a licence came from: a registered station, or a vendor admin. */
 export const LICENCE_SOURCES = ["station", "vendor"] as const;
@@ -60,8 +63,6 @@ export interface AdminLicence {
   issue_reason: string | null;
   /** Vendor-internal: never shown to the customer. */
   revocation_reason: string | null;
-  /** The lapse policy signed into the file (ADR-0012). */
-  lapse_policy: LapsePolicy;
 }
 
 /** `wipe_license::Quota`. */
@@ -87,7 +88,7 @@ export interface LicenseBody {
     machine_binding?: string;
   };
   issued_at: string;
-  /** Absent means `evaluation`: the field is omitted from such files. */
+  /** Retired (ADR-0013 §5): parsed if present, never displayed. */
   lapse_policy?: LapsePolicy;
 }
 
@@ -158,8 +159,7 @@ export function isAdminLicence(v: unknown): v is AdminLicence {
     isNullableString(v.superseded_at) &&
     isNullableString(v.revoked_at) &&
     isNullableString(v.issue_reason) &&
-    isNullableString(v.revocation_reason) &&
-    oneOf(LAPSE_POLICIES, v.lapse_policy)
+    isNullableString(v.revocation_reason)
   );
 }
 

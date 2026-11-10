@@ -1,6 +1,8 @@
 // Renders real pages with the Astro container and runs the build-time site
 // check over them, so a bare overclaim in page copy fails `pnpm test` as well
 // as `astro build`.
+import { readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { experimental_AstroContainer as AstroContainer } from "astro/container";
 import { parse, type HTMLElement } from "node-html-parser";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -551,5 +553,55 @@ describe("landing page", () => {
     const hero = root.querySelector('section[aria-labelledby="hero-title"]')!;
     expect(hero.text).toMatch(/pre-launch/i);
     expect(hero.text).toMatch(/every pre-release build runs against\s+simulated drives/i);
+  });
+});
+
+/** Claims ADR-0013 retired: licensing now decides whether a job may start. */
+/** `capabilities.ts`'s `GAP(30)`: up to 30 characters, stopping only at a sentence-ending period. */
+const GAP30 = "(?:[^.]|\\.(?=\\S)){0,30}";
+const RETIRED_LICENSING_CLAIMS = [
+  new RegExp(
+    `\\b(never|not|cannot|(ca|do|does|wo|did)n['’]t) (block|stop|gate)(s|ed|ing)?\\b${GAP30}\\b(erasures?|wipes?|wiping|refresh(es)?)\\b`,
+    "i",
+  ),
+  /\bstill runs every erasure\b/i,
+  /\bA licen[cs]e problem never stops\b/i,
+  /\bmarking changes,? to evaluation\b/i,
+  /\bmarks the certificates? as evaluation\b/i,
+];
+
+describe("licensing decides at the start (CAP-2, ADR-0013)", () => {
+  it("covers every page under src/pages", () => {
+    const dir = fileURLToPath(new URL("../src/pages/", import.meta.url));
+    const routes = readdirSync(dir, { recursive: true, encoding: "utf8" })
+      .filter((f) => f.endsWith(".astro") && !f.includes("["))
+      .map((f) => "/" + f.replace(/\\/g, "/").replace(/\.astro$/, "/").replace(/(^|\/)index\/$/, "$1"))
+      .sort();
+    expect(routes).toEqual(pages.map(([path]) => path).sort());
+  });
+
+  it.each(pages)("no retired never-blocks claim on %s", async (path, page) => {
+    const text = parse(await render(page, path)).text.replace(/\s+/g, " ");
+    for (const claim of RETIRED_LICENSING_CLAIMS) expect(text, `${path} ${claim}`).not.toMatch(claim);
+  });
+
+  it.each([
+    ["/product/", Product],
+    ["/pricing/", Pricing],
+    ["/segments/enterprise-it/", SegmentEnterpriseIt],
+  ] as [string, Page][])("states the start rule with a Planned badge on %s", async (path, page) => {
+    const root = parse(await render(page, path));
+    const el = root.querySelector('[data-capability="licence-decides-at-start"]');
+    expect(el, path).not.toBeNull();
+    expect(el!.getAttribute("data-status")).toBe("planned");
+    expect(el!.querySelector('[data-status-badge="planned"]')?.text.trim()).toBe("Planned");
+    expect(el!.querySelector("h3")?.text.trim()).toBe(
+      "Licensing decides at the start, never mid-erasure.",
+    );
+    expect(el!.querySelector("p")?.text.replace(/\s+/g, " ").trim()).toBe(
+      "A station checks its licence before each job starts. A job that started covered is always " +
+        "certified, however long it runs, and a station with a valid licence never needs a network " +
+        "connection to keep working.",
+    );
   });
 });
