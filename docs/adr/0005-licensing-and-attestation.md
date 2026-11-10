@@ -1,6 +1,8 @@
 # Licensing by attestation: a signature chain to a vendor root, not a metering server
 
-**Status:** accepted (2026-08-06)
+**Status:** accepted (2026-08-06). §4 and §5 amended on 2026-11-09 by
+[ADR-0013](0013-licensing-controls-every-erasure.md): a licence that does not cover an erasure
+now refuses it at the start, evaluation is a trial licence, and quotas are an organization pool.
 
 Extends the Ed25519 certificate model in `wipe-cert` and reuses the
 control-plane client seam from [ADR-0003](0003-station-config-persistence.md).

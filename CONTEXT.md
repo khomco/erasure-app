@@ -934,11 +934,14 @@ station verifies its own entitlements offline and marks certificates
 enforces, and where offline enforcement is honestly impossible are
 specified in [ROADMAP](docs/ROADMAP.md) §4.
 
-One constraint overrides every commercial consideration here: **an
-unlicensed, expired, revoked or clock-rolled-back station still erases
-drives.** What changes is the certificate marking, never the ability to
-sanitize. A licence server having a bad day must not be able to stop a
-drive being wiped.
+Since 2026-11-09 ([ADR-0013](docs/adr/0013-licensing-controls-every-erasure.md)) licensing
+controls every erasure: the station checks its licence when a Job **starts** and refuses a
+start the licence does not cover, with a clear reason. An erasure that started covered is
+always certified as licensed, a running Job is never interrupted, and an unreachable hub is
+never a reason to refuse. Evaluation is a free trial licence, and erasure quotas are an
+organization pool held on each station as a reserve of signed credit grants. *Until
+`licence-visibility` story 5 and `controlled-licensing` ship, stations still behave as ADR-0005
+§5 describes: they erase and mark certificates `evaluation`.*
 
 ## 10. What has shipped
 

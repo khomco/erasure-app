@@ -1,6 +1,6 @@
 ---
 id: SPEC-licence-visibility
-companions: [../audit-2026-11-05/shipped-claims.md, ../../docs/adr/0005-licensing-and-attestation.md, ../../docs/adr/0012-opt-in-hard-stop-on-licence-lapse.md]
+companions: [../audit-2026-11-05/shipped-claims.md, ../../docs/adr/0005-licensing-and-attestation.md, ../../docs/adr/0013-licensing-controls-every-erasure.md]
 sources: []
 ---
 
@@ -27,19 +27,20 @@ A pain to solve (ROADMAP L1.4, L1.5, O3.5, O-R9). Licensing marks certificates `
   - **intent:** An operator can install a licence file without restarting.
   - **success:** `POST /api/license` validates with the existing install checks and hot-swaps via `with_license`; a bad file is rejected with the reason and leaves the old state.
 - **CAP-5**
-  - **intent:** A station whose licence carries the customer's `stop` lapse policy refuses to start new jobs once that licence has lapsed (ADR-0012).
+  - **intent:** A station decides at the start of each Job whether its licence covers it, refuses a start it does not cover with a clear reason, and certifies every covered Job as licensed however long it runs (ADR-0013 §1, §2; replaces the ADR-0012 opt-in).
   - **success:**
-    - Starting a job (the `JobRunner` path behind `start_job`) refuses, with an error naming the expiry or revocation and how to install a licence offline, when the installed licence's `lapse_policy` is `stop` and its status is expired, revoked or clock-rolled-back.
-    - A job already running when the licence lapses runs to completion and is certified as the licence state at signing dictates.
-    - An unreachable hub or licence server never causes a refusal.
-    - Enumeration, certificate viewing and verification, and licence install (CAP-4) all keep working.
-    - Installing a valid licence lifts the refusal without a restart.
-    - Under `evaluation`, or with no field, behaviour is unchanged.
-    - Integration tests cover each of these cases.
+    - Starting a Job (the `JobRunner` path behind `start_job`) and recording drives for destruction (device or scanned) go through one start gate. The rule lives in Rust alone, in `LicenseContext`.
+    - The gate refuses, on a real device backend, when: there is no licence; the licence has expired or is not yet valid; it belongs to another machine; the clock moved back before the watermark; the profile's method is outside `allowed_methods`; or the licence counts credits and none is left, or the reservation cannot be saved. The refusal (409) names the reason and the fix, the Job stays `Queued`, and nothing is broadcast.
+    - The simulated backend (`wipe-engine-mock`) is never refused; its certificates stay `evaluation` when there is no licence.
+    - A start that is allowed records its decision on the Job (the licence chain, and one reserved credit per drive on a licence that counts credits, saved before the Job leaves `Queued`). The certificate uses that recorded decision, not the licence state at signing: a Job started before expiry is certified as licensed after it.
+    - A reserved credit is spent when the certificate is signed and returned when the Job fails or is aborted. This uses the licence's own `Count` quota; the organization pool and credit grants are `controlled-licensing`.
+    - A running Job is never interrupted. An unreachable hub never refuses. Installing a valid licence (CAP-4) lifts a refusal without a restart. The licence's `lapse_policy` field is ignored.
+    - `GET /api/license` reports the refusal text (`new_jobs_refused`), and the CAP-3 banner shows it on every page. CAP-3's expiry warnings, and its banner for an expired or exhausted licence, say that new jobs will be (or are) refused, not that certificates are marked evaluation.
+    - Integration tests cover each refusal reason, the mock exemption, a Job spanning expiry, credit reserve, spend and return, and install lifting a refusal.
 
 ## Constraints
 
-- Nothing here may gate, delay or warn-block an erasure (ROADMAP §0.2); banners inform only. The one exception is CAP-5's refusal to start new jobs under the customer's opt-in `stop` policy (ADR-0012). It has no override, it never interrupts a running job, and it never triggers on connectivity.
+- Only CAP-5's start gate may refuse an erasure (ROADMAP §0.2 as reversed by ADR-0013): at the start only, never mid-run, never because of connectivity, with no override. Banners inform only.
 - Licence hot-swap writes through the shared cell (see `AppState::with_license` comment).
 - Rust serde shapes and TS mirrors change in the same commit.
 

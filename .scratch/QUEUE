@@ -21,6 +21,7 @@ destruction-attestation
 licensing-as-built
 licence-visibility
 station-enrollment
+controlled-licensing
 
 # 4. Station usability.
 desktop-parity

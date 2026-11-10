@@ -1,0 +1,31 @@
+- id: "1"
+  title: Free trial offerings
+  description: >-
+    CAP-1 (ADR-0013 §2). Zero-price trial offerings taken once per
+    organization without checkout.
+- id: "2"
+  title: Retire the lapse-policy setting and the never-blocks claims
+  description: >-
+    CAP-2 (ADR-0013 §5). Portal setting and routes removed; site, README and
+    CONTEXT copy replaced. The owner approves the finished story.
+  done_checkpoint: true
+- id: "3"
+  title: Organization credit pool and signed credit grants
+  description: >-
+    CAP-3 (ADR-0013 §3). Grant type in wipe-license, pool accounting,
+    grants in licence files, release returns.
+- id: "4"
+  title: Station credit reserve and automatic top-up
+  description: >-
+    CAP-4. Needs licence-visibility story 5 and station-enrollment story 3.
+- id: "5"
+  title: Renewals charged 30 days early
+  description: >-
+    CAP-5 (ADR-0013 §4). Stripe timing, next-term licences, late payment,
+    new checkout wording.
+  spec_checkpoint: true
+- id: "6"
+  title: Station holds and switches to its next-term licence
+  description: >-
+    CAP-6. Next licence stored alongside the current one; switch at start
+    with no gap.

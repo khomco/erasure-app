@@ -1,6 +1,6 @@
 ---
 id: SPEC-station-enrollment
-companions: [../../docs/adr/0008-station-enrollment-and-licence-fetch.md, ../../docs/adr/0005-licensing-and-attestation.md, ../../docs/adr/0007-hub-accounts-payments-persistence.md, ../../docs/adr/0012-opt-in-hard-stop-on-licence-lapse.md]
+companions: [../../docs/adr/0008-station-enrollment-and-licence-fetch.md, ../../docs/adr/0005-licensing-and-attestation.md, ../../docs/adr/0007-hub-accounts-payments-persistence.md, ../../docs/adr/0013-licensing-controls-every-erasure.md]
 sources: []
 ---
 
@@ -10,7 +10,7 @@ sources: []
 
 ## Why
 
-Owner request, 2026-11-08 (ADR-0008). Some customers allow the bench one outbound HTTPS rule to the platform and nothing else. Today registering a station means typing its key id into the portal, downloading a licence file, copying it to the bench and restarting. Registering from the bench removes the copy step. Nobody may register a station with a tenant anonymously: an owner of that organization, signed in to the portal, approves every enrollment. A connected station then collects its renewed licences itself (D15 renewals, ADR-0012 lapse-policy updates).
+Owner request, 2026-11-08 (ADR-0008). Some customers allow the bench one outbound HTTPS rule to the platform and nothing else. Today registering a station means typing its key id into the portal, downloading a licence file, copying it to the bench and restarting. Registering from the bench removes the copy step. Nobody may register a station with a tenant anonymously: an owner of that organization, signed in to the portal, approves every enrollment. A connected station then collects its renewed licences itself (D15 renewals, charged and delivered 30 days early under ADR-0013 §4).
 
 ## Capabilities
 
@@ -50,8 +50,8 @@ Owner request, 2026-11-08 (ADR-0008). Some customers allow the bench one outboun
   - **intent:** A connected station collects its renewed or policy-updated licence by itself.
   - **success:**
     - `GET /api/station/challenge` issues a single-use challenge (expires in 60 s); `POST /api/station/licence`, signed over it, returns the station's latest licence, or 204 when the station's copy is current.
-    - When the station's `renewal_available` or `lapse_policy_update_available` is true, the hub reissues through `stations::reissue` (audited with the station as actor) and returns the new licence. A released station gets 404; a revoked latest licence returns nothing new.
-    - A station with a hub address checks at start and every 24 hours, verifies against its trusted root and installs. A failure is logged and shown in the licence status, and never blocks or delays a job, nor triggers the `stop` refusal.
+    - When the station's `renewal_available` is true, the hub reissues through `stations::reissue` (audited with the station as actor) and returns the new licence. Once `controlled-licensing` issues next-term licences early (ADR-0013 §4), the response also carries the station's next-term licence, which the station holds until it starts. A released station gets 404; a revoked latest licence returns nothing new.
+    - A station with a hub address checks at start and every 24 hours, verifies against its trusted root and installs. A failure is logged and shown in the licence status, and never blocks or delays a job: an unreachable hub is never a reason to refuse (ADR-0013 §1).
     - Tests cover renewal, policy change, current, released, revoked, a replayed challenge and an unreachable hub.
   - **checkpoint:** an automatic reissue spends no seat but issues a licence without an owner's click; confirm the audit trail reads correctly in the portal before building.
 
@@ -60,7 +60,7 @@ Owner request, 2026-11-08 (ADR-0008). Some customers allow the bench one outboun
 - No anonymous registration: only an owner of the organization approves (ADR-0008 §1).
 - No portal credential is ever entered on, stored on or sent from a station.
 - The station trusts only its configured vendor root; the hub cannot introduce one.
-- Nothing here gates, delays or interrupts an erasure, and an unreachable hub never triggers the `stop` lapse policy (ROADMAP §0.2, ADR-0012 §5).
+- Nothing here gates, delays or interrupts an erasure, and an unreachable hub is never a reason to refuse a start (ROADMAP §0.2, ADR-0013 §1).
 - The file-based registration and install paths keep working unchanged.
 - Every hub change is audited (ADR-0007 §6). Rust serde shapes and TS mirrors change in the same commit.
 

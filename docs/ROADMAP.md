@@ -49,30 +49,21 @@ attack — see CONTEXT §1 ("the gap between *supports NVMe* and *honestly invok
 Sanitize*"). W1 therefore ships positioning and documentation with an explicit
 capability status; the claims that require hardware are gated behind W3.4.
 
-### 0.2 Never block a wipe on licensing
+### 0.2 Licensing decides at the start, never mid-erasure
 
-ADR-0005's stance, restated because three surfaces below could quietly erode
-it. An unlicensed, expired, quota-exhausted, revoked or clock-rolled-back
-station **still erases drives**; what changes is that the certificate is marked
-`evaluation` and the operator is told why. Erasure is a safety-adjacent
-operation on someone else's schedule — a licence server having a bad day must
-never be able to stop a drive from being sanitized.
+**Reversed 2026-11-09 by [ADR-0013](adr/0013-licensing-controls-every-erasure.md).** The
+earlier rule ("never block a wipe on licensing": an unlicensed or lapsed station still erases and
+only marks certificates `evaluation`) and its opt-in exception (ADR-0012) are replaced. The
+invariants now are:
+- a station checks its licence when a Job (or a destruction record) **starts**, and refuses a
+  start the licence does not cover, with a message naming the reason and the fix;
+- that decision is final: an erasure that started covered is certified as licensed however long
+  it runs, and a running Job is never interrupted;
+- an unreachable hub or licence server is **never** a reason to refuse: a station with a valid
+  licence (and credits, where they apply) works offline forever;
+- there is no override.
 
-Anything in **L** or **A** that would gate erasure is out of scope by default
-and needs an explicit decision to enter scope.
-
-**One decided exception — the customer's choice, never the vendor's
-([ADR-0012](adr/0012-opt-in-hard-stop-on-licence-lapse.md)):** an
-organization may opt in to a `stop` lapse policy. The policy is carried inside
-its signed licence, and its stations then refuse to *start* new jobs once that
-licence has expired, been revoked or had its clock rolled back. Even then:
-- a job already running always finishes;
-- an unreachable hub or licence server never triggers it;
-- without the opt-in, everything above holds unchanged.
-
-The hub only writes the policy into the licences it signs (licence-delivery
-story 4, shipped 2026-11-08); nothing in the hub enforces it or can stop a
-station erasing. Station enforcement is `licence-visibility` story 5.
+Anything else in **L** or **A** that would gate erasure still needs an explicit decision.
 
 ### 0.3 The archive is an index, never an authority
 
@@ -516,12 +507,11 @@ it: three tiers a customer can buy, activate, renew and outgrow.
 
 ### 4.2 Requirements
 
-- **L-R1 Evaluation is not crippled.** Decide and publish exactly what free
-  means. Stance (ratified by ADR-0012, 2026-11-08): unlimited erasures, unlimited time, no fleet/hub
-  features, certificates permanently and visibly `evaluation`. Rationale: §0.2
-  says we never block a wipe, and a time-bombed evaluation contradicts the
-  posture the product is sold on. The certificate marking is the entire
-  business model — it is what a customer's auditor will not accept.
+- **L-R1 Evaluation is a trial licence.** *Decided 2026-11-09 by ADR-0013, replacing
+  the earlier "unlimited, uncrippled evaluation" stance:* a station with no licence
+  erases nothing on a real backend. Evaluation is a free trial offering (25
+  credits at launch, once per organization), or a vendor-issued trial file for
+  air-gapped prospects. The simulated backend stays ungated for demos and tests.
 - **L-R2 Per-machine works end to end**: purchase → issue (A1) → deliver →
   install → visible licensed state (O-R9) → licensed certificates → renewal.
   Every step exists in pieces; none of them are joined.
@@ -532,18 +522,13 @@ it: three tiers a customer can buy, activate, renew and outgrow.
   or enter an activation code that fetches it (A2). Must work with no network,
   by file, forever. The code path is ADR-0008: the bench shows a code and an
   owner approves it in the portal (`station-enrollment`).
-- **L-R5 Expiry and renewal.** Warn at 30, 7 and 1 days. At expiry, the station keeps
-  erasing and drops to `evaluation` certificates, with an unmissable banner.
-  The exception is a licence carrying the customer's opt-in `stop` lapse policy
-  (ADR-0012). Its station then refuses to start new jobs, but never interrupts a
-  running one. Since 2026-11-08 the hub signs the policy into every licence it
-  issues (licence-delivery story 4); stations enforce it from `licence-visibility`
-  story 5.
-  Annual offerings renew automatically as Stripe subscriptions (D15). Since
-  2026-11-08 an owner issues each renewed station a renewed licence file from
-  the portal and installs it by hand (licence-delivery story 2). A connected
-  station fetches its renewed licence by itself under ADR-0008
-  (`station-enrollment` story 5).
+- **L-R5 Expiry and renewal.** Warn at 30, 7 and 1 days. A start after expiry is
+  refused; a Job started before expiry is certified as licensed (ADR-0013 §1).
+  Annual offerings renew as Stripe subscriptions (D15), charged 30 days before the
+  term ends; the next-term licence is issued at once and connected stations
+  collect it (ADR-0013 §4, ADR-0008, `controlled-licensing`). Since 2026-11-08 an
+  owner can also reissue a renewed station's licence from the portal and install
+  it by hand (licence-delivery story 2).
 - **L-R6 Revocation** with its honest limit stated in the docs (A2.3).
 - **L-R7 Upgrade paths**: machine → site, adding features mid-term, replacing a
   dead station's licence without a support call being the only route.
@@ -590,7 +575,7 @@ distribution and expiry behaviour).
 ### 4.4 Phases
 
 **L1 — Evaluation and per-machine, joined up**
-- ~~L1.1 Decide and document the evaluation stance (L-R1).~~ Decided by ADR-0012 (2026-11-08).
+- ~~L1.1 Decide and document the evaluation stance (L-R1).~~ Decided by ADR-0012 (2026-11-08), replaced by ADR-0013 (2026-11-09).
 - L1.2 Entitlement matrix generator + CI coverage test (L-R8).
   *Partial 2026-11-09: feature catalog golden + coverage test shipped (drift-tests
   story 3); the tier → feature matrix waits on pricing.*

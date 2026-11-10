@@ -80,8 +80,8 @@ as normal. A stolen licence file is useless without the key, as before.
 ### 3. A connected station fetches its own renewals
 
 A station that enrolled online, or whose operator later points it at the hub, checks for a
-newer licence when it starts and every 24 hours while running. If its entitlement has renewed,
-or the organization's lapse policy changed (ADR-0012), and the station's licence is behind, the
+newer licence when it starts and every 24 hours while running. If its entitlement has renewed and
+the station's licence is behind (renewals are charged and issued 30 days early, ADR-0013 §4), the
 hub **reissues automatically** (the same `stations::reissue` path the owner's button uses,
 audited with the station as actor) and returns the new licence. The station verifies and
 installs it. If the latest licence is revoked, the fetch returns nothing new in this slice:
@@ -90,8 +90,8 @@ telling stations about revocation is A2.3, still open.
 ### 4. Offline first is unchanged
 
 - The connection is used to register and renew, **never to erase**. A station with a valid
-  licence works with no network, forever. An unreachable hub never blocks a wipe, never raises
-  a refusal under the `stop` lapse policy (ADR-0012 §5), and shows only as a status line.
+  licence works with no network, forever. An unreachable hub is never a reason to refuse a start
+  (ADR-0013 §1) and shows only as a status line.
 - The file path stays for air-gapped sites: portal registration and `--license` (or the
   runtime install from `licence-visibility` story 4) keep working, and an air-gapped customer
   never needs this feature.

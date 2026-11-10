@@ -1,6 +1,8 @@
 # A customer may opt in to a hard stop when its licence lapses
 
-**Status:** accepted (2026-11-08)
+**Status:** superseded (2026-11-09) by [ADR-0013](0013-licensing-controls-every-erasure.md): the
+stop is no longer an opt-in. Every licence refuses new starts it does not cover, and the
+lapse-policy setting is retired. §4, §5 and §7 carry over into ADR-0013 §1. Kept for its history.
 
 **Amends [ADR-0005](0005-licensing-and-attestation.md) §5 and ROADMAP §0.2**, stated explicitly:
 "never block a wipe on licensing" stays the default but is no longer absolute. A customer may

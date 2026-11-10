@@ -17,7 +17,10 @@
     CAP-4. POST /api/license with validation and hot-swap.
   spec_checkpoint: true
 - id: "5"
-  title: Refuse new jobs on a lapsed licence under the stop policy
+  title: Decide licence coverage at the start of each Job
   description: >-
-    CAP-5 (ADR-0012). Needs licence-delivery story 4's lapse_policy field.
+    CAP-5 (ADR-0013 §1, §2). One start gate for Jobs and destruction records,
+    the decision recorded on the Job and used at signing, per-licence credit
+    reserve, mock exempt. Re-planned 2026-11-09 after ADR-0013 replaced the
+    ADR-0012 opt-in.
   spec_checkpoint: true
