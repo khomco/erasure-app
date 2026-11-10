@@ -41,7 +41,9 @@ export function hubOrigin(): string {
  * The hub whose published offerings `/pricing/` lists, from
  * `PRICING_HUB_ORIGIN` (offerings-and-payments story 5). `""` when unset: the
  * page shows no prices and the build fetches nothing. Read at build time
- * only; not `PUBLIC_`-prefixed, so it never reaches the browser.
+ * only; not `PUBLIC_`-prefixed, so no script gets it. The page names it only
+ * in a free trial's "Start free trial" link to `<origin>/buy` (the portal,
+ * controlled-licensing story 1).
  */
 export function pricingHubOrigin(): string {
   return parseHubOrigin(import.meta.env.PRICING_HUB_ORIGIN, "PRICING_HUB_ORIGIN");

@@ -1760,3 +1760,59 @@ async fn concurrent_reissues_after_a_policy_change_issue_one_licence() {
     assert_eq!(active.len(), 1);
     assert_eq!(file_body(&active[0])["lapse_policy"], "stop");
 }
+
+/// A free trial's entitlement registers a station like any other, and its
+/// licence carries the trial's erasure quota (controlled-licensing story 1).
+#[tokio::test]
+async fn a_trial_entitlement_issues_a_licence_with_the_trials_quota() {
+    let f = fixture().await;
+    let trial = f.hub.published_trial_offering("Free trial").await;
+    let taken = ok_json(
+        f.hub
+            .post(
+                "/api/trials",
+                json!({ "offering_id": trial }),
+                Some(&f.owner.cookie),
+            )
+            .await,
+        StatusCode::CREATED,
+    )
+    .await;
+    let entitlement = taken["entitlement"]["id"].as_str().unwrap().to_string();
+    let key = new_key();
+    let v = ok_json(
+        f.register(
+            &f.owner,
+            json!({
+                "entitlement_id": entitlement,
+                "instance_key_id": key,
+                "site": "Trial bench",
+            }),
+        )
+        .await,
+        StatusCode::CREATED,
+    )
+    .await;
+    let file = f
+        .download(&f.owner, v["licence"]["id"].as_str().unwrap())
+        .await
+        .text()
+        .await
+        .unwrap();
+    let cert = install(&file, &key, &f.root);
+    let ent = &cert.body.entitlements;
+    assert_eq!(ent.quota, Quota::Count { erasures: 25 });
+    assert_eq!(ent.features, [Feature::PdfCertificates]);
+    assert_eq!(ent.not_after, f.term_end(&entitlement).await);
+    // Its one seat is used.
+    assert_error(
+        f.register(
+            &f.owner,
+            json!({ "entitlement_id": entitlement, "instance_key_id": new_key() }),
+        )
+        .await,
+        StatusCode::CONFLICT,
+        MSG_NO_FREE_SEAT,
+    )
+    .await;
+}

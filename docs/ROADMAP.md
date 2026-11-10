@@ -512,6 +512,8 @@ it: three tiers a customer can buy, activate, renew and outgrow.
   erases nothing on a real backend. Evaluation is a free trial offering (25
   credits at launch, once per organization), or a vendor-issued trial file for
   air-gapped prospects. The simulated backend stays ungated for demos and tests.
+  *Trial offerings and taking one (`POST /api/trials`) shipped in
+  `controlled-licensing` story 1 (CONTEXT §10.2); the station-side refusal has not.*
 - **L-R2 Per-machine works end to end**: purchase → issue (A1) → deliver →
   install → visible licensed state (O-R9) → licensed certificates → renewal.
   Every step exists in pieces; none of them are joined.

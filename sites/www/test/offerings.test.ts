@@ -11,6 +11,7 @@ import {
   scopeLabel,
   seatsLabel,
   termLabel,
+  trialHref,
 } from "../src/lib/offerings";
 import { parseHubOrigin } from "../src/lib/lead-submit";
 
@@ -24,6 +25,7 @@ const annual = () => ({
   price_minor: 120000,
   currency: "USD",
   interval: "annual",
+  trial: false,
   grants: {
     scope: "machine",
     seats: 1,
@@ -47,6 +49,15 @@ const oneOff = () => ({
   renewal_notice: null,
 });
 
+const trial = () => ({
+  ...oneOff(),
+  id: "33333333-3333-4333-8333-333333333333",
+  name: "Free trial",
+  price_minor: 0,
+  trial: true,
+  grants: { scope: "site", seats: 1, quota_erasures: 25, features: [], term_months: 1 },
+});
+
 /** The catalog with offering 1 (a one-off) changed by `edit`. */
 function withSecond(edit: (o: Record<string, any>) => void) {
   const o: Record<string, any> = oneOff();
@@ -63,6 +74,31 @@ describe("parseCatalog", () => {
     });
     expect(list[1]).toMatchObject({ interval: "one_off", renewal_notice: null });
     expect(parseCatalog({ offerings: [] })).toEqual([]);
+  });
+
+  it("accepts a free trial: price 0, one-off, a counted quota", () => {
+    const [t] = parseCatalog({ offerings: [trial()] });
+    expect(t).toMatchObject({ trial: true, price_minor: 0, interval: "one_off", renewal_notice: null });
+    expect(t.grants.quota_erasures).toBe(25);
+    expect(parseCatalog({ offerings: [annual()] })[0].trial).toBe(false);
+  });
+
+  it.each([
+    ["trial", (o: Record<string, any>) => delete o.trial],
+    ["trial", (o: Record<string, any>) => (o.trial = "yes")],
+    ["price_minor", (o: Record<string, any>) => (o.price_minor = 100)],
+    [
+      "interval",
+      (o: Record<string, any>) => {
+        o.interval = "annual";
+        o.renewal_notice = { headline: "x" };
+      },
+    ],
+    ["grants.quota_erasures", (o: Record<string, any>) => (o.grants.quota_erasures = null)],
+  ])("rejects a free trial with a bad %s", (field, edit) => {
+    const o: Record<string, any> = trial();
+    edit(o);
+    expect(() => parseCatalog({ offerings: [o] })).toThrow(`offerings[0].${field}: `);
   });
 
   it.each([
@@ -210,6 +246,10 @@ describe("loadOfferings", () => {
 });
 
 describe("labels", () => {
+  it("links a free trial to the portal's /buy", () => {
+    expect(trialHref(HUB)).toBe(`${HUB}/buy`);
+  });
+
   it("formats prices like the portal, with no floats", () => {
     expect(formatPrice(120000, "USD")).toBe("1,200.00 USD");
     expect(formatPrice(5, "USD")).toBe("0.05 USD");

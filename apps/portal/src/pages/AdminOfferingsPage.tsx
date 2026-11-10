@@ -5,7 +5,7 @@ import { fetchMe } from "@/api/auth";
 import { retryAdminQuery } from "@/api/admin";
 import {
   createOffering,
-  formatPrice,
+  offeringPriceText,
   listOfferings,
   type Offering,
   type OfferingInput,
@@ -137,7 +137,7 @@ function OfferingTable({ offerings }: { offerings: Offering[] }) {
               </Link>
             </td>
             <td className="py-1 pr-3">{o.status}</td>
-            <td className="py-1 pr-3">{formatPrice(o.price_minor, o.currency)}</td>
+            <td className="py-1 pr-3">{offeringPriceText(o)}</td>
             <td className="py-1 pr-3">{INTERVAL_LABELS[o.interval]}</td>
             <td className="py-1 text-slate-400">{grantsSummary(o)}</td>
           </tr>

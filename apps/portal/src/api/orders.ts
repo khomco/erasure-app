@@ -6,7 +6,9 @@
 // (crates/wipe-hub/src/entitlements.rs). Change both together.
 //
 // An order becomes `paid` only when the hub applies a verified provider event:
-// nothing here, and no redirect back from a provider, marks one paid.
+// nothing here, and no redirect back from a provider, marks one paid. The one
+// exception is a free trial: the hub's `take_trial` (`POST /api/trials`,
+// `startTrial` here) writes its order already paid, with no payment.
 
 import { ensureOk, isObject, json, request, type Fetch } from "./auth";
 import { INTERVALS, isGrants, type Grants, type Interval } from "./adminOfferings";
@@ -30,6 +32,11 @@ export interface CatalogOffering {
   price_minor: number;
   currency: string;
   interval: Interval;
+  /**
+   * A free trial (price 0, one-off): taken with `startTrial`, never bought
+   * through checkout (ADR-0013 §2).
+   */
+  trial: boolean;
   grants: Grants;
   /** The auto-renewal notice for an annual offering; `null` for a one-off. */
   renewal_notice: RenewalNotice | null;
@@ -38,7 +45,8 @@ export interface CatalogOffering {
 export const ORDER_STATUSES = ["pending", "paid", "expired", "refunded"] as const;
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
-export const PROVIDERS = ["fake", "stripe"] as const;
+/** `trial` is a free trial taken without any payment provider. */
+export const PROVIDERS = ["fake", "stripe", "trial"] as const;
 export type Provider = (typeof PROVIDERS)[number];
 
 /**
@@ -97,6 +105,12 @@ export interface FakeCheckout {
   renewal_notice: RenewalNotice | null;
 }
 
+/** A free trial taken: the order, already paid, and its entitlement. */
+export interface TrialTaken {
+  order: Order;
+  entitlement: Entitlement;
+}
+
 export interface CheckoutStarted {
   order: Order;
   /** Where to send the buyer: the provider's hosted checkout page. */
@@ -124,6 +138,7 @@ export function isCatalogOffering(v: unknown): v is CatalogOffering {
     isInt(v.price_minor) &&
     typeof v.currency === "string" &&
     oneOf(INTERVALS, v.interval) &&
+    typeof v.trial === "boolean" &&
     isGrants(v.grants) &&
     isNullableNotice(v.renewal_notice)
   );
@@ -193,6 +208,9 @@ const isOrderBody = (v: unknown): v is { order: Order } => isObject(v) && isOrde
 const isCheckoutStarted = (v: unknown): v is CheckoutStarted =>
   isObject(v) && isOrder(v.order) && typeof v.checkout_url === "string";
 
+const isTrialTaken = (v: unknown): v is TrialTaken =>
+  isObject(v) && isOrder(v.order) && isEntitlement(v.entitlement);
+
 const isUrlBody = (v: unknown): v is { url: string } => isObject(v) && typeof v.url === "string";
 
 /**
@@ -229,6 +247,18 @@ export async function startCheckout(
     await request(fetchImpl, "POST", "/api/checkout", { offering_id: offeringId }),
   );
   return json(res, isCheckoutStarted, "checkout");
+}
+
+/**
+ * `POST /api/trials` (a verified owner, 201): take a published free trial,
+ * once per organization. No payment: the order comes back already paid,
+ * with its entitlement. 409 when already taken.
+ */
+export async function startTrial(offeringId: string, fetchImpl: Fetch = fetch): Promise<TrialTaken> {
+  const res = await ensureOk(
+    await request(fetchImpl, "POST", "/api/trials", { offering_id: offeringId }),
+  );
+  return json(res, isTrialTaken, "free trial");
 }
 
 /** `GET /api/orders` (any role): the organization's orders, newest first. */

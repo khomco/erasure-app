@@ -46,6 +46,12 @@ export type OfferingStatus = (typeof OFFERING_STATUSES)[number];
 /** The only term an annual offering may have, in months. */
 export const ANNUAL_TERM_MONTHS = 12;
 
+/**
+ * The erasure quota the form suggests for a new free trial
+ * (`wipe_hub::offering_admin::TRIAL_DEFAULT_QUOTA_ERASURES`, ADR-0013 §2).
+ */
+export const TRIAL_DEFAULT_QUOTA_ERASURES = 25;
+
 /** What an offering grants its buyer. */
 export interface Grants {
   scope: Scope;
@@ -57,13 +63,18 @@ export interface Grants {
   term_months: number;
 }
 
-/** A create or edit body: every field, always. `price_minor` is integer minor units. */
+/**
+ * A create or edit body: every field, always. `price_minor` is integer minor
+ * units. A free trial (`trial`) has price 0, interval `one_off` and a
+ * numeric `quota_erasures`; the hub refuses anything else (400).
+ */
 export interface OfferingInput {
   name: string;
   description: string;
   price_minor: number;
   currency: string;
   interval: Interval;
+  trial: boolean;
   grants: Grants;
 }
 
@@ -108,6 +119,7 @@ export function isOffering(v: unknown): v is Offering {
     isInt(v.price_minor) &&
     typeof v.currency === "string" &&
     oneOf(INTERVALS, v.interval) &&
+    typeof v.trial === "boolean" &&
     oneOf(OFFERING_STATUSES, v.status) &&
     isGrants(v.grants) &&
     typeof v.created_at === "string" &&
@@ -173,6 +185,14 @@ export function formatPrice(minor: number, currency: string): string {
   const [whole, frac] = minorToDecimal(minor, currency).split(".");
   const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   return `${frac === undefined ? grouped : `${grouped}.${frac}`} ${currency}`;
+}
+
+/** Shown in place of a price for a free trial (ADR-0013 §2). */
+export const FREE_TRIAL_LABEL = "Free trial";
+
+/** An offering's price for display: `"1,200.00 USD"`, or `"Free trial"`. */
+export function offeringPriceText(o: { trial: boolean; price_minor: number; currency: string }): string {
+  return o.trial ? FREE_TRIAL_LABEL : formatPrice(o.price_minor, o.currency);
 }
 
 // ---------------------------------------------------------------------------

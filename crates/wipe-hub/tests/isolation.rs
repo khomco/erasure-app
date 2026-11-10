@@ -145,6 +145,7 @@ const ROUTES: &[(&str, &str, Class)] = &[
         Anonymous("published offerings only; the public price list, no organization's records"),
     ),
     ("POST", "/api/checkout", Customer),
+    ("POST", "/api/trials", Customer),
     ("GET", "/api/orders", Customer),
     ("GET", "/api/orders/:id", Customer),
     ("GET", "/api/entitlements", Customer),
@@ -562,7 +563,7 @@ async fn organization_a_never_sees_or_changes_organization_b() {
                     Some(json!({"lapse_policy": "stop"}))
                 }
                 "/api/organization/members/:id/role" => Some(json!({"role": "owner"})),
-                "/api/checkout" => Some(json!({ "offering_id": offering })),
+                "/api/checkout" | "/api/trials" => Some(json!({ "offering_id": offering })),
                 "/api/stations" if method == "POST" => Some(json!({
                     "entitlement_id": b_entitlement,
                     "instance_key_id": wipe_cert::SigningKey::generate().public_key_id(),

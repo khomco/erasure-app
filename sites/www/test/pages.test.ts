@@ -286,6 +286,7 @@ describe("pricing page with published offerings (PRICING_HUB_ORIGIN set)", () =>
     price_minor: 120000,
     currency: "USD",
     interval: "annual",
+    trial: false,
     grants: { scope: "machine", seats: 1, quota_erasures: null, features: ["hub_sync"], term_months: 12 },
     renewal_notice: { headline, detail: "Your first year ends on 8 November 2027." },
   };
@@ -296,6 +297,7 @@ describe("pricing page with published offerings (PRICING_HUB_ORIGIN set)", () =>
     price_minor: 500000,
     currency: "JPY",
     interval: "one_off",
+    trial: false,
     grants: { scope: "site", seats: 5, quota_erasures: 10000, features: [], term_months: 24 },
     renewal_notice: null,
   };
@@ -354,6 +356,35 @@ describe("pricing page with published offerings (PRICING_HUB_ORIGIN set)", () =>
     expect(flat(o)).toContain("24-month term");
     expect(o.querySelector("[data-renewal-notice]")).toBeNull();
     expect(flat(o)).not.toContain("Renews automatically");
+  });
+
+  it("shows a free trial as free with a Start free trial link to the portal's /buy", async () => {
+    const trial = {
+      ...oneOff,
+      id: "33333333-3333-4333-8333-333333333333",
+      name: "Free trial",
+      description: "Try it on one bench.",
+      price_minor: 0,
+      currency: "USD",
+      trial: true,
+      grants: { scope: "site", seats: 1, quota_erasures: 25, features: [], term_months: 1 },
+    };
+    const { html } = await renderPriced([annual, trial]);
+    expect(checkPage(html, "/pricing/", capabilities, ORIGIN)).toEqual([]);
+    expect(html).not.toMatch(/<script/i);
+    const root = parse(html);
+    const t = root.querySelector(`li[data-offering="${trial.id}"]`)!;
+    const flat = (el: HTMLElement) => el.text.replace(/\s+/g, " ").trim();
+    expect(flat(t.querySelector("[data-price]")!)).toBe("Free trial");
+    const a = t.querySelector("a[data-start-trial]")!;
+    expect(a.text.trim()).toBe("Start free trial");
+    expect(a.getAttribute("href")).toBe(`${PRICING_HUB}/buy`);
+    expect(flat(t)).toContain("25 erasures");
+    expect(flat(t)).not.toContain("USD");
+    expect(flat(t)).not.toContain("one-off payment");
+    expect(t.querySelector("[data-renewal-notice]")).toBeNull();
+    // A priced offering has no trial link.
+    expect(root.querySelector(`li[data-offering="${annual.id}"] a[data-start-trial]`)).toBeNull();
   });
 
   it("renders markup in vendor text as text", async () => {

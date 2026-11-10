@@ -34,10 +34,15 @@ export function AccountPage() {
   );
 }
 
-export function SignInPrompt() {
+/** Signed out: a sign-in link, coming back to `next` (a path here) when given. */
+export function SignInPrompt({ next }: { next?: string }) {
   return (
     <p className="text-sm">
-      <Link to="/sign-in" className="text-indigo-400 hover:underline">
+      <Link
+        to="/sign-in"
+        search={next === undefined ? undefined : { next }}
+        className="text-indigo-400 hover:underline"
+      >
         Sign in
       </Link>{" "}
       to see this page.

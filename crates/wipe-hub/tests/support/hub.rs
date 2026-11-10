@@ -351,6 +351,23 @@ impl Hub {
         id.to_string()
     }
 
+    /// A published free trial offering inserted directly: its id. Price 0,
+    /// one-off, one site seat, 25 erasures, one month, `pdf_certificates`.
+    pub async fn published_trial_offering(&self, name: &str) -> String {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO offerings (name, description, price_minor, currency, billing_interval, \
+                                    status, scope, seats, quota_erasures, features, term_months, \
+                                    published_at, trial) \
+             VALUES ($1, 'Try it.', 0, 'USD', 'one_off', 'published', 'site', 1, 25, \
+                     '{pdf_certificates}', 1, now(), true) RETURNING id",
+        )
+        .bind(name)
+        .fetch_one(&self.db.pool)
+        .await
+        .unwrap();
+        id.to_string()
+    }
+
     pub async fn org_name(&self, owner: &Who) -> String {
         self.me(&owner.cookie).await.1["organization"]["name"]
             .as_str()

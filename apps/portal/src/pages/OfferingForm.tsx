@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import {
   ANNUAL_TERM_MONTHS,
   FEATURES,
+  TRIAL_DEFAULT_QUOTA_ERASURES,
   FEATURE_LABELS,
   fractionDigits,
   minorToDecimal,
@@ -36,8 +37,90 @@ function wholeNumber(text: string): number | null {
   return Number.isSafeInteger(n) ? n : null;
 }
 
+/** The form's fields as typed. */
+export interface OfferingFields {
+  name: string;
+  description: string;
+  currency: string;
+  price: string;
+  interval: Interval;
+  trial: boolean;
+  scope: Scope;
+  seats: string;
+  unlimited: boolean;
+  quota: string;
+  features: Feature[];
+  term: string;
+}
+
 /**
- * Every field of an offering. With `termsLocked` (a published offering),
+ * The body the form sends, or the message to show instead. With `locked`
+ * (a published offering), only name and description come from the fields;
+ * every term, `trial` included, is the offering's own. A trial is always
+ * price 0, one-off and counted, whatever price, interval or "Unlimited" was
+ * left in the fields.
+ */
+export function offeringBody(
+  f: OfferingFields,
+  locked?: Offering,
+): { body: OfferingInput } | { error: string } {
+  if (locked) {
+    return {
+      body: {
+        name: f.name,
+        description: f.description,
+        price_minor: locked.price_minor,
+        currency: locked.currency,
+        interval: locked.interval,
+        trial: locked.trial,
+        grants: locked.grants,
+      },
+    };
+  }
+  const code = f.currency.trim().toUpperCase();
+  const digits = fractionDigits(code);
+  const priceMinor = f.trial ? 0 : toMinorUnits(f.price, code);
+  if (priceMinor === null || digits === null) {
+    return {
+      error:
+        digits === null
+          ? "Enter the currency as a 3-letter code, such as USD."
+          : digits === 0
+            ? `Enter the price in whole ${code}, such as 1200, without decimals.`
+            : `Enter the price as a plain amount with at most ${digits} decimals, such as 1200.00.`,
+    };
+  }
+  const interval: Interval = f.trial ? "one_off" : f.interval;
+  const seatCount = wholeNumber(f.seats);
+  const isUnlimited = f.unlimited && !f.trial;
+  const quotaCount = isUnlimited ? null : wholeNumber(f.quota);
+  const termMonths = interval === "annual" ? ANNUAL_TERM_MONTHS : wholeNumber(f.term);
+  if (seatCount === null || (!isUnlimited && quotaCount === null) || termMonths === null) {
+    return { error: "Seats, erasure quota and term are whole numbers." };
+  }
+  return {
+    body: {
+      name: f.name,
+      description: f.description,
+      price_minor: priceMinor,
+      currency: code,
+      interval,
+      trial: f.trial,
+      grants: {
+        scope: f.scope,
+        seats: seatCount,
+        quota_erasures: quotaCount,
+        features: FEATURES.filter((x) => f.features.includes(x)),
+        term_months: termMonths,
+      },
+    },
+  };
+}
+
+/**
+ * Every field of an offering. Ticking "Free trial" fixes the price at 0 and
+ * the interval at one-off, and requires an erasure quota (suggesting
+ * 25): the hub's rules for a trial (ADR-0013 §2). With `termsLocked` (a published offering),
  * price, currency, interval and grants are shown but disabled, and the body
  * sent keeps them as they are: the hub refuses to change them. Ranges are
  * the hub's to enforce; it answers with a message naming the field.
@@ -63,6 +146,7 @@ export function OfferingForm({
   const [price, setPrice] = useState(
     initial ? minorToDecimal(initial.price_minor, initial.currency) : "",
   );
+  const [trial, setTrial] = useState(initial?.trial ?? false);
   const [interval, setBillingInterval] = useState<Interval>(initial?.interval ?? "annual");
   const [scope, setScope] = useState<Scope>(initial?.grants.scope ?? "machine");
   const [seats, setSeats] = useState(String(initial?.grants.seats ?? 1));
@@ -72,58 +156,41 @@ export function OfferingForm({
   const [term, setTerm] = useState(String(initial?.grants.term_months ?? ANNUAL_TERM_MONTHS));
   const [localError, setLocalError] = useState<string | null>(null);
 
-  const annual = interval === "annual";
+  const annual = !trial && interval === "annual";
+  /** Tick or untick "Free trial", moving the terms to what a trial needs. */
+  function setTrialChecked(checked: boolean) {
+    setTrial(checked);
+    if (checked) {
+      setBillingInterval("one_off");
+      setUnlimited(false);
+      if (wholeNumber(quota) === null) setQuota(String(TRIAL_DEFAULT_QUOTA_ERASURES));
+    }
+  }
   const toggle = (f: Feature) =>
     setFeatures((fs) => (fs.includes(f) ? fs.filter((x) => x !== f) : [...fs, f]));
 
   function submit(e: FormEvent) {
     e.preventDefault();
     setLocalError(null);
-    if (termsLocked && initial) {
-      onSubmit({
+    const built = offeringBody(
+      {
         name,
         description,
-        price_minor: initial.price_minor,
-        currency: initial.currency,
-        interval: initial.interval,
-        grants: initial.grants,
-      });
-      return;
-    }
-    const code = currency.trim().toUpperCase();
-    const digits = fractionDigits(code);
-    const priceMinor = toMinorUnits(price, code);
-    if (priceMinor === null) {
-      setLocalError(
-        digits === null
-          ? "Enter the currency as a 3-letter code, such as USD."
-          : digits === 0
-            ? `Enter the price in whole ${code}, such as 1200, without decimals.`
-            : `Enter the price as a plain amount with at most ${digits} decimals, such as 1200.00.`,
-      );
-      return;
-    }
-    const seatCount = wholeNumber(seats);
-    const quotaCount = unlimited ? null : wholeNumber(quota);
-    const termMonths = annual ? ANNUAL_TERM_MONTHS : wholeNumber(term);
-    if (seatCount === null || (!unlimited && quotaCount === null) || termMonths === null) {
-      setLocalError("Seats, erasure quota and term are whole numbers.");
-      return;
-    }
-    onSubmit({
-      name,
-      description,
-      price_minor: priceMinor,
-      currency: code,
-      interval,
-      grants: {
+        currency,
+        price,
+        interval,
+        trial,
         scope,
-        seats: seatCount,
-        quota_erasures: quotaCount,
-        features: FEATURES.filter((f) => features.includes(f)),
-        term_months: termMonths,
+        seats,
+        unlimited,
+        quota,
+        features,
+        term,
       },
-    });
+      termsLocked ? initial : undefined,
+    );
+    if ("error" in built) setLocalError(built.error);
+    else onSubmit(built.body);
   }
 
   const locked = termsLocked;
@@ -144,10 +211,27 @@ export function OfferingForm({
       <fieldset disabled={locked} className="space-y-4">
         {locked && (
           <p className="text-sm text-amber-400">
-            Published: price, interval and grants cannot change. Retire this offering and create
-            a new one to change them.
+            Published: price, interval, grants and the free-trial setting cannot change. Retire
+            this offering and create a new one to change them.
           </p>
         )}
+        <div className="space-y-1 text-sm">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              name="trial"
+              checked={trial}
+              onChange={(e) => setTrialChecked(e.target.checked)}
+            />
+            <span>Free trial</span>
+          </label>
+          {trial && !locked && (
+            <p className="text-xs text-slate-400">
+              A free trial costs nothing, is one-off and has an erasure quota. Each organization
+              can take it once.
+            </p>
+          )}
+        </div>
         <div className="flex gap-3">
           <label className="block flex-1 space-y-1 text-sm">
             <span className="text-slate-300">Price</span>
@@ -157,7 +241,8 @@ export function OfferingForm({
               inputMode="decimal"
               autoComplete="off"
               required
-              value={price}
+              disabled={trial}
+              value={trial ? "0" : price}
               onChange={(e) => setPrice(e.target.value)}
               className={inputClass}
             />
@@ -181,9 +266,9 @@ export function OfferingForm({
             <Select
               label="Billing interval"
               name="interval"
-              value={interval}
+              value={trial ? "one_off" : interval}
               onChange={(v) => setBillingInterval(v as Interval)}
-              options={(["annual", "one_off"] as const).map((i) => ({
+              options={(trial ? (["one_off"] as const) : (["annual", "one_off"] as const)).map((i) => ({
                 value: i,
                 label: INTERVAL_LABELS[i],
               }))}
@@ -244,12 +329,13 @@ export function OfferingForm({
             <input
               type="checkbox"
               name="unlimited"
-              checked={unlimited}
+              disabled={trial}
+              checked={unlimited && !trial}
               onChange={(e) => setUnlimited(e.target.checked)}
             />
             <span>Unlimited</span>
           </label>
-          {!unlimited && (
+          {(!unlimited || trial) && (
             <input
               name="quota"
               type="number"

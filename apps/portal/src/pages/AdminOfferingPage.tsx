@@ -6,7 +6,7 @@ import { retryAdminQuery } from "@/api/admin";
 import {
   FEATURE_LABELS,
   fetchOffering,
-  formatPrice,
+  offeringPriceText,
   publishOffering,
   retireOffering,
   updateOffering,
@@ -90,7 +90,7 @@ function OfferingView({ offering: o, show }: { offering: Offering; show: (o: Off
       <div className="space-y-1">
         <h1 className="text-xl font-semibold">{o.name}</h1>
         <p className="text-sm text-slate-300">
-          {formatPrice(o.price_minor, o.currency)} · {INTERVAL_LABELS[o.interval]} ·{" "}
+          {offeringPriceText(o)} · {INTERVAL_LABELS[o.interval]} ·{" "}
           {grantsSummary(o)}
         </p>
         <p className="text-sm text-slate-400">

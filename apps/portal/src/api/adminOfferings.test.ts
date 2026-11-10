@@ -8,6 +8,7 @@ import {
   fractionDigits,
   listOfferings,
   minorToDecimal,
+  offeringPriceText,
   publishOffering,
   retireOffering,
   toMinorUnits,
@@ -22,6 +23,7 @@ const input: OfferingInput = {
   price_minor: 120000,
   currency: "USD",
   interval: "annual",
+  trial: false,
   grants: {
     scope: "machine",
     seats: 1,
@@ -121,6 +123,33 @@ describe("money", () => {
     for (const n of [1, 99, 100, 123456]) {
       expect(toMinorUnits(minorToDecimal(n, "EUR"), "EUR")).toBe(n);
     }
+  });
+});
+
+describe("free trials", () => {
+  it("show 'Free trial' instead of a price", () => {
+    expect(offeringPriceText({ trial: true, price_minor: 0, currency: "USD" })).toBe("Free trial");
+    expect(offeringPriceText({ trial: false, price_minor: 120000, currency: "USD" })).toBe(
+      "1,200.00 USD",
+    );
+  });
+
+  it("need the trial flag in the hub's answer", async () => {
+    const trial = { ...offering, trial: true, price_minor: 0, interval: "one_off" };
+    const ok = respond(200, { offering: trial });
+    expect(await fetchOffering(trial.id, ok.impl)).toEqual(trial);
+    const { trial: _dropped, ...noFlag } = offering;
+    const bad = respond(200, { offering: noFlag });
+    expect(await rejection(fetchOffering(offering.id, bad.impl))).toBeInstanceOf(Error);
+    const wrong = respond(200, { offering: { ...offering, trial: "yes" } });
+    expect(await rejection(fetchOffering(offering.id, wrong.impl))).toBeInstanceOf(Error);
+  });
+
+  it("send the trial flag in a create body", async () => {
+    const body = { ...input, trial: true, price_minor: 0, interval: "one_off" as const };
+    const f = respond(201, { offering: { ...offering, ...body } });
+    await createOffering(body, f.impl);
+    expect((f.calls[0].body as { trial: boolean }).trial).toBe(true);
   });
 });
 

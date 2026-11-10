@@ -1,11 +1,31 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { fetchMe, type Account } from "@/api/auth";
-import { FEATURE_LABELS, formatPrice, type Grants } from "@/api/adminOfferings";
+import { FEATURE_LABELS, FREE_TRIAL_LABEL, formatPrice, type Grants } from "@/api/adminOfferings";
 import { fetchOrders, isHttpUrl, openBillingPortal, type Order } from "@/api/orders";
 import { SignInPrompt } from "./AccountPage";
 import { FormError } from "./AuthForm";
 import { INTERVAL_LABELS, SCOPE_LABELS } from "./OfferingForm";
+
+/** How the order was paid for, for people. */
+export const PROVIDER_LABELS: Record<Order["provider"], string> = {
+  fake: "Test (no money moves)",
+  stripe: "Stripe",
+  trial: "None (free trial)",
+};
+
+/**
+ * An order's price for people: "1,200.00 USD annual" (with `bracketed`,
+ * "1,200.00 USD (annual)"), or "Free trial".
+ */
+export function orderPriceText(
+  o: Pick<Order, "provider" | "price_minor" | "currency" | "interval">,
+  { bracketed = false }: { bracketed?: boolean } = {},
+): string {
+  if (o.provider === "trial") return FREE_TRIAL_LABEL;
+  const interval = INTERVAL_LABELS[o.interval].toLowerCase();
+  return `${formatPrice(o.price_minor, o.currency)} ${bracketed ? `(${interval})` : interval}`;
+}
 
 export const ORDER_STATUS_LABELS: Record<Order["status"], string> = {
   pending: "Awaiting payment",
@@ -114,9 +134,7 @@ function OrderTable({ orders }: { orders: Order[] }) {
                 {o.offering_name}
               </Link>
             </td>
-            <td className="py-1 pr-3">
-              {formatPrice(o.price_minor, o.currency)} {INTERVAL_LABELS[o.interval].toLowerCase()}
-            </td>
+            <td className="py-1 pr-3">{orderPriceText(o)}</td>
             <td className="py-1 pr-3">{ORDER_STATUS_LABELS[o.status]}</td>
             <td className="py-1 text-slate-400">{o.created_at}</td>
           </tr>

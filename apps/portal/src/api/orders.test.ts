@@ -18,6 +18,7 @@ import {
   payFakeCheckout,
   renewFakeEntitlement,
   startCheckout,
+  startTrial,
   type CatalogOffering,
   type Entitlement,
   type Order,
@@ -39,6 +40,7 @@ const offering: CatalogOffering = {
   price_minor: 120000,
   currency: "USD",
   interval: "annual",
+  trial: false,
   grants: {
     scope: "machine",
     seats: 1,
@@ -47,6 +49,17 @@ const offering: CatalogOffering = {
     term_months: 12,
   },
   renewal_notice: notice,
+};
+
+const trialOffering: CatalogOffering = {
+  ...offering,
+  id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+  name: "Free trial",
+  price_minor: 0,
+  interval: "one_off",
+  trial: true,
+  grants: { ...offering.grants, scope: "site", quota_erasures: 25, term_months: 1 },
+  renewal_notice: null,
 };
 
 const order: Order = {
@@ -176,6 +189,8 @@ describe("guards", () => {
       false,
     );
     expect(isCatalogOffering({ ...offering, price_minor: "120000" })).toBe(false);
+    expect(isCatalogOffering({ ...offering, trial: undefined })).toBe(false);
+    expect(isCatalogOffering({ ...offering, trial: "no" })).toBe(false);
   });
 
   it("only follow http(s) URLs", () => {
@@ -205,6 +220,47 @@ describe("calls", () => {
     const err = await rejection(startCheckout(offering.id, refused.impl));
     expect(err).toBeInstanceOf(HubError);
     expect((err as HubError).message).toBe("verify your email address before buying");
+  });
+
+  it("takes a free trial with the offering id and CSRF", async () => {
+    expect(isCatalogOffering(trialOffering)).toBe(true);
+    const trialOrder: Order = {
+      ...order,
+      offering_id: trialOffering.id,
+      offering_name: trialOffering.name,
+      price_minor: 0,
+      interval: "one_off",
+      grants: trialOffering.grants,
+      status: "paid",
+      provider: "trial",
+      paid_at: "2026-11-10T10:00:00Z",
+    };
+    const trialEntitlement: Entitlement = {
+      ...entitlement,
+      order_id: trialOrder.id,
+      offering_name: trialOrder.offering_name,
+      interval: "one_off",
+      grants: trialOrder.grants,
+      renews: false,
+    };
+    const taken = { order: trialOrder, entitlement: trialEntitlement };
+    const f = respond(201, taken);
+    expect(await startTrial(trialOffering.id, f.impl)).toEqual(taken);
+    expect(f.calls).toEqual([
+      {
+        url: "/api/trials",
+        method: "POST",
+        body: { offering_id: trialOffering.id },
+        csrf: "csrf-1",
+      },
+    ]);
+    const again = respond(409, { error: "Your organization has already taken this free trial." });
+    const err = await rejection(startTrial(trialOffering.id, again.impl));
+    expect(err).toBeInstanceOf(HubError);
+    expect((err as HubError).status).toBe(409);
+    expect((err as HubError).message).toBe("Your organization has already taken this free trial.");
+    const noEntitlement = respond(201, { order: trialOrder });
+    expect(await rejection(startTrial(trialOffering.id, noEntitlement.impl))).toBeInstanceOf(Error);
   });
 
   it("lists and fetches orders", async () => {

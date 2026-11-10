@@ -6,7 +6,15 @@
 //!   cookie is ignored, so a stale one is not a 401; the marketing site's
 //!   pricing page reads it at build time (story 5, CAP-6). No CORS.
 //! - `POST /api/checkout {offering_id}` — a verified owner starts a
-//!   checkout: 201 `{order, checkout_url}` with the order `pending`.
+//!   checkout: 201 `{order, checkout_url}` with the order `pending`. A free
+//!   trial offering is 409 [`MSG_TRIAL_NOT_FOR_CHECKOUT`], before the
+//!   provider is called.
+//! - `POST /api/trials {offering_id}` — a verified owner takes a published
+//!   free trial (ADR-0013 §2), with no payment: 201 `{order, entitlement}`,
+//!   the order already `paid` with provider `trial`. 404
+//!   [`MSG_NOT_FOR_SALE`] for a draft, retired or unknown offering, 409
+//!   [`MSG_NOT_A_TRIAL`] for a priced one, 409 [`MSG_TRIAL_TAKEN`] when the
+//!   organization already took it.
 //! - `GET /api/orders`, `GET /api/orders/:id` — any role: the
 //!   organization's orders, newest first, or one.
 //! - `GET /api/entitlements` — any role: `{entitlements, available_seats}`,
@@ -43,7 +51,9 @@
 //! organization's order or session id is a 404 like an unknown one, and
 //! changes and audits nothing. Owner and verified-email checks run before
 //! the body is read. Nothing here marks an order paid except through
-//! `verify_event` → `receive` → `apply_event`. Error bodies are `{"error": "<message>"}`.
+//! `verify_event` → `receive` → `apply_event`, save one exception: a free
+//! trial, which [`orders::take_trial`] writes already paid, with no provider
+//! and no payment. Error bodies are `{"error": "<message>"}`.
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -79,6 +89,10 @@ pub const MSG_NO_BILLING_ACCOUNT: &str = "billing opens after your first payment
 pub const MSG_EVENT_NOT_READY: &str = "this payment event cannot be applied yet; retry later";
 pub const MSG_NO_ENTITLEMENT: &str = "no such entitlement";
 pub const MSG_NOT_RENEWING: &str = "this subscription is not renewing";
+pub const MSG_TRIAL_NOT_FOR_CHECKOUT: &str =
+    "This offering is a free trial: start it instead of buying it.";
+pub const MSG_NOT_A_TRIAL: &str = "This offering is not a free trial.";
+pub const MSG_TRIAL_TAKEN: &str = "Your organization has already taken this free trial.";
 
 /// The provider webhook: the one mutating `/api` route without a CSRF token.
 pub const PAYMENT_WEBHOOK_PATH: &str = "/api/payments/webhook";
@@ -87,6 +101,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/offerings", get(catalog))
         .route("/api/checkout", post(checkout))
+        .route("/api/trials", post(take_trial))
         .route("/api/orders", get(list_orders))
         .route("/api/orders/:id", get(order_detail))
         .route("/api/entitlements", get(list_entitlements))
@@ -149,6 +164,9 @@ impl From<OrderError> for ApiError {
     fn from(e: OrderError) -> Self {
         match e {
             OrderError::NotForSale => not_found(MSG_NOT_FOR_SALE),
+            OrderError::IsTrial => ApiError::new(StatusCode::CONFLICT, MSG_TRIAL_NOT_FOR_CHECKOUT),
+            OrderError::NotTrial => ApiError::new(StatusCode::CONFLICT, MSG_NOT_A_TRIAL),
+            OrderError::TrialTaken => ApiError::new(StatusCode::CONFLICT, MSG_TRIAL_TAKEN),
             OrderError::Provider(p) => p.into(),
             OrderError::Db(e) => e.into(),
             OrderError::Audit(e) => e.into(),
@@ -179,18 +197,25 @@ pub struct CheckoutRequest {
     pub offering_id: Uuid,
 }
 
-async fn checkout(
-    State(state): State<AppState>,
-    user: CurrentUser,
-    body: Result<JsonBody<CheckoutRequest>, ApiError>,
-) -> Result<Response, ApiError> {
-    require_owner(&user, MSG_OWNER_ONLY_BUY)?;
+/// Owners only ([`MSG_OWNER_ONLY_BUY`]), with a verified email
+/// ([`MSG_UNVERIFIED_BUYER`]): who may buy, or take a free trial.
+async fn require_verified_owner(state: &AppState, user: &CurrentUser) -> Result<(), ApiError> {
+    require_owner(user, MSG_OWNER_ONLY_BUY)?;
     let buyer = accounts::account(&state.pool, user.organization_id, user.user_id)
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, MSG_NOT_SIGNED_IN))?;
     if !buyer.user.email_verified {
         return Err(forbidden(MSG_UNVERIFIED_BUYER));
     }
+    Ok(())
+}
+
+async fn checkout(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    body: Result<JsonBody<CheckoutRequest>, ApiError>,
+) -> Result<Response, ApiError> {
+    require_verified_owner(&state, &user).await?;
     let JsonBody(req) = body?;
     let mut tx = state.pool.begin().await?;
     let started = orders::create(
@@ -208,6 +233,32 @@ async fn checkout(
             "order": started.order,
             "checkout_url": started.checkout_url.as_str(),
         })),
+    )
+        .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrialRequest {
+    pub offering_id: Uuid,
+}
+
+/// `POST /api/trials`: take a free trial in one transaction (order,
+/// entitlement and both audit rows, or nothing).
+async fn take_trial(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    body: Result<JsonBody<TrialRequest>, ApiError>,
+) -> Result<Response, ApiError> {
+    require_verified_owner(&state, &user).await?;
+    let JsonBody(req) = body?;
+    let mut tx = state.pool.begin().await?;
+    let taken =
+        orders::take_trial(&mut tx, user.organization_id, user.user_id, req.offering_id).await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "order": taken.order, "entitlement": taken.entitlement })),
     )
         .into_response())
 }

@@ -21,6 +21,9 @@
 //! - **Names are unique among offerings not retired**, case-insensitively
 //!   (migration 0010's partial unique index, mapped to a 409).
 //! - Money is integer minor units plus an uppercase 3-letter code; no floats.
+//! - **A free trial** (`trial`, ADR-0013 §2) costs nothing, is one-off and
+//!   always carries an erasure quota; `trial` is a commercial term, frozen at
+//!   publication like the price. Every other offering costs at least 1.
 //!
 //! Migration 0010 repeats every rule as a CHECK or trigger.
 
@@ -46,6 +49,8 @@ pub const QUOTA_MAX_ERASURES: i64 = 1_000_000_000;
 pub const TERM_MAX_MONTHS: i64 = 120;
 /// The only term an annual offering may have (story 1, decision 1).
 pub const ANNUAL_TERM_MONTHS: i64 = 12;
+/// The quota the portal's form suggests for a new trial (ADR-0013 §2).
+pub const TRIAL_DEFAULT_QUOTA_ERASURES: i64 = 25;
 
 pub const INTERVALS: [&str; 2] = ["one_off", "annual"];
 pub const SCOPES: [&str; 2] = ["machine", "site"];
@@ -61,8 +66,8 @@ pub const FEATURES: [&str; 6] = [
 ];
 
 pub const MSG_DUPLICATE_NAME: &str = "an offering with this name is already in draft or for sale";
-pub const MSG_TERMS_FROZEN: &str = "a published offering's price, interval and grants cannot \
-     change; retire it and create a new one";
+pub const MSG_TERMS_FROZEN: &str = "a published offering's price, interval, grants and \
+     free-trial setting cannot change; retire it and create a new one";
 pub const MSG_RETIRED: &str = "a retired offering cannot change";
 pub const MSG_PUBLISH_NOT_DRAFT: &str = "only a draft offering can be published";
 pub const MSG_RETIRE_NOT_PUBLISHED: &str = "only a published offering can be retired";
@@ -80,7 +85,7 @@ pub fn subject(id: Uuid) -> String {
 
 /// A create or edit body: every field, always (an edit is a full body).
 /// Unknown keys are refused, so a misspelt field never silently keeps its
-/// old value.
+/// old value. A body without `trial` is not a trial.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OfferingRequest {
@@ -89,6 +94,8 @@ pub struct OfferingRequest {
     pub price_minor: i64,
     pub currency: String,
     pub interval: String,
+    #[serde(default)]
+    pub trial: bool,
     pub grants: GrantsRequest,
 }
 
@@ -130,6 +137,7 @@ pub struct NewOffering {
     pub price_minor: i64,
     pub currency: String,
     pub interval: String,
+    pub trial: bool,
     pub grants: Grants,
 }
 
@@ -173,12 +181,22 @@ pub fn validate(req: &OfferingRequest) -> Result<NewOffering, String> {
     {
         return Err("description must not contain control characters".into());
     }
-    let price_minor = in_range("price_minor", req.price_minor, 1, PRICE_MAX_MINOR)?;
+    let price_minor = if req.trial {
+        if req.price_minor != 0 {
+            return Err("price_minor must be 0 for a free trial".into());
+        }
+        0
+    } else {
+        in_range("price_minor", req.price_minor, 1, PRICE_MAX_MINOR)?
+    };
     let currency = req.currency.trim();
     if currency.len() != 3 || !currency.bytes().all(|b| b.is_ascii_alphabetic()) {
         return Err("currency must be a 3-letter ISO 4217 code, such as USD".into());
     }
     let interval = one_of("interval", &req.interval, &INTERVALS)?;
+    if req.trial && interval != "one_off" {
+        return Err("interval must be one_off for a free trial".into());
+    }
     let g = &req.grants;
     let scope = one_of("grants.scope", &g.scope, &SCOPES)?;
     let seats = in_range("grants.seats", g.seats, 1, SEATS_MAX)?;
@@ -189,6 +207,9 @@ pub fn validate(req: &OfferingRequest) -> Result<NewOffering, String> {
         Some(None) => None,
         Some(Some(n)) => Some(in_range("grants.quota_erasures", n, 1, QUOTA_MAX_ERASURES)?),
     };
+    if req.trial && quota_erasures.is_none() {
+        return Err("grants.quota_erasures must be a count for a free trial, not unlimited".into());
+    }
     let mut features = BTreeSet::new();
     for f in &g.features {
         // `wipe_license::Feature` decides; FEATURES only words the error.
@@ -212,6 +233,7 @@ pub fn validate(req: &OfferingRequest) -> Result<NewOffering, String> {
         price_minor,
         currency: currency.to_ascii_uppercase(),
         interval,
+        trial: req.trial,
         grants: Grants {
             scope,
             seats: seats as i32,
@@ -235,6 +257,8 @@ pub struct Offering {
     pub currency: String,
     /// One of [`INTERVALS`].
     pub interval: String,
+    /// A free trial: price 0, one-off, a quota (ADR-0013 §2).
+    pub trial: bool,
     /// `draft`, `published` or `retired`.
     pub status: String,
     pub grants: Grants,
@@ -246,12 +270,13 @@ pub struct Offering {
 }
 
 impl Offering {
-    /// Whether `new` has this offering's price, currency, interval and
-    /// grants.
+    /// Whether `new` has this offering's price, currency, interval, trial
+    /// flag and grants.
     fn same_terms(&self, new: &NewOffering) -> bool {
         self.price_minor == new.price_minor
             && self.currency == new.currency
             && self.interval == new.interval
+            && self.trial == new.trial
             && self.grants == new.grants
     }
 
@@ -277,6 +302,7 @@ impl Offering {
         );
         diff("currency", json!(self.currency), json!(new.currency));
         diff("interval", json!(self.interval), json!(new.interval));
+        diff("trial", json!(self.trial), json!(new.trial));
         diff("grants", json!(self.grants), json!(new.grants));
         out
     }
@@ -296,6 +322,7 @@ struct Row {
     price_minor: i64,
     currency: String,
     billing_interval: String,
+    trial: bool,
     status: String,
     scope: String,
     seats: i32,
@@ -317,6 +344,7 @@ impl From<Row> for Offering {
             price_minor: r.price_minor,
             currency: r.currency,
             interval: r.billing_interval,
+            trial: r.trial,
             status: r.status,
             grants: Grants {
                 scope: r.scope,
@@ -361,7 +389,8 @@ impl From<sqlx::Error> for OfferingError {
 
 fn select() -> String {
     format!(
-        "SELECT id, name, description, price_minor, currency, billing_interval, status, scope, \
+        "SELECT id, name, description, price_minor, currency, billing_interval, trial, status, \
+                scope, \
                 seats, quota_erasures, features, term_months, \
                 to_char(created_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS created_at, \
                 to_char(updated_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS updated_at, \
@@ -456,8 +485,9 @@ pub async fn create(
 ) -> Result<Offering, OfferingError> {
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO offerings (name, description, price_minor, currency, billing_interval, \
-                                scope, seats, quota_erasures, features, term_months, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
+                                scope, seats, quota_erasures, features, term_months, created_by, \
+                                trial) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
     )
     .bind(&new.name)
     .bind(&new.description)
@@ -470,6 +500,7 @@ pub async fn create(
     .bind(&new.grants.features)
     .bind(new.grants.term_months)
     .bind(admin.user_id())
+    .bind(new.trial)
     .fetch_one(&mut *conn)
     .await?;
     let offering = fetch(conn, id).await?;
@@ -521,7 +552,7 @@ pub async fn update(
     sqlx::query(
         "UPDATE offerings SET name = $2, description = $3, price_minor = $4, currency = $5, \
                 billing_interval = $6, scope = $7, seats = $8, quota_erasures = $9, \
-                features = $10, term_months = $11, updated_at = now() \
+                features = $10, term_months = $11, trial = $12, updated_at = now() \
          WHERE id = $1",
     )
     .bind(id)
@@ -535,6 +566,7 @@ pub async fn update(
     .bind(new.grants.quota_erasures)
     .bind(&new.grants.features)
     .bind(new.grants.term_months)
+    .bind(new.trial)
     .execute(&mut *conn)
     .await?;
     audit_read(
@@ -778,6 +810,7 @@ mod tests {
             price_minor: 99000,
             currency: new.currency.clone(),
             interval: new.interval.clone(),
+            trial: false,
             status: "draft".into(),
             grants: new.grants.clone(),
             created_at: String::new(),
@@ -797,5 +830,53 @@ mod tests {
         copy.name = "Old".into();
         assert!(copy.same_terms(&new));
         assert_eq!(copy.changes(&new).len(), 1);
+        copy.name = new.name.clone();
+        copy.trial = true;
+        assert!(!copy.same_terms(&new));
+        assert_eq!(
+            Value::Object(copy.changes(&new)),
+            json!({"trial": {"from": true, "to": false}})
+        );
+    }
+
+    fn trial() -> OfferingRequest {
+        let mut r = req();
+        r.trial = true;
+        r.price_minor = 0;
+        r.interval = "one_off".into();
+        r.grants.term_months = 1;
+        r.grants.quota_erasures = Some(Some(TRIAL_DEFAULT_QUOTA_ERASURES));
+        r
+    }
+
+    #[test]
+    fn a_trial_is_free_one_off_and_counted() {
+        let o = validate(&trial()).unwrap();
+        assert!(o.trial);
+        assert_eq!(o.price_minor, 0);
+        assert_eq!(o.interval, "one_off");
+        assert_eq!(o.grants.quota_erasures, Some(25));
+        let bad = |f: fn(&mut OfferingRequest)| {
+            let mut r = trial();
+            f(&mut r);
+            validate(&r).unwrap_err()
+        };
+        assert_eq!(
+            bad(|r| r.price_minor = 5),
+            "price_minor must be 0 for a free trial"
+        );
+        assert_eq!(
+            bad(|r| {
+                r.interval = "annual".into();
+                r.grants.term_months = 12;
+            }),
+            "interval must be one_off for a free trial"
+        );
+        assert!(bad(|r| r.grants.quota_erasures = Some(None))
+            .starts_with("grants.quota_erasures must be a count"));
+        // A non-trial keeps its price rule.
+        assert!(err(|r| r.price_minor = 0).starts_with("price_minor must be between 1"));
+        // No `trial` key is not a trial.
+        assert!(!req().trial);
     }
 }

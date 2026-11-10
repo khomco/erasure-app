@@ -1,28 +1,34 @@
 ---
 /**
  * The hub's published offerings, read at build time (offerings-and-payments
- * story 5). Vendor-entered name and description are Astro-escaped text; the
+ * story 5). A free trial (controlled-licensing story 1) shows "Free trial"
+ * instead of a price and a "Start free trial" link to `<origin>/buy`, the
+ * portal on the hub the prices came from; it has no renewal notice. Vendor-entered name and description are Astro-escaped text; the
  * description keeps its line breaks as `<br>`. The renewal headline is the
  * hub's own wording, shown verbatim on annual offerings only. Licence
  * features are deliberately not listed (the tier→feature matrix is ROADMAP
  * W3.3).
  */
 import {
+  FREE_TRIAL_LABEL,
   formatPrice,
   intervalLabel,
   quotaLabel,
   scopeLabel,
   seatsLabel,
   termLabel,
+  trialHref,
   type CatalogOffering,
 } from "../lib/offerings";
-import { body, grid, item } from "../lib/ui";
+import { body, grid, item, link } from "../lib/ui";
 
 interface Props {
   offerings: CatalogOffering[];
+  /** The hub origin the offerings were read from (`PRICING_HUB_ORIGIN`). */
+  origin: string;
 }
 
-const { offerings } = Astro.props;
+const { offerings, origin } = Astro.props;
 ---
 
 <ul class={grid} data-price-list>
@@ -31,8 +37,14 @@ const { offerings } = Astro.props;
       <li class={item} data-offering={o.id}>
         <h2 class="font-semibold">{o.name}</h2>
         <p class="mt-1 text-lg font-semibold text-slate-900" data-price>
-          {formatPrice(o.price_minor, o.currency)}{" "}
-          <span class="text-sm font-normal text-slate-700">{intervalLabel(o.interval)}</span>
+          {o.trial ? (
+            FREE_TRIAL_LABEL
+          ) : (
+            <>
+              {formatPrice(o.price_minor, o.currency)}{" "}
+              <span class="text-sm font-normal text-slate-700">{intervalLabel(o.interval)}</span>
+            </>
+          )}
         </p>
         <p class={body} data-description>
           {o.description.split(/\r?\n/).map((line, i) => (
@@ -48,7 +60,14 @@ const { offerings } = Astro.props;
           <li>{quotaLabel(o.grants.quota_erasures)}</li>
           <li>{termLabel(o.grants.term_months)}</li>
         </ul>
-        {o.interval === "annual" && o.renewal_notice && (
+        {o.trial && (
+          <p class="mt-2 text-sm">
+            <a href={trialHref(origin)} class={link} data-start-trial>
+              Start free trial
+            </a>
+          </p>
+        )}
+        {!o.trial && o.interval === "annual" && o.renewal_notice && (
           <p class="mt-2 text-sm text-slate-700" data-renewal-notice>
             {o.renewal_notice.headline}
           </p>

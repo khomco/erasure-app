@@ -13,8 +13,9 @@ use support::stripe_mock::{spawn_stripe_hub, StripeMock};
 use uuid::Uuid;
 use wipe_hub::entitlements::renewal_notice_now;
 use wipe_hub::order_routes::{
-    MSG_CHECKOUT_ENDED, MSG_NOT_FOR_SALE, MSG_NO_CHECKOUT, MSG_NO_ORDER, MSG_OWNER_ONLY_BILLING,
-    MSG_OWNER_ONLY_BUY, MSG_PROVIDER_FAILED, MSG_UNVERIFIED_BUYER,
+    MSG_CHECKOUT_ENDED, MSG_NOT_A_TRIAL, MSG_NOT_FOR_SALE, MSG_NO_CHECKOUT, MSG_NO_ORDER,
+    MSG_OWNER_ONLY_BILLING, MSG_OWNER_ONLY_BUY, MSG_PROVIDER_FAILED, MSG_TRIAL_NOT_FOR_CHECKOUT,
+    MSG_TRIAL_TAKEN, MSG_UNVERIFIED_BUYER,
 };
 use wipe_hub::orders::ApplyOutcome;
 use wipe_hub::payments::{
@@ -193,6 +194,7 @@ async fn the_catalog_lists_published_offerings_to_anyone() {
             "price_minor": 120000,
             "currency": "USD",
             "interval": "annual",
+            "trial": false,
             "grants": {
                 "scope": "machine",
                 "seats": 1,
@@ -936,7 +938,8 @@ fn only_apply_event_updates_an_orders_status() {
 }
 
 /// Entitlements are written only by `entitlements.rs` (story 4), and inserted
-/// only by `entitlements::grant`.
+/// only by `entitlements::insert_grant`, which only `grant` (from
+/// `apply_event`) and `grant_trial` (from `take_trial`) call.
 #[test]
 fn only_the_entitlements_module_writes_entitlements() {
     for needle in [
@@ -955,13 +958,34 @@ fn only_the_entitlements_module_writes_entitlements() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
     let source = std::fs::read_to_string(format!("{dir}/entitlements.rs")).unwrap();
     let at = source.find("INSERT INTO entitlements ").unwrap();
-    let grant = source.find("pub(crate) async fn grant").unwrap();
-    let next = source[grant + 1..].find("\npub(crate) async fn ").unwrap() + grant + 1;
-    assert!(grant < at && at < next, "the INSERT is not inside grant");
-    // `grant` is called only from `apply_event`.
-    let calls = source_lines_with("entitlements::grant(");
-    assert_eq!(calls.len(), 1, "{calls:?}");
-    assert!(calls[0].starts_with("orders.rs:"), "{calls:?}");
+    let insert = source.find("async fn insert_grant(").unwrap();
+    let next = source[insert + 1..].find("\npub(crate) async fn ").unwrap() + insert + 1;
+    assert!(
+        insert < at && at < next,
+        "the INSERT is not inside insert_grant"
+    );
+    assert_eq!(
+        source.matches("insert_grant(").count(),
+        3,
+        "definition and two calls"
+    );
+    // `grant` is called only from `apply_event`, `grant_trial` only from
+    // `take_trial`.
+    let orders = std::fs::read_to_string(format!("{dir}/orders.rs")).unwrap();
+    for (call, caller) in [
+        ("entitlements::grant(", "pub async fn apply_event"),
+        ("entitlements::grant_trial(", "pub async fn take_trial"),
+    ] {
+        let calls = source_lines_with(call);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].starts_with("orders.rs:"), "{calls:?}");
+        let at = orders.find(call).unwrap();
+        let start = orders.find(caller).unwrap();
+        let end = orders[start + 1..]
+            .find("\npub async fn ")
+            .map_or(orders.len(), |i| start + 1 + i);
+        assert!(start < at && at < end, "{call} is not inside {caller}");
+    }
 }
 
 /// `apply_event` is called only from `payment_events::receive`, so every
@@ -1013,4 +1037,305 @@ async fn owners_open_billing() {
         .post_empty("/api/billing/portal", Some(&f.member.cookie))
         .await;
     assert_error(resp, StatusCode::FORBIDDEN, MSG_OWNER_ONLY_BILLING).await;
+}
+
+// ---------------------------------------------------------------------------
+// Free trials (controlled-licensing story 1, ADR-0013 §2)
+
+impl Fixture {
+    async fn take_trial(&self, who: &Who, offering_id: &str) -> Response {
+        self.hub
+            .post(
+                "/api/trials",
+                json!({ "offering_id": offering_id }),
+                Some(&who.cookie),
+            )
+            .await
+    }
+
+    /// Rows that taking a trial writes: orders, entitlements, audit rows.
+    async fn trial_counts(&self) -> (i64, i64, i64) {
+        (
+            self.hub.count("orders").await,
+            self.hub.count("entitlements").await,
+            self.audit_count().await,
+        )
+    }
+}
+
+#[tokio::test]
+async fn the_catalog_shows_a_trial_as_free_without_a_renewal_notice() {
+    let f = fixture().await;
+    let id = f.hub.published_trial_offering("Free trial").await;
+    let v = ok_json(f.hub.get("/api/offerings", None).await).await;
+    let item = &v["offerings"][0];
+    assert_eq!(item["id"], id.as_str());
+    assert_eq!(item["trial"], true);
+    assert_eq!(item["price_minor"], 0);
+    assert_eq!(item["interval"], "one_off");
+    assert_eq!(item["renewal_notice"], Value::Null);
+    assert_eq!(item["grants"]["quota_erasures"], 25);
+}
+
+#[tokio::test]
+async fn a_verified_owner_takes_a_trial_once() {
+    let f = fixture().await;
+    let offering = f.hub.published_trial_offering("Free trial").await;
+    let before = f.trial_counts().await;
+
+    let resp = f.take_trial(&f.owner, &offering).await;
+    let code = resp.status();
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    let order = &v["order"];
+    let order_id = order["id"].as_str().unwrap().to_string();
+    assert_eq!(order["status"], "paid");
+    assert_eq!(order["provider"], "trial");
+    assert_eq!(order["price_minor"], 0);
+    assert_eq!(order["offering_id"], offering.as_str());
+    assert_eq!(order["offering_name"], "Free trial");
+    assert!(order["paid_at"].is_string());
+    let ent = &v["entitlement"];
+    let ent_id = ent["id"].as_str().unwrap().to_string();
+    assert_eq!(ent["order_id"], order_id.as_str());
+    assert_eq!(ent["status"], "active");
+    assert_eq!(ent["renews"], false);
+    assert_eq!(ent["current"], true);
+    assert_eq!(ent["grants"]["quota_erasures"], 25);
+    assert_eq!(ent["term_start"], order["paid_at"]);
+
+    // The stored rows: a paid order with its session, an entitlement with
+    // no subscription or payment, a one-month term from `paid_at`.
+    let stored = f.stored(&order_id).await;
+    assert_eq!(
+        stored["provider_session_id"],
+        format!("trial:{order_id}").as_str()
+    );
+    assert_eq!(stored["created_by"], f.owner.id.as_str());
+    let (provider, sub, pay, one_month): (String, Option<String>, Option<String>, bool) =
+        sqlx::query_as(
+            "SELECT e.provider, e.subscription_id, e.payment_ref, \
+                    e.term_end = o.paid_at + interval '1 month' AND e.term_start = o.paid_at \
+             FROM entitlements e JOIN orders o ON o.id = e.order_id WHERE e.id = $1::uuid",
+        )
+        .bind(&ent_id)
+        .fetch_one(&f.hub.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        (provider.as_str(), sub, pay, one_month),
+        ("trial", None, None, true)
+    );
+
+    // Two audit rows, as the owner.
+    let actor = format!("user:{}", f.owner.id);
+    assert_eq!(
+        f.order_audits(&order_id).await,
+        [(
+            "order.trial_taken".to_string(),
+            actor.clone(),
+            json!({ "offering_id": offering })
+        )]
+    );
+    let granted = f.hub.audited("entitlement.granted").await;
+    assert_eq!(granted.len(), 1);
+    assert_eq!(granted[0].0, actor);
+    assert_eq!(granted[0].1, format!("entitlement:{ent_id}"));
+    assert_eq!(granted[0].2["order_id"], order_id.as_str());
+    assert_eq!(granted[0].2["term_end"], ent["term_end"]);
+    assert_eq!(
+        f.trial_counts().await,
+        (before.0 + 1, before.1 + 1, before.2 + 2)
+    );
+
+    // The seats page lists it as current; the orders list shows it.
+    let seats = ok_json(f.hub.get("/api/entitlements", Some(&f.member.cookie)).await).await;
+    assert_eq!(seats["available_seats"], 1);
+    assert_eq!(seats["entitlements"][0]["id"], ent_id.as_str());
+    let listed = ok_json(f.hub.get("/api/orders", Some(&f.member.cookie)).await).await;
+    assert_eq!(listed["orders"][0], *order);
+
+    // Again: 409, nothing written.
+    let after = f.trial_counts().await;
+    assert_error(
+        f.take_trial(&f.owner, &offering).await,
+        StatusCode::CONFLICT,
+        MSG_TRIAL_TAKEN,
+    )
+    .await;
+    assert_eq!(f.trial_counts().await, after);
+
+    // Another organization takes the same trial.
+    let other = f.hub.verified_owner("Other Recyclers").await;
+    assert_eq!(
+        f.take_trial(&other, &offering).await.status(),
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn concurrent_trial_takes_give_exactly_one_201() {
+    let f = fixture().await;
+    let offering = f.hub.published_trial_offering("Free trial").await;
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        set.spawn(
+            f.hub
+                .post_req("/api/trials", Some(&f.owner.cookie))
+                .json(&json!({ "offering_id": offering }))
+                .send(),
+        );
+    }
+    let mut codes = Vec::new();
+    while let Some(r) = set.join_next().await {
+        let resp = r.unwrap().unwrap();
+        let code = resp.status();
+        if code == StatusCode::CONFLICT {
+            let v: Value = resp.json().await.unwrap();
+            assert_eq!(v["error"], MSG_TRIAL_TAKEN);
+        }
+        codes.push(code);
+    }
+    codes.sort();
+    let mut want = vec![StatusCode::CREATED];
+    want.extend([StatusCode::CONFLICT; 7]);
+    assert_eq!(codes, want);
+    assert_eq!(f.hub.count("orders").await, 1);
+    assert_eq!(f.hub.count("entitlements").await, 1);
+    assert_eq!(f.hub.audited("order.trial_taken").await.len(), 1);
+}
+
+#[tokio::test]
+async fn refused_trials_write_nothing() {
+    let f = fixture().await;
+    let admin = bootstrap_admin(&f.hub).await;
+    let unverified = f
+        .hub
+        .sign_up(&support::unique_address(), "Unverified Ltd")
+        .await;
+    let trial = f.hub.published_trial_offering("Free trial").await;
+    let priced = f.hub.published_offering("For sale").await;
+    let draft = insert_offering(&f.hub, "Not yet", "draft").await;
+    let retired = insert_offering(&f.hub, "Gone", "retired").await;
+    let before = (f.hub.counts().await, f.trial_counts().await);
+
+    for who in [&f.member, &admin] {
+        assert_error(
+            f.take_trial(who, &trial).await,
+            StatusCode::FORBIDDEN,
+            MSG_OWNER_ONLY_BUY,
+        )
+        .await;
+    }
+    assert_error(
+        f.take_trial(&unverified, &trial).await,
+        StatusCode::FORBIDDEN,
+        MSG_UNVERIFIED_BUYER,
+    )
+    .await;
+    assert_error(
+        f.take_trial(&f.owner, &priced).await,
+        StatusCode::CONFLICT,
+        MSG_NOT_A_TRIAL,
+    )
+    .await;
+    for id in [Uuid::new_v4().to_string(), draft, retired] {
+        assert_error(
+            f.take_trial(&f.owner, &id).await,
+            StatusCode::NOT_FOUND,
+            MSG_NOT_FOR_SALE,
+        )
+        .await;
+    }
+    for body in [
+        json!({"offering_id": "not-a-uuid"}),
+        json!({}),
+        json!({"offering_id": trial, "price_minor": 0}),
+    ] {
+        let resp = f
+            .hub
+            .post("/api/trials", body.clone(), Some(&f.owner.cookie))
+            .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    let resp = f
+        .hub
+        .post("/api/trials", json!({"offering_id": trial}), None)
+        .await;
+    assert_error(resp, StatusCode::UNAUTHORIZED, NOT_SIGNED_IN).await;
+    // No CSRF token: refused like every state-changing route.
+    let resp = f
+        .hub
+        .http
+        .post(f.hub.url("/api/trials"))
+        .header(reqwest::header::COOKIE, &f.owner.cookie)
+        .json(&json!({"offering_id": trial}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    assert_eq!((f.hub.counts().await, f.trial_counts().await), before);
+}
+
+#[tokio::test]
+async fn a_trial_cannot_be_checked_out_and_the_provider_is_not_called() {
+    let mock = StripeMock::start().await;
+    let f = fixture_on(spawn_stripe_hub(&mock).await).await;
+    let trial = f.hub.published_trial_offering("Free trial").await;
+    let before = f.trial_counts().await;
+    assert_error(
+        f.checkout(&f.owner, &trial).await,
+        StatusCode::CONFLICT,
+        MSG_TRIAL_NOT_FOR_CHECKOUT,
+    )
+    .await;
+    assert!(mock.requests().is_empty());
+    assert_eq!(f.trial_counts().await, before);
+    // Under Stripe, a trial is still taken without the provider.
+    assert_eq!(
+        f.take_trial(&f.owner, &trial).await.status(),
+        StatusCode::CREATED
+    );
+    assert!(mock.requests().is_empty());
+}
+
+#[tokio::test]
+async fn the_schema_keeps_trial_orders_free_and_once_per_organization() {
+    let f = fixture().await;
+    let trial = f.hub.published_trial_offering("Free trial").await;
+    let v: Value = f.take_trial(&f.owner, &trial).await.json().await.unwrap();
+    let id = v["order"]["id"].as_str().unwrap().to_string();
+    let pool = &f.hub.db.pool;
+    let org: Uuid = sqlx::query_scalar("SELECT organization_id FROM orders WHERE id = $1::uuid")
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let insert = |price: i64, provider: &'static str, session: String| {
+        sqlx::query(
+            "INSERT INTO orders (organization_id, offering_id, offering_name, price_minor, \
+                                 currency, billing_interval, scope, seats, quota_erasures, \
+                                 term_months, provider, provider_session_id) \
+             VALUES ($1, $2::uuid, 'T', $3, 'USD', 'one_off', 'site', 1, 25, 1, $4, $5)",
+        )
+        .bind(org)
+        .bind(trial.clone())
+        .bind(price)
+        .bind(provider)
+        .bind(session)
+    };
+    // A second trial order for the organization, a free non-trial, a priced
+    // trial, and a changed snapshot are all refused.
+    for (price, provider) in [(0, "trial"), (0, "fake"), (5, "trial")] {
+        insert(price, provider, format!("x-{}", Uuid::new_v4()))
+            .execute(pool)
+            .await
+            .expect_err(provider);
+    }
+    sqlx::query("UPDATE orders SET price_minor = 1 WHERE id = $1::uuid")
+        .bind(&id)
+        .execute(pool)
+        .await
+        .expect_err("snapshot");
 }

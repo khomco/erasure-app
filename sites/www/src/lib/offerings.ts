@@ -34,6 +34,11 @@ export interface CatalogOffering {
   price_minor: number;
   currency: string;
   interval: "one_off" | "annual";
+  /**
+   * A free trial (ADR-0013 §2): price 0, one-off, a counted erasure quota.
+   * Shown as "Free trial" with a "Start free trial" link to the portal.
+   */
+  trial: boolean;
   grants: Grants;
   /** Non-null exactly when `interval` is `annual`. */
   renewal_notice: RenewalNotice | null;
@@ -69,7 +74,13 @@ function parseOffering(o: unknown, at: string): CatalogOffering {
   for (const f of ["id", "name", "description"] as const) {
     if (typeof r[f] !== "string") fail(f, "not a string");
   }
-  if (!isIntAtLeast(r.price_minor, 1)) fail("price_minor", "not a positive safe integer");
+  if (typeof r.trial !== "boolean") fail("trial", "not a boolean");
+  const trial = r.trial as boolean;
+  if (trial) {
+    if (r.price_minor !== 0) fail("price_minor", "not 0 on a free trial");
+  } else if (!isIntAtLeast(r.price_minor, 1)) {
+    fail("price_minor", "not a positive safe integer");
+  }
   if (typeof r.currency !== "string" || !/^[A-Z]{3}$/.test(r.currency)) {
     fail("currency", `${JSON.stringify(r.currency)} is not a three-letter upper-case code`);
   }
@@ -95,6 +106,10 @@ function parseOffering(o: unknown, at: string): CatalogOffering {
   if (!isIntAtLeast(grants.term_months, 1)) {
     fail("grants.term_months", "not an integer of at least 1");
   }
+  if (trial && r.interval !== "one_off") fail("interval", "not one_off on a free trial");
+  if (trial && grants.quota_erasures === null) {
+    fail("grants.quota_erasures", "unlimited on a free trial");
+  }
   const n = r.renewal_notice;
   if (n !== null && !(isObject(n) && typeof n.headline === "string")) {
     fail("renewal_notice", "neither null nor an object with a string headline");
@@ -112,6 +127,7 @@ function parseOffering(o: unknown, at: string): CatalogOffering {
     price_minor: r.price_minor as number,
     currency: r.currency as string,
     interval: r.interval as CatalogOffering["interval"],
+    trial,
     grants: {
       scope: grants.scope as Grants["scope"],
       seats: grants.seats as number,
@@ -223,6 +239,18 @@ export function formatPrice(minor: number, currency: string): string {
   const [whole, frac] = minorToDecimal(minor, currency).split(".");
   const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   return `${frac === undefined ? grouped : `${grouped}.${frac}`} ${currency}`;
+}
+
+/** Shown in place of a price for a free trial; the portal's `/buy` says the same. */
+export const FREE_TRIAL_LABEL = "Free trial";
+
+/**
+ * Where a free trial's "Start free trial" link goes: the portal's `/buy`,
+ * served by the hub the prices were read from, which asks a signed-out
+ * visitor to sign in first.
+ */
+export function trialHref(origin: string): string {
+  return `${origin}/buy`;
 }
 
 const grouped = (n: number) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");

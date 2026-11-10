@@ -125,6 +125,25 @@ fn subject(id: &str) -> String {
     format!("offering:{id}")
 }
 
+/// A valid free trial body (ADR-0013 §2).
+fn trial_body(name: &str) -> Value {
+    json!({
+        "name": name,
+        "description": "Try it on one bench.",
+        "price_minor": 0,
+        "currency": "USD",
+        "interval": "one_off",
+        "trial": true,
+        "grants": {
+            "scope": "site",
+            "seats": 1,
+            "quota_erasures": 25,
+            "features": [],
+            "term_months": 1
+        }
+    })
+}
+
 #[tokio::test]
 async fn create_returns_a_normalised_draft_and_audits_it_in_full() {
     let f = fixture().await;
@@ -147,7 +166,9 @@ async fn create_returns_a_normalised_draft_and_audits_it_in_full() {
     assert_eq!(o["published_at"], Value::Null);
     assert_eq!(o["retired_at"], Value::Null);
     let keys: Vec<&String> = o.as_object().unwrap().keys().collect();
-    assert_eq!(keys.len(), 12, "{keys:?}");
+    assert_eq!(keys.len(), 13, "{keys:?}");
+    // A body without `trial` is not a trial.
+    assert_eq!(o["trial"], false);
 
     let row = f.stored(&id).await;
     assert_eq!(row["status"], "draft");
@@ -690,4 +711,170 @@ async fn an_edit_racing_a_publish_is_a_409_not_a_500() {
     .await;
     assert_eq!(f.stored(&id).await["price_minor"], 120000);
     assert_eq!(f.audit_count().await, rows);
+}
+
+// ---------------------------------------------------------------------------
+// Free trials (controlled-licensing story 1)
+
+#[tokio::test]
+async fn an_admin_creates_and_publishes_a_free_trial() {
+    let f = fixture().await;
+    let o = f.create(trial_body("Free trial")).await;
+    let id = id_of(&o);
+    assert_eq!(o["trial"], true);
+    assert_eq!(o["price_minor"], 0);
+    assert_eq!(o["interval"], "one_off");
+    assert_eq!(o["grants"]["quota_erasures"], 25);
+    assert_eq!(f.stored(&id).await["trial"], true);
+    let audits = f.audits("admin.offering_created").await;
+    assert_eq!(audits, [(subject(&id), json!({ "offering": o }))]);
+    let published = ok_json(f.publish(&id).await).await;
+    assert_eq!(published["offering"]["trial"], true);
+    assert_eq!(published["offering"]["status"], "published");
+}
+
+#[tokio::test]
+async fn a_bad_trial_or_a_free_non_trial_is_400_naming_the_field() {
+    let f = fixture().await;
+    let before = f.audit_count().await;
+    let cases: Vec<(Value, &str)> = vec![
+        (
+            {
+                let mut b = trial_body("T");
+                b["price_minor"] = json!(5);
+                b
+            },
+            "price_minor",
+        ),
+        (
+            {
+                let mut b = trial_body("T");
+                b["interval"] = json!("annual");
+                b["grants"]["term_months"] = json!(12);
+                b
+            },
+            "interval",
+        ),
+        (
+            {
+                let mut b = trial_body("T");
+                b["grants"]["quota_erasures"] = Value::Null;
+                b
+            },
+            "grants.quota_erasures",
+        ),
+        (
+            {
+                let mut b = trial_body("T");
+                b["trial"] = json!(false);
+                b
+            },
+            "price_minor",
+        ),
+        (
+            {
+                let mut b = body("T");
+                b["price_minor"] = json!(0);
+                b
+            },
+            "price_minor",
+        ),
+        (
+            {
+                let mut b = trial_body("T");
+                b["trial"] = json!("yes");
+                b
+            },
+            "trial",
+        ),
+    ];
+    for (b, field) in cases {
+        let resp = f.post("/api/admin/offerings", b.clone()).await;
+        let code = resp.status();
+        let err: Value = resp.json().await.unwrap();
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{b}: {err}");
+        let msg = err["error"].as_str().unwrap();
+        assert!(msg.contains(field), "{b}: {msg}");
+    }
+    assert_eq!(f.hub.count("offerings").await, 0);
+    assert_eq!(f.audit_count().await, before);
+}
+
+#[tokio::test]
+async fn a_drafts_trial_flag_may_change_and_is_audited_but_freezes_at_publication() {
+    let f = fixture().await;
+    let id = id_of(&f.create(body("Station")).await);
+    let path = format!("/api/admin/offerings/{id}");
+    let v = ok_json(f.post(&path, trial_body("Station")).await).await;
+    assert_eq!(v["offering"]["trial"], true);
+    let (_, detail) = f.audits("admin.offering_updated").await.pop().unwrap();
+    assert_eq!(
+        detail["changes"]["trial"],
+        json!({"from": false, "to": true})
+    );
+
+    ok_json(f.publish(&id).await).await;
+    let row = f.stored(&id).await;
+    let audits = f.audit_count().await;
+    // Making the published trial a priced offering is a terms change.
+    assert_error(
+        f.post(&path, body("Station")).await,
+        StatusCode::CONFLICT,
+        MSG_TERMS_FROZEN,
+    )
+    .await;
+    // Copy may still change.
+    let mut renamed = trial_body("Station trial");
+    renamed["description"] = json!("New copy.");
+    ok_json(f.post(&path, renamed).await).await;
+    assert_eq!(f.audit_count().await, audits + 1);
+    // The schema backstop: `trial` is frozen too.
+    let r = sqlx::query("UPDATE offerings SET trial = false WHERE id = $1::uuid")
+        .bind(&id)
+        .execute(&f.hub.db.pool)
+        .await;
+    assert!(r.is_err());
+    assert_eq!(f.stored(&id).await["trial"], row["trial"]);
+}
+
+#[tokio::test]
+async fn the_schema_refuses_a_bad_trial() {
+    let f = fixture().await;
+    let pool = &f.hub.db.pool;
+    for (sql, why) in [
+        (
+            "INSERT INTO offerings (name, price_minor, currency, billing_interval, scope, seats, \
+                                    quota_erasures, term_months, trial) \
+             VALUES ('Bad', 5, 'USD', 'one_off', 'site', 1, 25, 1, true)",
+            "a trial costs 0",
+        ),
+        (
+            "INSERT INTO offerings (name, price_minor, currency, billing_interval, scope, seats, \
+                                    quota_erasures, term_months, trial) \
+             VALUES ('Bad', 0, 'USD', 'annual', 'site', 1, 25, 12, true)",
+            "a trial is one-off",
+        ),
+        (
+            "INSERT INTO offerings (name, price_minor, currency, billing_interval, scope, seats, \
+                                    quota_erasures, term_months, trial) \
+             VALUES ('Bad', 0, 'USD', 'one_off', 'site', 1, NULL, 1, true)",
+            "a trial has a quota",
+        ),
+        (
+            "INSERT INTO offerings (name, price_minor, currency, billing_interval, scope, seats, \
+                                    quota_erasures, term_months) \
+             VALUES ('Bad', 0, 'USD', 'one_off', 'site', 1, 25, 1)",
+            "a non-trial costs at least 1",
+        ),
+    ] {
+        assert!(sqlx::query(sql).execute(pool).await.is_err(), "{why}");
+    }
+    sqlx::query(
+        "INSERT INTO offerings (name, price_minor, currency, billing_interval, scope, seats, \
+                                quota_erasures, term_months, trial) \
+         VALUES ('Good', 0, 'USD', 'one_off', 'site', 1, 25, 1, true)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
 }

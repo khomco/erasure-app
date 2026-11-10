@@ -24,10 +24,18 @@
 //!   the provider stores it in `billing_customers`, replacing a different
 //!   stored one (decision 10: the vendor may have deleted the old customer at
 //!   Stripe), and checkout and billing reuse it ([`billing_customer`]).
+//! - **Free trials** ([`take_trial`], ADR-0013 §2): a verified owner takes a
+//!   published trial offering without any payment provider. The order is
+//!   written already `paid` (provider `trial`, price 0, session
+//!   `trial:<order id>`) with its entitlement, once per organization per
+//!   trial offering (migration 0020's partial unique index). A checkout of a
+//!   trial is refused before the provider is called.
 //! - **Every state change writes one audit row** in its transaction:
 //!   `order.created` (actor `user:<id>`), then `order.paid` or
 //!   `order.expired`, later `order.refunded` (actor `provider:<name>`,
-//!   detail `{event_id}`); the subject is `order:<id>`.
+//!   detail `{event_id}`); the subject is `order:<id>`. A free trial,
+//!   written already paid, writes `order.trial_taken {offering_id}` (actor
+//!   `user:<id>`) instead of `order.created` and `order.paid`.
 //! - **Every customer query takes the organization id first**; another
 //!   organization's order or session is the same `None` as an unknown one.
 //! - Money is integer minor units; timestamps are RFC 3339 UTC strings
@@ -66,6 +74,9 @@ pub struct CatalogOffering {
     pub currency: String,
     /// `one_off` or `annual`.
     pub interval: String,
+    /// A free trial (price 0, one-off): taken with `POST /api/trials`, never
+    /// bought.
+    pub trial: bool,
     pub grants: Grants,
     /// The auto-renewal notice for an annual offering, dated today; `null`
     /// for a one-off.
@@ -86,7 +97,7 @@ pub struct Order {
     pub grants: Grants,
     /// `pending`, `paid`, `expired` or `refunded`.
     pub status: String,
-    /// `fake` or `stripe`.
+    /// `fake`, `stripe`, or `trial` for a free trial taken without payment.
     pub provider: String,
     /// RFC 3339, UTC.
     pub created_at: String,
@@ -104,6 +115,7 @@ struct OfferingRow {
     price_minor: i64,
     currency: String,
     billing_interval: String,
+    trial: bool,
     scope: String,
     seats: i32,
     quota_erasures: Option<i64>,
@@ -123,6 +135,7 @@ impl From<OfferingRow> for CatalogOffering {
             price_minor: r.price_minor,
             currency: r.currency,
             interval: r.billing_interval,
+            trial: r.trial,
             grants: Grants {
                 scope: r.scope,
                 seats: r.seats,
@@ -189,12 +202,30 @@ pub enum OrderError {
     /// The offering is unknown, a draft or retired.
     #[error("the offering is not for sale")]
     NotForSale,
+    /// A checkout of a free trial offering.
+    #[error("the offering is a free trial")]
+    IsTrial,
+    /// `POST /api/trials` for an offering that is not a free trial.
+    #[error("the offering is not a free trial")]
+    NotTrial,
+    /// The organization has already taken this free trial.
+    #[error("the organization has already taken this free trial")]
+    TrialTaken,
     #[error(transparent)]
     Provider(#[from] ProviderError),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
     Audit(#[from] AuditError),
+}
+
+impl From<ApplyError> for OrderError {
+    fn from(e: ApplyError) -> Self {
+        match e {
+            ApplyError::Db(e) => Self::Db(e),
+            ApplyError::Audit(e) => Self::Audit(e),
+        }
+    }
 }
 
 /// What [`apply_event`] did with an event. The names are the
@@ -242,7 +273,14 @@ pub enum ApplyError {
 // Queries
 
 const OFFERING_COLUMNS: &str = "id, name, description, price_minor, currency, billing_interval, \
-     scope, seats, quota_erasures, features, term_months";
+     trial, scope, seats, quota_erasures, features, term_months";
+
+/// The provider name of an order or entitlement taken as a free trial.
+pub const TRIAL_PROVIDER: &str = "trial";
+
+/// Migration 0020's partial unique index: one free trial order per
+/// organization per offering.
+const TRIAL_ONCE_INDEX: &str = "orders_trial_once_key";
 
 /// `SELECT … FROM orders o`, every column of [`OrderRow`]; callers add the
 /// `WHERE` (and qualify columns with `o.`).
@@ -384,7 +422,8 @@ pub struct Checkout {
 /// ask `provider` for a hosted checkout (with the organization's stored
 /// customer at that provider, if any), then insert the pending order with
 /// the session id and audit `order.created {offering_id, price_minor,
-/// currency, provider}`. A provider error writes nothing.
+/// currency, provider}`. A provider error writes nothing. A free trial is
+/// [`OrderError::IsTrial`], before the provider is called.
 pub async fn create(
     conn: &mut PgConnection,
     provider: &dyn PaymentProvider,
@@ -400,6 +439,9 @@ pub async fn create(
     .fetch_optional(&mut *conn)
     .await?;
     let offering = CatalogOffering::from(offering.ok_or(OrderError::NotForSale)?);
+    if offering.trial {
+        return Err(OrderError::IsTrial);
+    }
     let order_id = Uuid::new_v4();
     let customer_id = billing_customer(&mut *conn, organization_id, provider.name()).await?;
     let session = provider
@@ -459,6 +501,93 @@ pub async fn create(
     Ok(Checkout {
         order,
         checkout_url: session.url,
+    })
+}
+
+/// What [`take_trial`] returns: the paid order and its entitlement.
+#[derive(Debug, Clone)]
+pub struct TrialTaken {
+    pub order: Order,
+    pub entitlement: entitlements::Entitlement,
+}
+
+/// Take the free trial `offering_id` for `user_id`'s organization, in the
+/// caller's transaction (ADR-0013 §2), with no payment provider: read the
+/// offering `FOR SHARE` (anything but `published` is
+/// [`OrderError::NotForSale`], a priced one [`OrderError::NotTrial`]),
+/// insert its snapshot as an order already `paid` (provider `trial`,
+/// session `trial:<order id>`), audit `order.trial_taken {offering_id}` and
+/// grant its entitlement ([`entitlements::grant_trial`]). A second take by
+/// the same organization hits migration 0020's partial unique index and is
+/// [`OrderError::TrialTaken`]; the caller's transaction must then be rolled
+/// back.
+pub async fn take_trial(
+    conn: &mut PgConnection,
+    organization_id: Uuid,
+    user_id: Uuid,
+    offering_id: Uuid,
+) -> Result<TrialTaken, OrderError> {
+    let offering: Option<OfferingRow> = sqlx::query_as(&format!(
+        "SELECT {OFFERING_COLUMNS} FROM offerings WHERE id = $1 AND status = 'published' \
+         FOR SHARE"
+    ))
+    .bind(offering_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let offering = CatalogOffering::from(offering.ok_or(OrderError::NotForSale)?);
+    if !offering.trial {
+        return Err(OrderError::NotTrial);
+    }
+    let order_id = Uuid::new_v4();
+    let g = &offering.grants;
+    sqlx::query(
+        "INSERT INTO orders (id, organization_id, offering_id, created_by, offering_name, \
+                             price_minor, currency, billing_interval, scope, seats, \
+                             quota_erasures, features, term_months, provider, \
+                             provider_session_id, status, paid_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'paid', now())",
+    )
+    .bind(order_id)
+    .bind(organization_id)
+    .bind(offering_id)
+    .bind(user_id)
+    .bind(&offering.name)
+    .bind(offering.price_minor)
+    .bind(&offering.currency)
+    .bind(&offering.interval)
+    .bind(&g.scope)
+    .bind(g.seats)
+    .bind(g.quota_erasures)
+    .bind(&g.features)
+    .bind(g.term_months)
+    .bind(TRIAL_PROVIDER)
+    .bind(format!("{TRIAL_PROVIDER}:{order_id}"))
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| match &e {
+        sqlx::Error::Database(d) if d.constraint() == Some(TRIAL_ONCE_INDEX) => {
+            OrderError::TrialTaken
+        }
+        _ => OrderError::Db(e),
+    })?;
+    let actor = actor(user_id);
+    audit::record(
+        &mut *conn,
+        &AuditEntry {
+            actor: &actor,
+            action: "order.trial_taken",
+            subject: &subject(order_id),
+            detail: json!({ "offering_id": offering_id }),
+        },
+    )
+    .await?;
+    let entitlement_id = entitlements::grant_trial(conn, order_id, &actor).await?;
+    let entitlement = entitlements::get(&mut *conn, organization_id, entitlement_id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+    Ok(TrialTaken {
+        order: fetch(conn, order_id).await?,
+        entitlement,
     })
 }
 

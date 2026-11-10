@@ -1,10 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { formatPrice } from "@/api/adminOfferings";
 import { fetchOrder } from "@/api/orders";
 import { FormError } from "./AuthForm";
-import { INTERVAL_LABELS } from "./OfferingForm";
-import { ORDER_STATUS_LABELS, grantsText } from "./OrdersPage";
+import { ORDER_STATUS_LABELS, PROVIDER_LABELS, grantsText, orderPriceText } from "./OrdersPage";
 
 /** How often a pending order is re-read, waiting for the provider's event. */
 const PENDING_REFETCH_MS = 3000;
@@ -36,9 +34,7 @@ export function OrderPage({ id }: { id: string }) {
           <dt className="text-slate-400">Offering</dt>
           <dd>{o.offering_name}</dd>
           <dt className="text-slate-400">Price</dt>
-          <dd>
-            {formatPrice(o.price_minor, o.currency)} ({INTERVAL_LABELS[o.interval].toLowerCase()})
-          </dd>
+          <dd>{orderPriceText(o, { bracketed: true })}</dd>
           <dt className="text-slate-400">Grants</dt>
           <dd>{grantsText(o.grants)}</dd>
           <dt className="text-slate-400">Status</dt>
@@ -69,7 +65,7 @@ export function OrderPage({ id }: { id: string }) {
             </>
           )}
           <dt className="text-slate-400">Payment provider</dt>
-          <dd>{o.provider === "fake" ? "Test (no money moves)" : "Stripe"}</dd>
+          <dd>{PROVIDER_LABELS[o.provider]}</dd>
         </dl>
       )}
     </section>

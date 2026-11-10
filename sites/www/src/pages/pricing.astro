@@ -26,7 +26,7 @@ const description = priced
   <h1 class={h1}>Pricing</h1>
   {
     priced ? (
-      <PriceList offerings={offerings} />
+      <PriceList offerings={offerings} origin={origin} />
     ) : (
       <div class={prose}>
         <p class="text-lg font-semibold text-slate-900">Early-access pricing on request.</p>

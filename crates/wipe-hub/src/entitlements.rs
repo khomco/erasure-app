@@ -9,6 +9,9 @@
 //!   `term_months`, and it renews when the payment started a subscription.
 //!   Seats, scope, quota, features and term length are read from the order's
 //!   immutable snapshot, never copied.
+//!   A free trial's order is written paid by [`crate::orders::take_trial`],
+//!   which grants its entitlement the same way ([`grant_trial`]: provider
+//!   `trial`, no subscription, never renews, actor `user:<id>`).
 //! - **Renewal** ([`renew`]): each paid renewal invoice extends the term by
 //!   12 months from its current end, once per invoice (`entitlement_renewals`
 //!   is keyed by the provider's invoice id).
@@ -266,6 +269,38 @@ pub(crate) async fn grant(
     order_id: Uuid,
     event: &VerifiedEvent,
 ) -> Result<Uuid, ApplyError> {
+    insert_grant(
+        conn,
+        order_id,
+        &provider_actor(event),
+        event.subscription_id(),
+        event.payment_ref(),
+    )
+    .await
+}
+
+/// Create the entitlement of the free trial order `order_id`, written paid
+/// by [`orders::take_trial`] in the caller's transaction: no subscription,
+/// no payment reference, never renews. Audited as `actor` (`user:<id>`).
+pub(crate) async fn grant_trial(
+    conn: &mut PgConnection,
+    order_id: Uuid,
+    actor: &str,
+) -> Result<Uuid, ApplyError> {
+    insert_grant(conn, order_id, actor, None, None).await
+}
+
+/// The one entitlement insert: the term runs from the paid order's
+/// `paid_at` for its `term_months`, the provider is the order's, and it
+/// renews exactly when there is a subscription. Audits `entitlement.granted
+/// {order_id, term_end}` as `actor`.
+async fn insert_grant(
+    conn: &mut PgConnection,
+    order_id: Uuid,
+    actor: &str,
+    subscription_id: Option<&str>,
+    payment_ref: Option<&str>,
+) -> Result<Uuid, ApplyError> {
     let (id, term_end): (Uuid, String) = sqlx::query_as(&format!(
         "INSERT INTO entitlements (organization_id, order_id, provider, subscription_id, \
                                    payment_ref, term_start, term_end, renews) \
@@ -275,14 +310,14 @@ pub(crate) async fn grant(
          RETURNING id, to_char(term_end AT TIME ZONE 'UTC', {RFC3339_UTC})"
     ))
     .bind(order_id)
-    .bind(event.subscription_id())
-    .bind(event.payment_ref())
+    .bind(subscription_id)
+    .bind(payment_ref)
     .fetch_one(&mut *conn)
     .await?;
     audit::record(
         &mut *conn,
         &AuditEntry {
-            actor: &provider_actor(event),
+            actor,
             action: "entitlement.granted",
             subject: &subject(id),
             detail: json!({ "order_id": order_id, "term_end": term_end }),

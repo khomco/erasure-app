@@ -1233,3 +1233,75 @@ async fn release_downloads_are_append_only_and_of_published_files_only() {
         .unwrap();
     assert_eq!(n, 1);
 }
+
+/// Migration 0020 (controlled-licensing story 1): free trial offerings and
+/// the orders and entitlements that taking one writes.
+#[tokio::test]
+async fn trial_offerings_orders_and_entitlements_are_checked() {
+    let t = TestDb::migrated().await;
+    let pool = &t.pool;
+    // An existing kind of offering defaults to not a trial.
+    let (paid, org) = paid_order(&t, "annual").await;
+    let trial: bool = sqlx::query_scalar(
+        "SELECT f.trial FROM offerings f JOIN orders o ON o.offering_id = f.id WHERE o.id = $1",
+    )
+    .bind(paid)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert!(!trial);
+
+    let offering: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO offerings (name, price_minor, currency, billing_interval, scope, seats, \
+                                quota_erasures, term_months, trial) \
+         VALUES ('Trial', 0, 'USD', 'one_off', 'site', 1, 25, 1, true) RETURNING id",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let insert_order = |price: i64, provider: &'static str| {
+        sqlx::query_scalar::<_, uuid::Uuid>(
+            "INSERT INTO orders (organization_id, offering_id, offering_name, price_minor, \
+                                 currency, billing_interval, scope, seats, quota_erasures, \
+                                 term_months, provider, provider_session_id, status, paid_at) \
+             VALUES ($1, $2, 'Trial', $3, 'USD', 'one_off', 'site', 1, 25, 1, $4, \
+                     'trial:' || gen_random_uuid(), 'paid', now()) RETURNING id",
+        )
+        .bind(org)
+        .bind(offering)
+        .bind(price)
+        .bind(provider)
+    };
+    // Free exactly when a trial; never a negative price or another provider.
+    for (price, provider) in [(0, "fake"), (0, "stripe"), (1, "trial"), (-1, "trial")] {
+        insert_order(price, provider)
+            .fetch_one(pool)
+            .await
+            .expect_err(provider);
+    }
+    insert_order(0, "gift")
+        .fetch_one(pool)
+        .await
+        .expect_err("gift");
+    let order = insert_order(0, "trial").fetch_one(pool).await.unwrap();
+    // Once per organization per trial offering.
+    let e = insert_order(0, "trial").fetch_one(pool).await.unwrap_err();
+    assert_eq!(
+        e.as_database_error().and_then(|d| d.constraint()),
+        Some("orders_trial_once_key")
+    );
+
+    // The entitlement accepts provider `trial`, nothing unknown.
+    let insert_ent = |provider: &'static str| {
+        sqlx::query(
+            "INSERT INTO entitlements (organization_id, order_id, provider, term_start, \
+                                       term_end, renews) \
+             SELECT organization_id, id, $2, paid_at, paid_at + interval '1 month', false \
+             FROM orders WHERE id = $1",
+        )
+        .bind(order)
+        .bind(provider)
+    };
+    insert_ent("gift").execute(pool).await.expect_err("gift");
+    insert_ent("trial").execute(pool).await.unwrap();
+}
