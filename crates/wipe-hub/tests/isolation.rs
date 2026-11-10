@@ -118,6 +118,16 @@ const ROUTES: &[(&str, &str, Class)] = &[
         "/api/enrollments/poll",
         Anonymous("the secret device code and the station key's signature are the credential"),
     ),
+    (
+        "GET",
+        "/api/station/challenge",
+        Anonymous("issues a random single-use challenge; no account data"),
+    ),
+    (
+        "POST",
+        "/api/station/licence",
+        Anonymous("the station key's signature over a single-use challenge is the credential"),
+    ),
     ("POST", "/api/enrollments/lookup", Customer),
     ("POST", "/api/enrollments/approve", Customer),
     ("POST", "/api/enrollments/deny", Customer),

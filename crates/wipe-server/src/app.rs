@@ -87,6 +87,11 @@ pub struct AppState {
     /// The bench app's enrollment attempt and its polling task
     /// ([`crate::enrollment`]).
     pub enrollment: Arc<crate::enrollment::EnrollmentSlot>,
+    /// The latest licence check with the platform and the 24-hour loop's
+    /// task handle ([`crate::licence_fetch`]). The loop holds a clone of this
+    /// state, so it runs until the runtime shuts down; the slot's abort on
+    /// drop only applies once that task is gone.
+    pub licence_fetch: Arc<crate::licence_fetch::LicenceFetchSlot>,
 }
 
 impl AppState {
@@ -138,6 +143,7 @@ impl AppState {
             settings_path: None,
             instance_key_kept: false,
             enrollment: Arc::new(crate::enrollment::EnrollmentSlot::default()),
+            licence_fetch: Arc::new(crate::licence_fetch::LicenceFetchSlot::default()),
         };
         state.spawn_cert_generator();
         state

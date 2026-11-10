@@ -10,6 +10,7 @@ pub mod bootstrap;
 pub mod enrollment;
 pub mod handlers;
 pub mod hub_client;
+pub mod licence_fetch;
 pub mod licensing;
 pub mod store;
 pub mod ws;

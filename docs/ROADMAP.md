@@ -356,10 +356,16 @@ and **0008** (station ↔ hub protocol and the reconciliation contract).
   issued what.
 
 **A2 — Activation and reconciliation online**
-- A2.1 Activation endpoint + station-side wiring. *Decided 2026-11-08 by
+- ~~A2.1 Activation endpoint + station-side wiring.~~ *Decided 2026-11-08 by
   [ADR-0008](adr/0008-station-enrollment-and-licence-fetch.md): enrollment by
   device authorization approved by an organization owner, and signed licence
-  fetch; built by `station-enrollment`.*
+  fetch. Built 2026-11-10 by `station-enrollment` stories 1 to 5: a station
+  enrolls from `wipestation enroll` or the bench app, and a connected station
+  checks with the hub at start and every 24 hours, collecting a renewed
+  licence (reissued automatically, audited with the station as actor) and
+  showing the result as a status line; a failed check never stops a Job.
+  Still open: loading the collected licence at start-up, next-term licences
+  (`controlled-licensing`), and revocation (A2.3).*
 - A2.2 Lease/usage reporting from station to hub, offline-tolerant.
 - A2.3 Revocation list: signed, windowed, pulled when online.
   **Honest limit to document (W2, L3): a station that never connects can never

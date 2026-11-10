@@ -216,6 +216,13 @@ impl LicenseContext {
         &self.fingerprint
     }
 
+    /// The installed licence's id; `None` on an unlicensed station.
+    pub fn license_id(&self) -> Option<&str> {
+        self.chain
+            .as_ref()
+            .map(|c| c.license.body.license_id.as_str())
+    }
+
     pub fn entitlements(&self) -> Option<&Entitlements> {
         self.chain.as_ref().map(|c| &c.license.body.entitlements)
     }
@@ -379,6 +386,7 @@ impl LicenseContext {
             instance_public_key_id: body.map(|b| b.instance_public_key_id.clone()),
             lapse_policy: body.map(|b| b.lapse_policy),
             fingerprint: self.fingerprint.clone(),
+            hub_check: None,
         }
     }
 
@@ -440,6 +448,11 @@ pub struct LicenseView {
     /// This station's fingerprint, a hash of its station id (`--station-id`,
     /// default `standalone`); not derived from hardware.
     pub fingerprint: String,
+    /// The latest licence check with the platform (ADR-0008 §3), filled in
+    /// by `GET /api/license`; absent when no check has run (no hub address
+    /// saved).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hub_check: Option<crate::licence_fetch::HubCheck>,
 }
 
 /// Who a licence is issued to.

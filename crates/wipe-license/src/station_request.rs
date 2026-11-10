@@ -55,6 +55,10 @@ pub enum StationRequestError {
     /// The signature does not decode, or does not verify over the message.
     #[error("the signature does not verify")]
     BadSignature,
+    /// The key id, challenge or signature contains a newline, which would
+    /// let one field pose as several lines of the signed message.
+    #[error("a station request header contains a line break")]
+    LineBreak,
 }
 
 /// The bytes a station signs for one request.
@@ -85,9 +89,10 @@ pub fn sign(
 }
 
 /// Check a request signed by `key` (the key the hub holds for the station).
-/// Refuses a key id that is not `key`'s, and a signature that does not
-/// strictly verify over [`message`] of what the hub received. Whether the
-/// challenge was issued, unexpired and unused is the caller's check.
+/// Refuses a key id, challenge or signature containing `\n` (the message's
+/// field separator), a key id that is not `key`'s, and a signature that does
+/// not strictly verify over [`message`] of what the hub received. Whether
+/// the challenge was issued, unexpired and unused is the caller's check.
 pub fn verify(
     key: &VerifyingKey,
     req: &SignedStationRequest,
@@ -96,6 +101,12 @@ pub fn verify(
     path: &str,
     body: &[u8],
 ) -> Result<(), StationRequestError> {
+    if [&req.instance_key_id, &req.challenge, &req.signature_b64]
+        .iter()
+        .any(|f| f.contains('\n'))
+    {
+        return Err(StationRequestError::LineBreak);
+    }
     if key.public_key_id() != req.instance_key_id {
         return Err(StationRequestError::KeyIdMismatch);
     }
@@ -162,6 +173,31 @@ mod tests {
         let mut garbled = req.clone();
         garbled.signature_b64 = "not base64!".into();
         bad(&garbled, ORIGIN, "POST", PATH, BODY);
+    }
+
+    #[test]
+    fn a_line_break_in_any_header_is_refused() {
+        let key = SigningKey::generate();
+        let vk = key.verifying_key();
+        // Signed over a challenge with a line break in it: the signature is
+        // genuine, and still refused.
+        let req = sign(&key, "chal\n1", ORIGIN, "POST", PATH, BODY);
+        assert_eq!(
+            verify(&vk, &req, ORIGIN, "POST", PATH, BODY),
+            Err(StationRequestError::LineBreak)
+        );
+        let good = signed(&key);
+        let mut id = good.clone();
+        id.instance_key_id.push('\n');
+        let mut sig = good.clone();
+        sig.signature_b64.push('\n');
+        for r in [id, sig] {
+            assert_eq!(
+                verify(&vk, &r, ORIGIN, "POST", PATH, BODY),
+                Err(StationRequestError::LineBreak)
+            );
+        }
+        verify(&vk, &good, ORIGIN, "POST", PATH, BODY).unwrap();
     }
 
     #[test]

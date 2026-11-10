@@ -2,7 +2,7 @@
 //!
 //! One implementation for every station-side caller: `wipestation enroll`,
 //! the bench app's station routes ([`crate::enrollment`], story 4), and the
-//! periodic licence fetch (story 5) later.
+//! periodic licence fetch ([`crate::licence_fetch`], story 5).
 //!
 //! - [`HubOrigin`]: the only hub address a station accepts. `https`, or
 //!   `http` only on `localhost`, `*.localhost`, `127.0.0.0/8` or `::1`
@@ -24,6 +24,11 @@
 //!   licences and can never introduce a root (ADR-0008 §4).
 //! - [`install_on_station`]: hand a verified licence to a running `serve`
 //!   through `POST /api/license` (the runtime install, memory-only).
+//! - [`HubClient::challenge`] and [`HubClient::fetch_licence`] (story 5): a
+//!   single-use challenge, then `POST /api/station/licence {instance_public_key,
+//!   licence_id}` signed with [`wipe_license::station_request`] over it, the
+//!   hub origin, `POST`, the path and the body. The fetched licence is not
+//!   checked here: the caller checks it with [`check_licence`].
 //!
 //! Nothing here gates, delays or interrupts an erasure.
 
@@ -45,6 +50,10 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const ENROLLMENT_START_PATH: &str = "/api/enrollments";
 /// Where a station polls its enrollment (`wipe-hub`'s route).
 pub const ENROLLMENT_POLL_PATH: &str = "/api/enrollments/poll";
+/// Where a station asks for a single-use challenge (`wipe-hub`'s route).
+pub const STATION_CHALLENGE_PATH: &str = "/api/station/challenge";
+/// Where a station fetches its licence (`wipe-hub`'s route).
+pub const STATION_LICENCE_PATH: &str = "/api/station/licence";
 
 /// The rule a hub address must meet, stated in every refusal.
 pub const HUB_ORIGIN_RULE: &str = "A hub address is an https origin such as \
@@ -272,6 +281,21 @@ pub enum PollOutcome {
     Refused(String),
 }
 
+/// One licence fetch's answer ([`HubClient::fetch_licence`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FetchOutcome {
+    /// 204: nothing newer than the licence the station holds.
+    Current,
+    /// 200: the station's latest licence, unverified.
+    Licence(Value),
+    /// 404: no organization has a station with this key.
+    NotRegistered,
+    /// The hub could not be reached, or did not answer in time.
+    Unreachable(String),
+    /// Any other answer: the hub's `error` text, or what was wrong with it.
+    Refused(String),
+}
+
 /// A client for one hub.
 #[derive(Debug, Clone)]
 pub struct HubClient {
@@ -282,9 +306,20 @@ pub struct HubClient {
 impl HubClient {
     /// A client for `origin`, through `proxy` when the hub is `https`.
     pub fn new(origin: HubOrigin, proxy: &ProxySettings) -> Result<Self, EnrollError> {
+        Self::with_timeout(origin, proxy, REQUEST_TIMEOUT)
+    }
+
+    /// As [`new`](Self::new), with `request_timeout` instead of
+    /// [`REQUEST_TIMEOUT`] (tests use a short one against a hub that never
+    /// answers).
+    pub fn with_timeout(
+        origin: HubOrigin,
+        proxy: &ProxySettings,
+        request_timeout: Duration,
+    ) -> Result<Self, EnrollError> {
         let mut builder = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT.min(request_timeout))
+            .timeout(request_timeout)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy();
         if let Some(url) = &proxy.https_proxy {
@@ -400,6 +435,102 @@ impl HubClient {
                 other => PollOutcome::Refused(other.to_string()),
             },
             _ => PollOutcome::Refused(format!("HTTP {status}: {}", error_text(&text, status))),
+        }
+    }
+}
+
+impl HubClient {
+    /// A single-use challenge to sign the next station request over.
+    pub async fn challenge(&self) -> Result<String, FetchOutcome> {
+        let resp = self
+            .http
+            .get(self.origin.url(STATION_CHALLENGE_PATH))
+            .send()
+            .await
+            .map_err(|e| FetchOutcome::Unreachable(error_chain(&e)))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| FetchOutcome::Unreachable(error_chain(&e)))?;
+        if !status.is_success() {
+            return Err(FetchOutcome::Refused(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                error_text(&text, status)
+            )));
+        }
+        #[derive(Deserialize)]
+        struct Challenge {
+            challenge: String,
+        }
+        serde_json::from_str::<Challenge>(&text)
+            .map(|c| c.challenge)
+            .map_err(|e| {
+                FetchOutcome::Refused(format!("a challenge this station cannot read: {e}"))
+            })
+    }
+
+    /// Ask the hub for `key`'s latest licence, saying which one the station
+    /// holds (`held_id`). Gets its own challenge first.
+    pub async fn fetch_licence(&self, key: &SigningKey, held_id: Option<&str>) -> FetchOutcome {
+        let challenge = match self.challenge().await {
+            Ok(c) => c,
+            Err(outcome) => return outcome,
+        };
+        let body = serde_json::json!({
+            "instance_public_key": key.verifying_key().to_base64(),
+            "licence_id": held_id,
+        })
+        .to_string();
+        let signed = wipe_license::station_request::sign(
+            key,
+            &challenge,
+            self.origin.as_str(),
+            "POST",
+            STATION_LICENCE_PATH,
+            body.as_bytes(),
+        );
+        use wipe_license::station_request::{HEADER_CHALLENGE, HEADER_KEY_ID, HEADER_SIGNATURE};
+        let resp = match self
+            .http
+            .post(self.origin.url(STATION_LICENCE_PATH))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(HEADER_KEY_ID, &signed.instance_key_id)
+            .header(HEADER_CHALLENGE, &signed.challenge)
+            .header(HEADER_SIGNATURE, &signed.signature_b64)
+            .body(body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return FetchOutcome::Unreachable(error_chain(&e)),
+        };
+        let status = resp.status();
+        let text = match resp.text().await {
+            Ok(t) => t,
+            Err(e) => return FetchOutcome::Unreachable(error_chain(&e)),
+        };
+        match status {
+            StatusCode::NO_CONTENT => FetchOutcome::Current,
+            StatusCode::NOT_FOUND => FetchOutcome::NotRegistered,
+            StatusCode::OK => {
+                #[derive(Deserialize)]
+                struct Fetched {
+                    licence: Value,
+                }
+                match serde_json::from_str::<Fetched>(&text) {
+                    Ok(f) => FetchOutcome::Licence(f.licence),
+                    Err(e) => {
+                        FetchOutcome::Refused(format!("an answer this station cannot read: {e}"))
+                    }
+                }
+            }
+            other => FetchOutcome::Refused(format!(
+                "HTTP {}: {}",
+                other.as_u16(),
+                error_text(&text, other)
+            )),
         }
     }
 }

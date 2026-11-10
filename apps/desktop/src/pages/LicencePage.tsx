@@ -9,7 +9,7 @@ import {
   PENDING_REFETCH_MS,
   requestErrorText,
 } from "@/api/enrollment";
-import type { EnrollmentView, LicenseInfo } from "@/api/types";
+import type { EnrollmentView, HubCheck, LicenseInfo } from "@/api/types";
 
 /**
  * The station's licence status and **Register with platform** (ADR-0008):
@@ -119,7 +119,23 @@ export function LicenceStatus({ info, error }: { info?: LicenseInfo; error?: boo
           Expires <span className="text-slate-200">{expiry} UTC</span>
         </p>
       )}
+      {info.hub_check && <HubCheckLine check={info.hub_check} />}
     </div>
+  );
+}
+
+/**
+ * The latest licence check with the platform, in the bench's local time. A
+ * failure never stops the station: its message says the current licence
+ * still applies.
+ */
+function HubCheckLine({ check }: { check: HubCheck }) {
+  const at = new Date(check.checked_at);
+  const when = Number.isNaN(at.getTime()) ? check.checked_at : at.toLocaleString();
+  return (
+    <p className={check.ok ? "text-slate-400" : "text-amber-200"}>
+      Last check with the platform: {when} — {check.message}
+    </p>
   );
 }
 

@@ -144,6 +144,55 @@ describe("LicenceStatus", () => {
     expect(html).toContain("2027-09-06 UTC");
   });
 
+  it("shows no platform check before the station has made one", () => {
+    const html = renderToStaticMarkup(createElement(LicenceStatus, { info }));
+    expect(html).not.toContain("Last check with the platform");
+  });
+
+  it("shows a successful platform check in local time", () => {
+    const checked_at = "2026-11-10T09:30:00Z";
+    const html = renderToStaticMarkup(
+      createElement(LicenceStatus, {
+        info: {
+          ...info,
+          hub_check: {
+            checked_at,
+            ok: true,
+            message: "Up to date: the platform at https://hub.example has no newer licence.",
+          },
+        },
+      }),
+    );
+    expect(html).toContain(
+      `Last check with the platform: ${new Date(checked_at).toLocaleString()} — Up to date`,
+    );
+    expect(html).toContain("text-slate-400");
+    expect(html).not.toContain("text-amber-200");
+  });
+
+  it("shows a failed platform check, which leaves the licence in force", () => {
+    const html = renderToStaticMarkup(
+      createElement(LicenceStatus, {
+        info: {
+          ...info,
+          hub_check: {
+            checked_at: "2026-11-10T09:30:00Z",
+            ok: false,
+            message:
+              "Could not reach the platform at https://hub.example (timed out). This station's " +
+              "current licence still applies.",
+          },
+        },
+      }),
+    );
+    expect(html).toContain("Last check with the platform:");
+    expect(html).toContain("Could not reach the platform at https://hub.example (timed out).");
+    expect(html).toContain("current licence still applies.");
+    expect(html).toContain("text-amber-200");
+    // The licence itself is still shown as it was.
+    expect(html).toContain("Licensed - unlimited, 300 days left");
+  });
+
   it("says so when the licence cannot be read", () => {
     const html = renderToStaticMarkup(createElement(LicenceStatus, { error: true }));
     expect(html).toContain("could not report its licence");

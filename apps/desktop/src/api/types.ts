@@ -341,6 +341,16 @@ export interface LicenseCustomer {
   name: string;
 }
 
+/**
+ * Mirror of `wipe_server::licence_fetch::HubCheck`: the station's latest
+ * licence check with the platform (ADR-0008 §3). `checked_at` is RFC 3339.
+ */
+export interface HubCheck {
+  checked_at: string;
+  ok: boolean;
+  message: string;
+}
+
 /** `GET /api/license`. Licence fields are null on an unlicensed station. */
 export interface LicenseInfo {
   status: LeaseStatus;
@@ -350,6 +360,8 @@ export interface LicenseInfo {
   instance_public_key_id: string | null;
   lapse_policy: LapsePolicy | null;
   fingerprint: string;
+  /** Absent until the station has checked with a saved platform address. */
+  hub_check?: HubCheck;
 }
 
 /**

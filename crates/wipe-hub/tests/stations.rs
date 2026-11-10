@@ -1187,7 +1187,12 @@ async fn a_renewed_station_is_reissued_a_licence_to_the_new_term_end() {
         [(
             actor.clone(),
             format!("licence:{old}"),
-            json!({ "station_id": station, "reason": "renewed", "superseded_by": new }),
+            json!({
+                "station_id": station,
+                "instance_key_id": key,
+                "reason": "renewed",
+                "superseded_by": new,
+            }),
         )]
     );
     let issued = f.hub.audited("licence.issued").await;

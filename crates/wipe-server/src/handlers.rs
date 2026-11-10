@@ -972,7 +972,9 @@ pub async fn destruction_policy(State(state): State<AppState>) -> Json<serde_jso
 /// The station's licence state. Read-only: it never moves the clock
 /// watermark, saves lease state or records usage, so a client may poll it.
 pub async fn license(State(state): State<AppState>) -> Json<crate::licensing::LicenseView> {
-    Json(state.license().view(time::OffsetDateTime::now_utc()))
+    let mut view = state.license().view(time::OffsetDateTime::now_utc());
+    view.hub_check = state.licence_fetch.last();
+    Json(view)
 }
 
 /// Install a licence while the station runs. The body is the licence file's

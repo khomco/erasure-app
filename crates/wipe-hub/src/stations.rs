@@ -25,13 +25,15 @@
 //! - **Renewal reissue** ([`reissue`], licence-delivery story 2, CAP-3): when
 //!   a paid renewal moves an entitlement's `term_end` past the end of a
 //!   station's active licence, the station shows `renewal_available` and an
-//!   owner asks for a renewed licence. With the station and its entitlement
+//!   owner asks for a renewed licence, or a connected station fetches it
+//!   ([`crate::station_link`], station-enrollment story 5: the same path,
+//!   audited with actor `station:<id>`). With the station and its entitlement
 //!   locked `FOR UPDATE`, the hub supersedes the old licence (`licence.superseded
-//!   {reason: "renewed", superseded_by}`) and signs a new one for the same key,
-//!   scope, quota and features to the new `term_end` (`licence.issued` with
-//!   `reissue_of`). The station keeps its seat and registration. Nothing is
-//!   reissued by the payment path itself: a missing vendor root can never make
-//!   a renewal payment fail to apply.
+//!   {instance_key_id, reason: "renewed", superseded_by}`) and signs a new one
+//!   for the same key, scope, quota and features to the new `term_end`
+//!   (`licence.issued` with `reissue_of`). The station keeps its seat and
+//!   registration. Nothing is reissued by the payment path itself: a missing
+//!   vendor root can never make a renewal payment fail to apply.
 //! - **Vendor issue** ([`vendor_issue`], licence-delivery story 3, CAP-4): a
 //!   vendor admin signs a licence for a customer organization outside any
 //!   entitlement and seat (a trial, an evaluation, a goodwill grant), with
@@ -250,13 +252,13 @@ impl From<StationRow> for Station {
 
 /// An entitlement `e` that still grants seats: not refunded, term not ended
 /// ([`crate::entitlements::CURRENT_SQL`]).
-const ENTITLEMENT_CURRENT: &str = crate::entitlements::CURRENT_SQL;
+pub(crate) const ENTITLEMENT_CURRENT: &str = crate::entitlements::CURRENT_SQL;
 
 /// The station `s`'s latest licence as `l` (absent: all NULL): its active
 /// one if it has one, else the most recently issued. Active first, so a hub
 /// clock that stepped back between two issuances cannot rank a superseded
 /// licence above the one that replaced it.
-const LATEST_LICENCE: &str = "LEFT JOIN LATERAL (SELECT * FROM licences \
+pub(crate) const LATEST_LICENCE: &str = "LEFT JOIN LATERAL (SELECT * FROM licences \
                                                  WHERE station_id = s.id \
                                                  ORDER BY (status = 'active') DESC, \
                                                           issued_at DESC, id DESC \
@@ -264,7 +266,7 @@ const LATEST_LICENCE: &str = "LEFT JOIN LATERAL (SELECT * FROM licences \
 
 /// The latest licence `l` is active and ends before its entitlement `e`'s
 /// term (compared as timestamps): a renewal moved the term on.
-const LICENCE_BEHIND_TERM: &str = "(l.status = 'active' AND l.not_after < e.term_end)";
+pub(crate) const LICENCE_BEHIND_TERM: &str = "(l.status = 'active' AND l.not_after < e.term_end)";
 
 /// `SELECT … FROM stations s …`, every column of [`StationRow`] with the
 /// station's latest licence; callers add the `WHERE` on `s`.
@@ -622,7 +624,9 @@ async fn sign_and_store(
 struct IssueLicence<'a> {
     ent: &'a LockedEntitlement,
     organization_id: Uuid,
-    user_id: Uuid,
+    /// The audit actor: `user:<id>`, or `station:<id>` for a station's own
+    /// fetch (station-enrollment story 5).
+    actor: &'a str,
     /// The `stations` row.
     station: Uuid,
     instance_key_id: &'a str,
@@ -679,7 +683,7 @@ async fn issue_licence(
         root,
         SignAndStore {
             organization_id: req.organization_id,
-            actor: &actor(req.user_id),
+            actor: req.actor,
             station: Some((req.station, ent.id)),
             instance_key_id: req.instance_key_id,
             entitlements,
@@ -793,7 +797,7 @@ pub async fn register(
         IssueLicence {
             ent: &ent,
             organization_id,
-            user_id,
+            actor: &actor(user_id),
             station: station_id,
             instance_key_id: &new.instance_key_id,
             station_id: new.station_id.as_deref(),
@@ -823,7 +827,9 @@ struct LockedStation {
 }
 
 /// Issue the organization's station `id` a renewed licence on behalf of
-/// `user_id`, signing it with `root`, in the caller's transaction (which the
+/// `who` (the audit actor: `user:<id>` for an owner's click, `station:<id>`
+/// for the station's own fetch, [`crate::station_link`]), signing it with
+/// `root`, in the caller's transaction (which the
 /// caller commits). Refusals, in this order and before any write (but see
 /// below): 404
 /// [`MSG_NO_STATION`] for an unknown or foreign station, 409
@@ -834,7 +840,8 @@ struct LockedStation {
 /// Otherwise the old licence is `superseded` and a new one is signed exactly
 /// as [`register`] signs, for the stored key, station id and site, to the
 /// current `term_end`; audits `licence.issued {…, reissue_of}` and
-/// `licence.superseded {station_id, reason: "renewed", superseded_by}`.
+/// `licence.superseded {station_id, instance_key_id, reason: "renewed",
+/// superseded_by}`.
 /// One refusal comes after the supersede: a term that ends in the instant
 /// between the database's clock and ours, found while signing, is 409
 /// [`MSG_ENTITLEMENT_NOT_CURRENT`] and leaves its writes to roll back with
@@ -843,7 +850,7 @@ pub async fn reissue(
     conn: &mut PgConnection,
     root: &VendorRoot,
     organization_id: Uuid,
-    user_id: Uuid,
+    who: &str,
     id: Uuid,
 ) -> Result<Registered, StationError> {
     // Station and entitlement are locked in one statement: register locks
@@ -905,7 +912,7 @@ pub async fn reissue(
         IssueLicence {
             ent: &locked.ent,
             organization_id,
-            user_id,
+            actor: who,
             station: id,
             instance_key_id: &locked.instance_key_id,
             station_id: locked.station_id.as_deref(),
@@ -917,11 +924,12 @@ pub async fn reissue(
     audit::record(
         &mut *conn,
         &AuditEntry {
-            actor: &actor(user_id),
+            actor: who,
             action: "licence.superseded",
             subject: &licence_subject(old),
             detail: json!({
                 "station_id": id,
+                "instance_key_id": locked.instance_key_id,
                 "reason": "renewed",
                 "superseded_by": licence.id,
             }),

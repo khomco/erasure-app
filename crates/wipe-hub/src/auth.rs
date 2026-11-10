@@ -535,7 +535,8 @@ pub(crate) fn with_peer(mut detail: serde_json::Value, peer: Option<&str>) -> se
 /// The audit action for a summary of `key`'s refusals: email-send keys
 /// (`mail:…`), sales-lead submission keys (`lead-form:…`), enrollment
 /// code-entry keys (`enroll:user:…`, checked before the start prefix it
-/// begins with), enrollment-start keys (`enroll:…`) and sign-in keys are
+/// begins with), enrollment-start keys (`enroll:…`), station-challenge keys
+/// (`station:ip:…`) and sign-in keys are
 /// summarised under their own actions. [`throttle::purge_stale`] returns
 /// every kind of key, so each prefix must be mapped here.
 fn lock_summary_action(key: &str) -> &'static str {
@@ -547,6 +548,8 @@ fn lock_summary_action(key: &str) -> &'static str {
         "enrollment.lookup_lock_summary"
     } else if key.starts_with(throttle::ENROLL_KEY_PREFIX) {
         "enrollment.start_lock_summary"
+    } else if key.starts_with(throttle::STATION_KEY_PREFIX) {
+        "station.challenge_lock_summary"
     } else {
         "auth.sign_in_lock_summary"
     }
@@ -1542,6 +1545,18 @@ mod tests {
         );
         assert_eq!(
             lock_summary_action("email:enroll:user:x@b.co"),
+            "auth.sign_in_lock_summary"
+        );
+        assert_eq!(
+            lock_summary_action("station:ip:192.0.2.1"),
+            "station.challenge_lock_summary"
+        );
+        assert_eq!(
+            lock_summary_action("station:ip:2001:db8::/64"),
+            "station.challenge_lock_summary"
+        );
+        assert_eq!(
+            lock_summary_action("email:station:x@b.co"),
             "auth.sign_in_lock_summary"
         );
     }

@@ -10,8 +10,10 @@
 //! (station-enrollment story 1) charge `enroll:ip:<peer>`
 //! ([`ENROLL_KEY_PREFIX`]); an owner's enrollment code lookups, approvals
 //! and denials (story 2) charge `enroll:user:<user id>`
-//! ([`ENROLL_USER_KEY_PREFIX`]), refunded when the code matches. Email
-//! sends, lead submissions and enrollment starts are always final,
+//! ([`ENROLL_USER_KEY_PREFIX`]), refunded when the code matches. Station
+//! challenges (station-enrollment story 5) charge `station:ip:<peer>`
+//! ([`STATION_KEY_PREFIX`]). Email sends, lead submissions, enrollment
+//! starts and station challenges are always final,
 //! so their charges are confirmed in the same transaction instead of waiting
 //! for a check.
 //!
@@ -101,6 +103,19 @@ pub const ENROLL_LOOKUP_LOCKOUT: Duration = Duration::from_secs(15 * 60);
 /// the signed-in user's id. It also starts with [`ENROLL_KEY_PREFIX`], so
 /// anything telling the two apart checks this one first.
 pub const ENROLL_USER_KEY_PREFIX: &str = "enroll:user:";
+
+/// Station challenges per client IP (or IPv6 /64) per window. A connected
+/// station asks for one at start and one a day (ADR-0008 §3), so 50
+/// stations behind one NAT restarting together use 50 of these in an hour.
+pub const STATION_CHALLENGE_IP_LIMIT: i32 = 300;
+/// The fixed window station challenges are counted in.
+pub const STATION_CHALLENGE_WINDOW: Duration = Duration::from_secs(60 * 60);
+/// How long a station-challenge lock lasts once engaged.
+pub const STATION_CHALLENGE_LOCKOUT: Duration = Duration::from_secs(60 * 60);
+/// Every station-challenge throttle key starts with this, followed by the
+/// peer key (`ip:…`). A station's audit subject or actor is
+/// `station:<uuid>`, which never continues with `ip:`.
+pub const STATION_KEY_PREFIX: &str = "station:";
 
 /// Rows whose window started longer ago than this, and whose lock (if any)
 /// has elapsed, are deleted by [`purge_stale`]. Every window passed to
@@ -403,6 +418,28 @@ mod tests {
         for other in [MAIL_KEY_PREFIX, LEAD_KEY_PREFIX, "email:", "ip:"] {
             assert!(!ENROLL_USER_KEY_PREFIX.starts_with(other), "{other}");
             assert!(!other.starts_with(ENROLL_USER_KEY_PREFIX), "{other}");
+        }
+    }
+
+    #[test]
+    fn station_challenge_constants() {
+        assert_eq!(STATION_CHALLENGE_IP_LIMIT, 300);
+        // 50 stations behind one NAT, each checking twice a day, all in one
+        // hour, with room to spare.
+        const { assert!(STATION_CHALLENGE_IP_LIMIT >= 50 * 2 * 2) };
+        assert_eq!(STATION_CHALLENGE_WINDOW.as_secs(), 3600);
+        assert_eq!(STATION_CHALLENGE_LOCKOUT.as_secs(), 3600);
+        assert!(STATION_CHALLENGE_WINDOW <= PURGE_AFTER);
+        assert_eq!(STATION_KEY_PREFIX, "station:");
+        for other in [
+            MAIL_KEY_PREFIX,
+            LEAD_KEY_PREFIX,
+            ENROLL_KEY_PREFIX,
+            "email:",
+            "ip:",
+        ] {
+            assert!(!STATION_KEY_PREFIX.starts_with(other), "{other}");
+            assert!(!other.starts_with(STATION_KEY_PREFIX), "{other}");
         }
     }
 

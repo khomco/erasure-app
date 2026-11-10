@@ -264,6 +264,9 @@ pub fn build_station(cfg: StationConfig, report: &mut dyn FnMut(String)) -> Resu
     if state.bay_topology.read().is_none() {
         state = state.with_bay_topology(seed_topology);
     }
+    // The 24-hour licence check (ADR-0008 §3), here so both hosts get it.
+    // It never gates a start: it only installs a renewed licence and reports.
+    crate::licence_fetch::spawn(&state);
     report(format!(
         "destruction concurrence policy: {}",
         serde_json::to_value(concurrence_policy)?
@@ -668,7 +671,11 @@ fn hub_line(settings_path: Option<&Path>) -> String {
         Ok(Some(crate::store::StationSettings {
             hub_origin: Some(raw),
         })) => match crate::hub_client::HubOrigin::parse(&raw) {
-            Ok(origin) => format!("hub: {origin} (from {})", path.display()),
+            Ok(origin) => format!(
+                "hub: {origin} (from {}); checked for a renewed licence at start-up and every 24 \
+                 hours",
+                path.display()
+            ),
             Err(e) => format!(
                 "hub: none — {} holds a hub address this station refuses ({e}); run wipestation \
                  enroll --hub <origin> to register this station",
@@ -1159,7 +1166,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             hub_line(Some(&path)),
-            format!("hub: https://hub.example (from {})", path.display())
+            format!(
+                "hub: https://hub.example (from {}); checked for a renewed licence at start-up \
+                 and every 24 hours",
+                path.display()
+            )
         );
         fs::write(&path, "{}").unwrap();
         assert_eq!(hub_line(Some(&path)), none, "no address saved");
@@ -1208,7 +1219,11 @@ mod tests {
         };
         let mut lines = Vec::new();
         build_station(cfg, &mut |l| lines.push(l)).unwrap();
-        let want = format!("hub: https://hub.example (from {})", path.display());
+        let want = format!(
+            "hub: https://hub.example (from {}); checked for a renewed licence at start-up and \
+             every 24 hours",
+            path.display()
+        );
         assert!(lines.contains(&want), "{lines:#?}");
     }
 

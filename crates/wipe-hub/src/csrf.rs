@@ -14,13 +14,14 @@
 //! it is the vendor's own site. Subdomain cookie-tossing is the known
 //! weakness, accepted until hosting is decided (CONTEXT §10).
 //!
-//! Three routes are exempt, all called by machines that have no cookie and
+//! Four routes are exempt, all called by machines that have no cookie and
 //! carry their own credential: `POST /api/payments/webhook`, called by the
 //! payment provider, whose signature over the raw body is its credential and
-//! which answers only `{"received":true}`; and a station's enrollment start
-//! and poll, `POST /api/enrollments` and `POST /api/enrollments/poll`
-//! (station-enrollment story 1), where the station's instance-key signature
-//! is the credential. None of them sets or reads a cookie.
+//! which answers only `{"received":true}`; a station's enrollment start and
+//! poll, `POST /api/enrollments` and `POST /api/enrollments/poll`
+//! (station-enrollment story 1); and a station's licence fetch, `POST
+//! /api/station/licence` (story 5). A station's instance-key signature is
+//! its credential. None of them sets or reads a cookie.
 //!
 //! `GET /api/auth/csrf` hands the token to the portal; it is the only place a
 //! raw CSRF token is ever returned, and none is ever logged.
@@ -41,6 +42,7 @@ use crate::accounts;
 use crate::auth::{self, ApiError};
 use crate::enrollment_routes::{ENROLLMENT_POLL_PATH, ENROLLMENT_START_PATH};
 use crate::order_routes::PAYMENT_WEBHOOK_PATH;
+use crate::station_link_routes::STATION_LICENCE_PATH;
 use crate::AppState;
 
 /// Name of the CSRF cookie.
@@ -86,15 +88,16 @@ fn is_safe(method: &Method) -> bool {
 }
 
 /// Whether a request needs no token: `POST` to the payment provider's
-/// webhook (its credential is the provider's signature over the body) or to
-/// a station's enrollment start or poll (its credential is the instance-key
-/// signature). Exact paths only.
+/// webhook (its credential is the provider's signature over the body), or
+/// to a station's enrollment start or poll or its licence fetch (its
+/// credential is the instance-key signature). Exact paths only.
 fn is_exempt(method: &Method, path: &str) -> bool {
     *method == Method::POST
         && [
             PAYMENT_WEBHOOK_PATH,
             ENROLLMENT_START_PATH,
             ENROLLMENT_POLL_PATH,
+            STATION_LICENCE_PATH,
         ]
         .contains(&path)
 }
@@ -243,11 +246,16 @@ mod tests {
     }
 
     #[test]
-    fn only_the_enrollment_posts_are_exempt() {
+    fn only_the_station_posts_are_exempt() {
         // Built from the constants, as above.
         assert_eq!(ENROLLMENT_START_PATH, concat!("/api", "/enrollments"));
         assert_eq!(ENROLLMENT_POLL_PATH, concat!("/api", "/enrollments/poll"));
-        for path in [ENROLLMENT_START_PATH, ENROLLMENT_POLL_PATH] {
+        assert_eq!(STATION_LICENCE_PATH, concat!("/api", "/station/licence"));
+        for path in [
+            ENROLLMENT_START_PATH,
+            ENROLLMENT_POLL_PATH,
+            STATION_LICENCE_PATH,
+        ] {
             assert!(is_exempt(&Method::POST, path));
             for (m, p) in [
                 (Method::GET, path.to_string()),
@@ -265,6 +273,10 @@ mod tests {
         assert!(!is_exempt(&Method::POST, &approve));
         let stations = ENROLLMENT_START_PATH.replace("enrollments", "stations");
         assert!(!is_exempt(&Method::POST, &stations));
+        let challenge = STATION_LICENCE_PATH.replace("licence", "challenge");
+        assert!(!is_exempt(&Method::POST, &challenge));
+        let license = STATION_LICENCE_PATH.replace("licence", "license");
+        assert!(!is_exempt(&Method::POST, &license));
     }
 
     #[test]

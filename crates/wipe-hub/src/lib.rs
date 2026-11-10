@@ -37,6 +37,8 @@ pub mod orders;
 pub mod payment_events;
 pub mod payments;
 pub mod release_admin;
+pub mod station_link;
+pub mod station_link_routes;
 pub mod station_routes;
 pub mod stations;
 pub mod stripe;
@@ -112,6 +114,7 @@ pub fn router(state: AppState) -> Router {
         .merge(station_routes::routes())
         .merge(download_routes::routes())
         .merge(enrollment_routes::routes())
+        .merge(station_link_routes::routes())
         // Unknown API paths are JSON 404s, portal or not: a typo in a client
         // must never get `index.html` back with a 200.
         .route("/api", any(api_not_found))

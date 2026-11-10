@@ -161,7 +161,7 @@ async fn reissue(
         &mut tx,
         &vendor.root,
         user.organization_id,
-        user.user_id,
+        &crate::auth::actor(user.user_id),
         id,
     )
     .await?;

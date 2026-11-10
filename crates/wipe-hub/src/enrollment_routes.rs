@@ -99,7 +99,7 @@ pub fn routes() -> Router<AppState> {
 /// these routes, success or error (RFC 6749 §5.1, inherited by RFC 8628):
 /// start carries the device code, poll and approve the licence, and lookup
 /// what a pending enrollment's code names.
-async fn no_store(mut resp: Response) -> Response {
+pub(crate) async fn no_store(mut resp: Response) -> Response {
     let headers = resp.headers_mut();
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
