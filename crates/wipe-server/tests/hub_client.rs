@@ -297,6 +297,25 @@ async fn polling_stops_at_expires_in() {
 }
 
 #[tokio::test]
+async fn polling_stops_within_a_day_whatever_expires_in_says() {
+    let key = SigningKey::generate();
+    // An absurd `expires_in`, and a `slow_down` that stretches the interval
+    // so the day runs out after two polls.
+    let mut script = polls([(400, json!({"error": "slow_down", "interval": 50_000}))]);
+    script.expires_in = Some(u64::MAX);
+    let (origin, hub) = fake_hub(script).await;
+    let r = run(origin, &ProxySettings::default(), &key, &[]).await;
+    assert_eq!(r.result.unwrap_err(), EnrollError::Expired);
+    assert_eq!(
+        wipe_server::hub_client::MAX_EXPIRES_IN_SECS,
+        86_400,
+        "the bench app's countdown uses the same cap"
+    );
+    assert_eq!(r.clock.sleeps, secs(&[5, 50_000, 86_400 - 50_005]));
+    assert_eq!(hub.lock().unwrap().polls_seen, 2);
+}
+
+#[tokio::test]
 async fn slow_down_moves_to_the_hubs_new_interval() {
     let key = SigningKey::generate();
     let root = wipe_license::VendorRoot::generate();

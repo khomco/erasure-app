@@ -142,6 +142,7 @@ pub fn build_station(cfg: StationConfig, report: &mut dyn FnMut(String)) -> Resu
     } = cfg;
 
     let seed_topology = load_bay_topology(bay_topology_path.clone(), bay_profile, report)?;
+    let instance_key_kept = key_path.is_some();
     let signing_key = Arc::new(load_or_create_signing_key(key_path)?);
     report(format!(
         "signing key public id: {}",
@@ -247,7 +248,10 @@ pub fn build_station(cfg: StationConfig, report: &mut dyn FnMut(String)) -> Resu
     report(runtime_install_line(vendor_roots.len()));
     report(hub_line(settings_path.as_deref()));
 
-    let state = AppState::with_static_dir(backend.clone(), fleet, signing_key, resolved_dist);
+    let state = AppState::with_static_dir(backend.clone(), fleet, signing_key, resolved_dist)
+        .with_station_id(resolved_station_id)
+        .with_settings_path(settings_path)
+        .with_instance_key_kept(instance_key_kept);
     let mut state = apply_licensing(state, license_ctx, vendor_roots)
         .with_topology_store(store)
         .with_concurrence_policy(concurrence_policy)

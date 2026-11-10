@@ -689,9 +689,6 @@ struct EnrollArgs {
     license_out: Option<PathBuf>,
 }
 
-/// File name of the licence `enroll` saves, in the configuration directory.
-const ENROLLED_LICENCE_FILE: &str = "enrolled-licence.json";
-
 /// `wipestation enroll` (ADR-0008, station-enrollment story 3). Everything
 /// that can be refused without the hub (roots, key file, hub address,
 /// station address) is refused before any request is sent.
@@ -701,7 +698,8 @@ async fn cmd_enroll(args: EnrollArgs) -> Result<()> {
         StationInstall, SystemClock,
     };
     use wipe_server::store::{
-        load_station_settings, save_station_settings, station_settings_path, StoreConfig,
+        enrolled_licence_path, load_station_settings, save_enrolled_licence, save_station_settings,
+        station_settings_path, StoreConfig,
     };
 
     if args.vendor_root_b64.is_empty() {
@@ -748,7 +746,7 @@ async fn cmd_enroll(args: EnrollArgs) -> Result<()> {
     let licence_out = args
         .license_out
         .clone()
-        .unwrap_or_else(|| settings_path.with_file_name(ENROLLED_LICENCE_FILE));
+        .unwrap_or_else(|| enrolled_licence_path(&settings_path));
     let client =
         HubClient::new(origin.clone(), &ProxySettings::from_env()).map_err(|e| anyhow!("{e}"))?;
 
@@ -793,10 +791,7 @@ async fn cmd_enroll(args: EnrollArgs) -> Result<()> {
     let saved = save_enrolled_licence(&licence_out, &enrolled.licence_json);
     match &saved {
         Ok(()) => println!("Licence saved to {}", licence_out.display()),
-        Err(e) => println!(
-            "warning: the licence could not be saved to {}: {e:#}",
-            licence_out.display()
-        ),
+        Err(e) => println!("warning: the licence could not be saved ({e})"),
     }
 
     let mut settings = load_station_settings(&settings_path)
@@ -886,14 +881,6 @@ fn load_existing_key(path: &Path) -> Result<SigningKey> {
         )),
         Err(e) => Err(e).with_context(|| format!("reading signing key {}", path.display())),
     }
-}
-
-/// Write the licence JSON to `path`, creating its directory.
-fn save_enrolled_licence(path: &Path, json: &str) -> Result<()> {
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    fs::write(path, json).with_context(|| format!("writing {}", path.display()))
 }
 
 async fn cmd_inspect() -> Result<()> {

@@ -123,6 +123,31 @@ async fn the_in_memory_fallback_keeps_everything_in_memory() {
 }
 
 #[tokio::test]
+async fn the_station_id_and_settings_path_reach_the_enrollment_routes() {
+    // Detect: the settings file beside the config dir's topology, and the
+    // licensing station id (default `standalone`).
+    let dir = tmpdir("enrollment-wiring");
+    let (state, _) = build(desktop_config(&dir));
+    assert_eq!(state.station_id, "standalone");
+    assert_eq!(
+        state.settings_path.as_deref(),
+        Some(dir.join("station-settings.json").as_path())
+    );
+    // A key file: the instance key survives a restart, so it may enroll.
+    assert!(state.instance_key_kept);
+    let (state, _) = build(StationConfig {
+        station_id: Some("bench-7".into()),
+        ..desktop_config(&dir)
+    });
+    assert_eq!(state.station_id, "bench-7");
+    // InMemory with no key path: nowhere to save, and a run-only key.
+    let (state, _) = build(in_memory_config());
+    assert_eq!(state.settings_path, None);
+    assert!(!state.instance_key_kept);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_station_built_with_the_desktop_config_serves_the_simulator() {
     let dir = tmpdir("desktop-sim");
     let (state, _) = build(desktop_config(&dir));

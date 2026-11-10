@@ -353,6 +353,45 @@ export interface LicenseInfo {
 }
 
 /**
+ * Mirror of `wipe_server::enrollment::EnrollmentAttempt`, tagged on `state`
+ * (ADR-0008, registering with the platform from the bench). `seconds_left`
+ * is counted by the station on a monotonic clock, never the browser's.
+ */
+export type EnrollmentAttempt =
+  | {
+      state: "pending";
+      hub_origin: string;
+      user_code: string;
+      verification_uri: string;
+      verification_uri_complete: string;
+      seconds_left: number;
+      interval: number;
+    }
+  | {
+      state: "installed";
+      hub_origin: string;
+      licence_id: string;
+      customer_name: string;
+      not_after: string;
+      operator_message: string;
+      saved_to: string | null;
+      message: string;
+    }
+  | {
+      state: "denied" | "expired" | "unreachable" | "refused" | "failed";
+      hub_origin: string;
+      message: string;
+    };
+
+/** `GET /api/enrollment`: mirror of `wipe_server::enrollment::EnrollmentView`. */
+export interface EnrollmentView {
+  saved_hub_origin: string | null;
+  can_enroll: boolean;
+  cannot_enroll_reason: string | null;
+  attempt: EnrollmentAttempt | null;
+}
+
+/**
  * Mirror of `wipe_license::Entitlements`. `quota`, `scope` and
  * `allowed_methods` are tagged enums on the Rust side; the UI reads none of
  * them, so they stay `unknown` rather than guessing their spellings here.

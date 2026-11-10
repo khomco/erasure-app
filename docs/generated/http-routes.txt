@@ -6,6 +6,7 @@ GET /api/destruction/policy
 GET /api/devices
 GET /api/devices/:id/capabilities
 GET /api/enclosure-catalog
+GET /api/enrollment
 GET /api/events
 GET /api/fleet/lead
 GET /api/fleet/peers
@@ -23,6 +24,8 @@ POST /api/bay-topology/resolve
 POST /api/bay-topology/store/acknowledge
 POST /api/destruction/records
 POST /api/destruction/statement
+POST /api/enrollment
+POST /api/enrollment/cancel
 POST /api/jobs
 POST /api/jobs/:id/abort
 POST /api/jobs/:id/record-for-destruction

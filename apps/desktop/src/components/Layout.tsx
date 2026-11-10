@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { FileSignature, HardDrive, Inbox, LogOut, Network, ScanLine, ScrollText, Shield, ShieldCheck, SlidersHorizontal, UserCircle2 } from "lucide-react";
+import { FileSignature, HardDrive, Inbox, KeyRound, LogOut, Network, ScanLine, ScrollText, Shield, ShieldCheck, SlidersHorizontal, UserCircle2 } from "lucide-react";
 
 import { api, classNames } from "@/api/client";
 import { useEventStream } from "@/api/ws";
@@ -189,6 +189,7 @@ function NavBar() {
       <Item to="/manifests" icon={<FileSignature className="h-4 w-4" />} label="Destruction runs" />
       <Item to="/fleet" icon={<Network className="h-4 w-4" />} label="Fleet" />
       <Item to="/bench-setup" icon={<SlidersHorizontal className="h-4 w-4" />} label="Bench setup" />
+      <Item to="/licence" icon={<KeyRound className="h-4 w-4" />} label="Licence" />
     </nav>
   );
 }

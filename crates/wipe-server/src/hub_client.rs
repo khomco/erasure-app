@@ -1,8 +1,8 @@
 //! The station's client for the hub (ADR-0008, station-enrollment story 3).
 //!
-//! One implementation for every station-side caller: `wipestation enroll`
-//! today, the bench app's station routes (story 4) and the periodic licence
-//! fetch (story 5) later.
+//! One implementation for every station-side caller: `wipestation enroll`,
+//! the bench app's station routes ([`crate::enrollment`], story 4), and the
+//! periodic licence fetch (story 5) later.
 //!
 //! - [`HubOrigin`]: the only hub address a station accepts. `https`, or
 //!   `http` only on `localhost`, `*.localhost`, `127.0.0.0/8` or `::1`
@@ -18,9 +18,10 @@
 //!   [`wipe_license::enrollment`].
 //! - [`enroll`]: start, then poll at the hub's `interval` (and `slow_down`'s
 //!   new one), retrying a network error or 5xx at the current interval, until
-//!   approval, denial or `expires_in`. An approved licence is checked against
-//!   **only the roots the caller gives**: the hub delivers licences and can
-//!   never introduce a root (ADR-0008 §4).
+//!   approval, denial or `expires_in` ([`poll_until_done`] is the polling
+//!   half, for a caller that sends the start itself). An approved licence is
+//!   checked against **only the roots the caller gives**: the hub delivers
+//!   licences and can never introduce a root (ADR-0008 §4).
 //! - [`install_on_station`]: hand a verified licence to a running `serve`
 //!   through `POST /api/license` (the runtime install, memory-only).
 //!
@@ -490,8 +491,25 @@ pub async fn enroll(
 ) -> Result<Enrolled, EnrollError> {
     let started = client.start(who.key, who.station_id, who.label).await?;
     on_started(&started);
+    poll_until_done(client, who, &started, clock).await
+}
+
+/// The longest enrollment a station waits for, in seconds, whatever the
+/// hub's `expires_in` says (the hub sends 600): a day.
+pub const MAX_EXPIRES_IN_SECS: u64 = 86_400;
+
+/// Poll the enrollment `started` began until it ends: the second half of
+/// [`enroll`], for a caller that sends the start itself (the station's
+/// enrollment routes answer with the start before polling begins). Expiry
+/// counts from this call, capped at [`MAX_EXPIRES_IN_SECS`].
+pub async fn poll_until_done(
+    client: &HubClient,
+    who: &Enrollment<'_>,
+    started: &StartResponse,
+    clock: &mut dyn Clock,
+) -> Result<Enrolled, EnrollError> {
     let t0 = clock.now();
-    let deadline = Duration::from_secs(started.expires_in);
+    let deadline = Duration::from_secs(started.expires_in.min(MAX_EXPIRES_IN_SECS));
     let mut interval = Duration::from_secs(started.interval.max(1));
     let origin = client.origin().to_string();
     loop {

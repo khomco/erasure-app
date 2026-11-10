@@ -5,6 +5,7 @@ import type {
   DestructionManifest,
   Device,
   EnclosureCatalog,
+  EnrollmentView,
   Job,
   JobSpec,
   LicenseInfo,
@@ -245,6 +246,21 @@ export const api = {
    *  the station restarts. */
   installLicense: (licenceJson: string) =>
     jsonFetch<LicenseInfo>("/api/license", { method: "POST", body: licenceJson }),
+  /** The Register with platform panel's state (ADR-0008). */
+  enrollment: () => jsonFetch<EnrollmentView>("/api/enrollment"),
+  /** Start registering with the hub at `hubOrigin`, replacing any pending
+   *  attempt. Resolves with the attempt pending, or already ended when the
+   *  hub could not be reached or refused; rejects (400/409, `{"error"}`)
+   *  only for a bad address, an over-long label, no vendor root, or an
+   *  instance key generated for this run only (no `--key-path`). */
+  startEnrollment: (hubOrigin: string, label: string | null) =>
+    jsonFetch<EnrollmentView>("/api/enrollment", {
+      method: "POST",
+      body: JSON.stringify({ hub_origin: hubOrigin, label }),
+    }),
+  /** Stop the pending attempt; the hub's code simply expires. */
+  cancelEnrollment: () =>
+    jsonFetch<EnrollmentView>("/api/enrollment/cancel", { method: "POST" }),
 };
 
 export function formatBytes(n: number): string {

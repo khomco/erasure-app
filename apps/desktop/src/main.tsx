@@ -14,6 +14,7 @@ import { InboxPage } from "./pages/InboxPage";
 import { FleetPage } from "./pages/FleetPage";
 import { ManifestsPage } from "./pages/ManifestsPage";
 import { BenchSetupPage } from "./pages/BenchSetupPage";
+import { LicencePage } from "./pages/LicencePage";
 import { RecordForDestructionPage } from "./pages/RecordForDestructionPage";
 
 const queryClient = new QueryClient({
@@ -87,6 +88,12 @@ const benchSetupRoute = createRoute({
   component: BenchSetupPage,
 });
 
+const licenceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/licence",
+  component: LicencePage,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   inboxRoute,
@@ -97,6 +104,7 @@ const routeTree = rootRoute.addChildren([
   manifestsRoute,
   recordForDestructionRoute,
   benchSetupRoute,
+  licenceRoute,
 ]);
 
 const router = createRouter({ routeTree });

@@ -744,6 +744,32 @@ pub fn save_station_settings(path: &Path, settings: &StationSettings) -> Result<
     })
 }
 
+/// File name of the licence an enrollment saves (`wipestation enroll`'s
+/// default `--license-out`, and the bench app's enrollment), beside the
+/// station settings. Never loaded at start-up: give it to `serve --license`.
+pub const ENROLLED_LICENCE_FILE: &str = "enrolled-licence.json";
+
+/// Where an enrollment saves its licence: [`ENROLLED_LICENCE_FILE`] beside
+/// the station settings at `settings_path`.
+pub fn enrolled_licence_path(settings_path: &Path) -> PathBuf {
+    settings_path.with_file_name(ENROLLED_LICENCE_FILE)
+}
+
+/// Write an enrolled licence's JSON to `path`, creating its directory. The
+/// error names the path.
+pub fn save_enrolled_licence(path: &Path, json: &str) -> Result<(), StoreError> {
+    let named = |what: &str, at: &Path, e: std::io::Error| {
+        StoreError::Io(std::io::Error::new(
+            e.kind(),
+            format!("{what} {}: {e}", at.display()),
+        ))
+    };
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| named("creating", dir, e))?;
+    }
+    std::fs::write(path, json).map_err(|e| named("writing", path, e))
+}
+
 #[cfg(test)]
 mod settings_tests {
     use super::*;

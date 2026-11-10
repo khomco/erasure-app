@@ -999,6 +999,43 @@ pub async fn install_license(
     })
 }
 
+/// The bench app's Register with platform panel (ADR-0008, CAP-4).
+pub async fn enrollment(State(state): State<AppState>) -> Json<crate::enrollment::EnrollmentView> {
+    Json(crate::enrollment::view(&state))
+}
+
+/// Start an enrollment with the hub, replacing any pending one. 400 for a
+/// hub address that breaks the rule or an over-long label, 409 when the
+/// station trusts no vendor root or its instance key lasts for this run only,
+/// all before any hub request. Otherwise 200
+/// with the attempt pending, or ended when the hub could not be reached or
+/// refused: hub outcomes are view states, not HTTP errors.
+pub async fn start_enrollment(
+    State(state): State<AppState>,
+    Json(req): Json<crate::enrollment::StartEnrollment>,
+) -> Result<Json<crate::enrollment::EnrollmentView>, ApiError> {
+    use crate::enrollment::StartRefusal;
+    crate::enrollment::start(&state, req)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            let code = match e {
+                StartRefusal::NoVendorRoot | StartRefusal::KeyNotKept => StatusCode::CONFLICT,
+                StartRefusal::BadOrigin(_) | StartRefusal::LabelTooLong(_) => {
+                    StatusCode::BAD_REQUEST
+                }
+            };
+            ApiError(code, e.to_string())
+        })
+}
+
+/// Stop the pending enrollment, if any; the hub's code simply expires.
+pub async fn cancel_enrollment(
+    State(state): State<AppState>,
+) -> Json<crate::enrollment::EnrollmentView> {
+    Json(crate::enrollment::cancel(&state))
+}
+
 // ---- Error type ---------------------------------------------------------
 
 pub struct ApiError(pub StatusCode, pub String);

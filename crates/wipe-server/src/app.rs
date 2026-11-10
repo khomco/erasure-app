@@ -71,6 +71,22 @@ pub struct AppState {
     /// be switched off by the operator it is meant to check. Each run copies
     /// the required kind at assembly. Never depends on licence state.
     pub concurrence_policy: wipe_common::ConcurrencePolicy,
+    /// The station id this station is licensed under (`--station-id`,
+    /// default `standalone`): what an enrollment from the bench app sends
+    /// the hub, since a machine licence is bound to it.
+    pub station_id: String,
+    /// `station-settings.json`, where the hub address is kept (ADR-0008 §5);
+    /// an enrolled licence is saved beside it. `None` when the station keeps
+    /// no configuration on disk: nothing an enrollment collects is saved.
+    pub settings_path: Option<PathBuf>,
+    /// Whether the instance key is kept in a key file, so it survives a
+    /// restart (`--key-path`). A key generated for this run only cannot
+    /// enroll: a licence bound to it would be lost at the next start, along
+    /// with the customer's seat it spent.
+    pub instance_key_kept: bool,
+    /// The bench app's enrollment attempt and its polling task
+    /// ([`crate::enrollment`]).
+    pub enrollment: Arc<crate::enrollment::EnrollmentSlot>,
 }
 
 impl AppState {
@@ -118,6 +134,10 @@ impl AppState {
             ))),
             concurrence_policy: wipe_common::ConcurrencePolicy::None,
             vendor_roots: Arc::new(Vec::new()),
+            station_id: "standalone".into(),
+            settings_path: None,
+            instance_key_kept: false,
+            enrollment: Arc::new(crate::enrollment::EnrollmentSlot::default()),
         };
         state.spawn_cert_generator();
         state
@@ -175,6 +195,27 @@ impl AppState {
     /// (`POST /api/license`). Without any, runtime install is refused.
     pub fn with_vendor_roots(mut self, roots: Vec<wipe_cert::VerifyingKey>) -> Self {
         self.vendor_roots = Arc::new(roots);
+        self
+    }
+
+    /// The station id an enrollment sends the hub. Must be the id the
+    /// station's licensing uses (`build_station` passes the same one).
+    pub fn with_station_id(mut self, station_id: impl Into<String>) -> Self {
+        self.station_id = station_id.into();
+        self
+    }
+
+    /// Where the station settings live; an enrollment saves the hub address
+    /// there and its licence beside it. Without one, nothing is saved.
+    pub fn with_settings_path(mut self, path: Option<PathBuf>) -> Self {
+        self.settings_path = path;
+        self
+    }
+
+    /// Whether the instance key is kept on disk (`build_station` passes
+    /// whether it was given a key path). Default false: enrollment refused.
+    pub fn with_instance_key_kept(mut self, kept: bool) -> Self {
+        self.instance_key_kept = kept;
         self
     }
 
@@ -551,6 +592,11 @@ fn api_routes() -> ApiRoutes {
             "/api/license",
             get(handlers::license).post(handlers::install_license),
         )
+        .route(
+            "/api/enrollment",
+            get(handlers::enrollment).post(handlers::start_enrollment),
+        )
+        .route("/api/enrollment/cancel", post(handlers::cancel_enrollment))
         .route("/api/sim/devices/attach", post(handlers::sim_attach))
         .route("/api/sim/devices/detach", post(handlers::sim_detach))
         .route("/api/sim/devices", get(handlers::sim_detached))
