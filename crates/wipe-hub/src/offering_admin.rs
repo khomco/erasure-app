@@ -24,6 +24,14 @@
 //! - **A free trial** (`trial`, ADR-0013 §2) costs nothing, is one-off and
 //!   always carries an erasure quota; `trial` is a commercial term, frozen at
 //!   publication like the price. Every other offering costs at least 1.
+//! - **Credit target reserve** (`credit_target_reserve`, ADR-0013 §3): how
+//!   many credits a station is given from the pool by default. Only with a
+//!   counted quota (absent: [`crate::credits::DEFAULT_TARGET_RESERVE`]),
+//!   frozen at publication; an unlimited offering has none. A stored NULL
+//!   reads as the default.
+//! - **No annual offering with a counted quota**: what happens to unused
+//!   credits at renewal is undecided (ADR-0013, DECISIONS D17), so offerings
+//!   with credits are one-off. Refused by this validator only.
 //!
 //! Migration 0010 repeats every rule as a CHECK or trigger.
 
@@ -51,6 +59,14 @@ pub const TERM_MAX_MONTHS: i64 = 120;
 pub const ANNUAL_TERM_MONTHS: i64 = 12;
 /// The quota the portal's form suggests for a new trial (ADR-0013 §2).
 pub const TRIAL_DEFAULT_QUOTA_ERASURES: i64 = 25;
+/// The highest credit target reserve.
+pub const TARGET_RESERVE_MAX: i64 = 1_000_000_000;
+
+pub const MSG_TARGET_RESERVE_UNLIMITED: &str =
+    "credit_target_reserve applies only to an offering with an erasure quota";
+pub const MSG_ANNUAL_QUOTA: &str = "grants.quota_erasures must be unlimited for an annual \
+     offering: offerings with erasure credits are one-off until unused credits at renewal are \
+     decided";
 
 pub const INTERVALS: [&str; 2] = ["one_off", "annual"];
 pub const SCOPES: [&str; 2] = ["machine", "site"];
@@ -97,6 +113,9 @@ pub struct OfferingRequest {
     #[serde(default)]
     pub trial: bool,
     pub grants: GrantsRequest,
+    /// Credits a station is given by default; only with a counted quota.
+    #[serde(default)]
+    pub credit_target_reserve: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -139,6 +158,8 @@ pub struct NewOffering {
     pub interval: String,
     pub trial: bool,
     pub grants: Grants,
+    /// `Some` exactly when the quota is counted.
+    pub credit_target_reserve: Option<i64>,
 }
 
 fn in_range(field: &str, v: i64, lo: i64, hi: i64) -> Result<i64, String> {
@@ -210,6 +231,15 @@ pub fn validate(req: &OfferingRequest) -> Result<NewOffering, String> {
     if req.trial && quota_erasures.is_none() {
         return Err("grants.quota_erasures must be a count for a free trial, not unlimited".into());
     }
+    if interval == "annual" && quota_erasures.is_some() {
+        return Err(MSG_ANNUAL_QUOTA.into());
+    }
+    let credit_target_reserve = match (quota_erasures, req.credit_target_reserve) {
+        (None, None) => None,
+        (None, Some(_)) => return Err(MSG_TARGET_RESERVE_UNLIMITED.into()),
+        (Some(_), None) => Some(crate::credits::DEFAULT_TARGET_RESERVE),
+        (Some(_), Some(n)) => Some(in_range("credit_target_reserve", n, 1, TARGET_RESERVE_MAX)?),
+    };
     let mut features = BTreeSet::new();
     for f in &g.features {
         // `wipe_license::Feature` decides; FEATURES only words the error.
@@ -241,6 +271,7 @@ pub fn validate(req: &OfferingRequest) -> Result<NewOffering, String> {
             features: features.into_iter().collect(),
             term_months: term_months as i32,
         },
+        credit_target_reserve,
     })
 }
 
@@ -262,6 +293,9 @@ pub struct Offering {
     /// `draft`, `published` or `retired`.
     pub status: String,
     pub grants: Grants,
+    /// Credits a station is given by default (ADR-0013 §3); `None` exactly
+    /// when the quota is unlimited.
+    pub credit_target_reserve: Option<i64>,
     /// RFC 3339, UTC.
     pub created_at: String,
     pub updated_at: String,
@@ -278,6 +312,7 @@ impl Offering {
             && self.interval == new.interval
             && self.trial == new.trial
             && self.grants == new.grants
+            && self.credit_target_reserve == new.credit_target_reserve
     }
 
     /// `{field: {from, to}}` for every field `new` changes; `grants` is one
@@ -304,6 +339,11 @@ impl Offering {
         diff("interval", json!(self.interval), json!(new.interval));
         diff("trial", json!(self.trial), json!(new.trial));
         diff("grants", json!(self.grants), json!(new.grants));
+        diff(
+            "credit_target_reserve",
+            json!(self.credit_target_reserve),
+            json!(new.credit_target_reserve),
+        );
         out
     }
 }
@@ -329,6 +369,7 @@ struct Row {
     quota_erasures: Option<i64>,
     features: Vec<String>,
     term_months: i32,
+    credit_target_reserve: Option<i64>,
     created_at: String,
     updated_at: String,
     published_at: Option<String>,
@@ -353,6 +394,7 @@ impl From<Row> for Offering {
                 features: r.features,
                 term_months: r.term_months,
             },
+            credit_target_reserve: r.credit_target_reserve,
             created_at: r.created_at,
             updated_at: r.updated_at,
             published_at: r.published_at,
@@ -392,11 +434,15 @@ fn select() -> String {
         "SELECT id, name, description, price_minor, currency, billing_interval, trial, status, \
                 scope, \
                 seats, quota_erasures, features, term_months, \
+                COALESCE(credit_target_reserve, \
+                         CASE WHEN quota_erasures IS NOT NULL THEN {DEFAULT_RESERVE} END) \
+                    AS credit_target_reserve, \
                 to_char(created_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS created_at, \
                 to_char(updated_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS updated_at, \
                 to_char(published_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS published_at, \
                 to_char(retired_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS retired_at \
-         FROM offerings"
+         FROM offerings",
+        DEFAULT_RESERVE = crate::credits::DEFAULT_TARGET_RESERVE
     )
 }
 
@@ -486,8 +532,8 @@ pub async fn create(
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO offerings (name, description, price_minor, currency, billing_interval, \
                                 scope, seats, quota_erasures, features, term_months, created_by, \
-                                trial) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
+                                trial, credit_target_reserve) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id",
     )
     .bind(&new.name)
     .bind(&new.description)
@@ -501,6 +547,7 @@ pub async fn create(
     .bind(new.grants.term_months)
     .bind(admin.user_id())
     .bind(new.trial)
+    .bind(new.credit_target_reserve)
     .fetch_one(&mut *conn)
     .await?;
     let offering = fetch(conn, id).await?;
@@ -552,7 +599,10 @@ pub async fn update(
     sqlx::query(
         "UPDATE offerings SET name = $2, description = $3, price_minor = $4, currency = $5, \
                 billing_interval = $6, scope = $7, seats = $8, quota_erasures = $9, \
-                features = $10, term_months = $11, trial = $12, updated_at = now() \
+                features = $10, term_months = $11, trial = $12, \
+                credit_target_reserve = CASE WHEN status = 'draft' THEN $13 \
+                                             ELSE credit_target_reserve END, \
+                updated_at = now() \
          WHERE id = $1",
     )
     .bind(id)
@@ -567,6 +617,7 @@ pub async fn update(
     .bind(&new.grants.features)
     .bind(new.grants.term_months)
     .bind(new.trial)
+    .bind(new.credit_target_reserve)
     .execute(&mut *conn)
     .await?;
     audit_read(
@@ -813,6 +864,7 @@ mod tests {
             trial: false,
             status: "draft".into(),
             grants: new.grants.clone(),
+            credit_target_reserve: None,
             created_at: String::new(),
             updated_at: String::new(),
             published_at: None,
@@ -878,5 +930,45 @@ mod tests {
         assert!(err(|r| r.price_minor = 0).starts_with("price_minor must be between 1"));
         // No `trial` key is not a trial.
         assert!(!req().trial);
+    }
+
+    #[test]
+    fn an_annual_offering_cannot_carry_a_counted_quota() {
+        assert_eq!(
+            err(|r| r.grants.quota_erasures = Some(Some(500))),
+            MSG_ANNUAL_QUOTA
+        );
+        // Unlimited annual stays fine, with no reserve.
+        let o = validate(&req()).unwrap();
+        assert_eq!(o.credit_target_reserve, None);
+    }
+
+    #[test]
+    fn the_target_reserve_defaults_with_a_quota_and_is_refused_without() {
+        let one_off = |reserve: Option<i64>| {
+            let mut r = req();
+            r.interval = "one_off".into();
+            r.grants.quota_erasures = Some(Some(500));
+            r.credit_target_reserve = reserve;
+            validate(&r)
+        };
+        assert_eq!(one_off(None).unwrap().credit_target_reserve, Some(50));
+        assert_eq!(one_off(Some(80)).unwrap().credit_target_reserve, Some(80));
+        assert_eq!(
+            one_off(Some(TARGET_RESERVE_MAX))
+                .unwrap()
+                .credit_target_reserve,
+            Some(TARGET_RESERVE_MAX)
+        );
+        for bad in [0, -1, TARGET_RESERVE_MAX + 1] {
+            assert_eq!(
+                one_off(Some(bad)).unwrap_err(),
+                "credit_target_reserve must be between 1 and 1000000000"
+            );
+        }
+        assert_eq!(
+            err(|r| r.credit_target_reserve = Some(80)),
+            MSG_TARGET_RESERVE_UNLIMITED
+        );
     }
 }

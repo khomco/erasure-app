@@ -5,21 +5,26 @@
 //!   stations (released ones last) with each one's latest licence and
 //!   `renewal_available`.
 //! - `POST /api/stations {entitlement_id, instance_key_id, station_id?,
-//!   label?, site?}` — an owner registers a station: 201 `{station,
-//!   licence}`. 503 [`MSG_ISSUANCE_UNAVAILABLE`] when the hub has no vendor
+//!   label?, site?, credits?}` — an owner registers a station: 201 `{station,
+//!   licence, credit_grant: {id, credits} | null}`; `credits` moves that
+//!   many from a quota entitlement's pool into the licence file (omitted:
+//!   `min(target reserve, available)`, [`crate::credits`]). 503 [`MSG_ISSUANCE_UNAVAILABLE`] when the hub has no vendor
 //!   root; the other refusals are [`stations::register`]'s.
 //! - `POST /api/stations/:id/release` — an owner: 200 `{station}`, its seat
 //!   free and its licence superseded; 409
 //!   [`stations::MSG_ALREADY_RELEASED`] the
 //!   second time.
-//! - `POST /api/stations/:id/reissue` — an owner issues a station whose
-//!   `renewal_available` is true a new licence to its entitlement's current
-//!   `term_end`: 201 `{station, licence}`, the old licence superseded
+//! - `POST /api/stations/:id/reissue {credits?}` (an empty body is `{}`) —
+//!   an owner issues a station whose `renewal_available` is true a new
+//!   licence to its entitlement's current `term_end`, or adds `credits ≥ 1`
+//!   to an up-to-date station on a quota entitlement: 201 `{station,
+//!   licence, credit_grant}`, the old licence superseded
 //!   (its file still verifies offline until its own `not_after`). 503
 //!   [`MSG_ISSUANCE_UNAVAILABLE`] when the hub has no vendor root; the other
 //!   refusals are [`stations::reissue`]'s.
 //! - `GET /api/licences/:id/download` — any role: the stored licence file,
-//!   byte for byte, as `application/json` with `Content-Disposition:
+//!   byte for byte (or, when it was issued with a credit grant, the
+//!   `{license, credit_grant}` licence file of both stored documents), as `application/json` with `Content-Disposition:
 //!   attachment`; audited. A revoked licence is 409
 //!   [`stations::MSG_LICENCE_REVOKED`] and a vendor-issued one 404: those
 //!   reach a customer only through the vendor.
@@ -37,16 +42,19 @@
 //! is retired and `/api/organization/lapse-policy` is an ordinary unknown
 //! `/api/*` path.
 
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::accounts::Role;
 use crate::auth::{ApiError, CurrentUser, JsonBody};
+use crate::credits::CreditChoice;
 use crate::stations::{
     self, RegisterRequest, StationError, MSG_ISSUANCE_UNAVAILABLE, MSG_NO_LICENCE, MSG_NO_STATION,
     MSG_OWNER_ONLY_STATIONS,
@@ -123,6 +131,7 @@ async fn register(
         Json(json!({
             "station": registered.station,
             "licence": registered.licence,
+            "credit_grant": registered.credit_grant,
         })),
     )
         .into_response())
@@ -142,10 +151,19 @@ async fn release(
     Ok(Json(json!({ "station": station })))
 }
 
+/// The reissue body: `{}` (or no body at all) for a renewal.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReissueRequest {
+    #[serde(default)]
+    credits: Option<i64>,
+}
+
 async fn reissue(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(id): Path<String>,
+    body: Bytes,
 ) -> Result<Response, ApiError> {
     require_owner(&user)?;
     let Some(vendor) = state.config.vendor_root.as_ref() else {
@@ -154,6 +172,13 @@ async fn reissue(
             MSG_ISSUANCE_UNAVAILABLE,
         ));
     };
+    let req: ReissueRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        ReissueRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?
+    };
+    let credits = CreditChoice::from_request(req.credits)?;
     let id =
         Uuid::parse_str(&id).map_err(|_| ApiError::new(StatusCode::NOT_FOUND, MSG_NO_STATION))?;
     let mut tx = state.pool.begin().await?;
@@ -163,6 +188,7 @@ async fn reissue(
         user.organization_id,
         &crate::auth::actor(user.user_id),
         id,
+        credits,
     )
     .await?;
     tx.commit().await?;
@@ -171,6 +197,7 @@ async fn reissue(
         Json(json!({
             "station": reissued.station,
             "licence": reissued.licence,
+            "credit_grant": reissued.credit_grant,
         })),
     )
         .into_response())

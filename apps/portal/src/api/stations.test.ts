@@ -3,6 +3,7 @@ import { HubError, resetCsrfCache } from "./auth";
 import {
   fetchStations,
   fetchVendorRoot,
+  isCreditGrant,
   isInstanceKeyId,
   isLicence,
   isStation,
@@ -12,6 +13,7 @@ import {
   registerStation,
   reissueStation,
   releaseStation,
+  suggestedCredits,
   type Licence,
   type Station,
 } from "./stations";
@@ -44,6 +46,9 @@ const station: Station = {
   released_at: null,
   licence,
   renewal_available: false,
+  credit_balance: null,
+  credit_balance_reported_at: null,
+  credits_granted: 0,
 };
 
 interface Call {
@@ -108,6 +113,30 @@ describe("guards", () => {
     expect(isStation({ ...station, lapse_policy_update_available: true })).toBe(true);
     expect(isStation({ ...station, licence: null, scope: "site", station_id: null })).toBe(true);
     expect(isVendorRootKey({ public_key_id: KEY, public_key_b64: "abc" })).toBe(true);
+    expect(
+      isStation({
+        ...station,
+        credit_balance: 30,
+        credit_balance_reported_at: "2026-11-10T00:00:00Z",
+        credits_granted: 50,
+      }),
+    ).toBe(true);
+    expect(isCreditGrant({ id: "g", credits: 50 })).toBe(true);
+  });
+
+  it("reject malformed credit fields", () => {
+    expect(isStation({ ...station, credits_granted: undefined })).toBe(false);
+    expect(isStation({ ...station, credits_granted: 1.5 })).toBe(false);
+    expect(isStation({ ...station, credit_balance: "30" })).toBe(false);
+    expect(isStation({ ...station, credit_balance_reported_at: undefined })).toBe(false);
+    expect(isCreditGrant({ id: "g", credits: "50" })).toBe(false);
+    expect(isCreditGrant(null)).toBe(false);
+  });
+
+  it("suggest the smaller of the target reserve and what is left", () => {
+    expect(suggestedCredits({ available: 4950, target_reserve: 50 })).toBe(50);
+    expect(suggestedCredits({ available: 25, target_reserve: 50 })).toBe(25);
+    expect(suggestedCredits({ available: 0, target_reserve: 50 })).toBe(0);
   });
 
   it("reject malformed stations and licences", () => {
@@ -154,13 +183,13 @@ describe("calls", () => {
   });
 
   it("registers with the trimmed body and CSRF", async () => {
-    const f = respond(201, { station, licence });
+    const f = respond(201, { station, licence, credit_grant: null });
     expect(
       await registerStation(
         { entitlement_id: station.entitlement_id, instance_key_id: KEY, station_id: "bench-1" },
         f.impl,
       ),
-    ).toEqual({ station, licence });
+    ).toEqual({ station, licence, credit_grant: null });
     expect(f.calls).toEqual([
       {
         url: "/api/stations",
@@ -198,12 +227,41 @@ describe("calls", () => {
       not_after: "2028-11-08T10:01:00Z",
       issued_at: "2027-01-02T00:00:00Z",
     };
-    const body = { station: { ...station, licence: renewed }, licence: renewed };
+    const body = {
+      station: { ...station, licence: renewed },
+      licence: renewed,
+      credit_grant: null,
+    };
     const f = respond(201, body);
     expect(await reissueStation(station.id, f.impl)).toEqual(body);
     expect(f.calls).toEqual([
       { url: `/api/stations/${station.id}/reissue`, method: "POST", body: {}, csrf: "csrf-1" },
     ]);
+  });
+
+  it("adds credits with a reissue naming them", async () => {
+    const grant = { id: "6b1d2c3e-0000-4000-8000-000000000003", credits: 20 };
+    const body = {
+      station: { ...station, credits_granted: 70 },
+      licence,
+      credit_grant: grant,
+    };
+    const f = respond(201, body);
+    expect(await reissueStation(station.id, f.impl, 20)).toEqual(body);
+    expect(f.calls).toEqual([
+      {
+        url: `/api/stations/${station.id}/reissue`,
+        method: "POST",
+        body: { credits: 20 },
+        csrf: "csrf-1",
+      },
+    ]);
+  });
+
+  it("registers with credits when given, 0 included", async () => {
+    const f = respond(201, { station, licence, credit_grant: null });
+    await registerStation({ entitlement_id: "e", instance_key_id: KEY, credits: 0 }, f.impl);
+    expect(f.calls[0].body).toEqual({ entitlement_id: "e", instance_key_id: KEY, credits: 0 });
   });
 
   it("surfaces a refused reissue", async () => {

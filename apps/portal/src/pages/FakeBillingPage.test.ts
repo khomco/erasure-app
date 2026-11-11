@@ -18,6 +18,7 @@ const renewing: Entitlement = {
   current: true,
   cancelled_at: null,
   refunded_at: null,
+  credits: null,
 };
 
 function render(canManage: boolean): string {

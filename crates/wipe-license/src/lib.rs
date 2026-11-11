@@ -13,6 +13,8 @@
 //! are speed bumps.
 //!
 //! * [`chain`] — vendor root -> license -> instance key -> erasure cert.
+//! * [`credit`] — vendor-signed credit grants from an organization's pool
+//!   (ADR-0013 §3).
 //! * [`entitlement`] — what the vendor signature makes uneditable.
 //! * [`lease`] — offline expiry, anti-rollback watermark, counter seam.
 //! * [`client`] — online reconciliation seam (no server built).
@@ -24,6 +26,7 @@
 pub mod anchor;
 pub mod chain;
 pub mod client;
+pub mod credit;
 pub mod enrollment;
 pub mod entitlement;
 pub mod install;
@@ -31,6 +34,7 @@ pub mod lease;
 pub mod station_request;
 
 pub use chain::*;
+pub use credit::*;
 pub use entitlement::*;
 pub use install::*;
 pub use lease::*;

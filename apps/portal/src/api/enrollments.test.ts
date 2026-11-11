@@ -48,6 +48,9 @@ const station: Station = {
   released_at: null,
   licence,
   renewal_available: false,
+  credit_balance: null,
+  credit_balance_reported_at: null,
+  credits_granted: 0,
 };
 
 interface Call {

@@ -12,8 +12,8 @@ use support::hub::{assert_error, bootstrap_admin, spawn_hub, Hub, Who};
 use uuid::Uuid;
 use wipe_hub::admin_routes::MSG_NO_OFFERING;
 use wipe_hub::offering_admin::{
-    MSG_DUPLICATE_NAME, MSG_PUBLISH_NOT_DRAFT, MSG_RETIRED, MSG_RETIRE_NOT_PUBLISHED,
-    MSG_TERMS_FROZEN,
+    MSG_ANNUAL_QUOTA, MSG_DUPLICATE_NAME, MSG_PUBLISH_NOT_DRAFT, MSG_RETIRED,
+    MSG_RETIRE_NOT_PUBLISHED, MSG_TARGET_RESERVE_UNLIMITED, MSG_TERMS_FROZEN,
 };
 
 const ADMIN_ONLY: &str = "only vendor admins can use the admin area";
@@ -166,9 +166,11 @@ async fn create_returns_a_normalised_draft_and_audits_it_in_full() {
     assert_eq!(o["published_at"], Value::Null);
     assert_eq!(o["retired_at"], Value::Null);
     let keys: Vec<&String> = o.as_object().unwrap().keys().collect();
-    assert_eq!(keys.len(), 13, "{keys:?}");
+    assert_eq!(keys.len(), 14, "{keys:?}");
     // A body without `trial` is not a trial.
     assert_eq!(o["trial"], false);
+    // Unlimited: no credit target reserve.
+    assert_eq!(o["credit_target_reserve"], Value::Null);
 
     let row = f.stored(&id).await;
     assert_eq!(row["status"], "draft");
@@ -340,13 +342,17 @@ async fn a_published_offerings_terms_never_change_and_nothing_is_written() {
     for (key, value) in [
         ("scope", json!("site")),
         ("seats", json!(2)),
-        ("quota_erasures", json!(500)),
         ("features", json!([])),
     ] {
         let mut b = body("Station");
         b["grants"][key] = value;
         edits.push(b);
     }
+    // A counted quota (one-off, since an annual offering cannot have one).
+    let mut b = body("Station");
+    b["interval"] = json!("one_off");
+    b["grants"]["quota_erasures"] = json!(500);
+    edits.push(b);
     // A copy edit with a term change is refused whole.
     let mut b = body("Station renamed");
     b["price_minor"] = json!(1);
@@ -877,4 +883,121 @@ async fn the_schema_refuses_a_bad_trial() {
     .execute(pool)
     .await
     .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Credit pools (controlled-licensing story 3)
+
+/// A one-off body with a counted quota.
+fn pool_body(name: &str) -> Value {
+    let mut b = body(name);
+    b["interval"] = json!("one_off");
+    b["grants"]["quota_erasures"] = json!(500);
+    b
+}
+
+#[tokio::test]
+async fn an_annual_offering_with_a_counted_quota_is_refused() {
+    let f = fixture().await;
+    let before = f.audit_count().await;
+    let mut b = body("Annual credits");
+    b["grants"]["quota_erasures"] = json!(500);
+    assert_error(
+        f.post("/api/admin/offerings", b).await,
+        StatusCode::BAD_REQUEST,
+        MSG_ANNUAL_QUOTA,
+    )
+    .await;
+    assert_eq!(f.hub.count("offerings").await, 0);
+    assert_eq!(f.audit_count().await, before);
+}
+
+#[tokio::test]
+async fn the_target_reserve_defaults_to_50_and_is_checked() {
+    let f = fixture().await;
+    let o = f.create(pool_body("Default reserve")).await;
+    assert_eq!(o["credit_target_reserve"], 50);
+    assert_eq!(f.stored(&id_of(&o)).await["credit_target_reserve"], 50);
+    let mut b = pool_body("Reserve 80");
+    b["credit_target_reserve"] = json!(80);
+    assert_eq!(f.create(b).await["credit_target_reserve"], 80);
+
+    let before = f.audit_count().await;
+    let mut zero = pool_body("Zero");
+    zero["credit_target_reserve"] = json!(0);
+    assert_error(
+        f.post("/api/admin/offerings", zero).await,
+        StatusCode::BAD_REQUEST,
+        "credit_target_reserve must be between 1 and 1000000000",
+    )
+    .await;
+    let mut unlimited = body("Unlimited");
+    unlimited["interval"] = json!("one_off");
+    unlimited["credit_target_reserve"] = json!(80);
+    assert_error(
+        f.post("/api/admin/offerings", unlimited).await,
+        StatusCode::BAD_REQUEST,
+        MSG_TARGET_RESERVE_UNLIMITED,
+    )
+    .await;
+    assert_eq!(f.audit_count().await, before);
+}
+
+#[tokio::test]
+async fn the_target_reserve_is_audited_and_freezes_at_publication() {
+    let f = fixture().await;
+    let id = id_of(&f.create(pool_body("Pool")).await);
+    let path = format!("/api/admin/offerings/{id}");
+    let mut b = pool_body("Pool");
+    b["credit_target_reserve"] = json!(75);
+    let v = ok_json(f.post(&path, b.clone()).await).await;
+    assert_eq!(v["offering"]["credit_target_reserve"], 75);
+    let (_, detail) = f.audits("admin.offering_updated").await.pop().unwrap();
+    assert_eq!(
+        detail["changes"],
+        json!({"credit_target_reserve": {"from": 50, "to": 75}})
+    );
+    ok_json(f.publish(&id).await).await;
+    let mut changed = b.clone();
+    changed["credit_target_reserve"] = json!(76);
+    assert_error(
+        f.post(&path, changed).await,
+        StatusCode::CONFLICT,
+        MSG_TERMS_FROZEN,
+    )
+    .await;
+    // Unchanged terms are accepted.
+    ok_json(f.post(&path, b).await).await;
+}
+
+#[tokio::test]
+async fn an_existing_quota_offering_without_a_reserve_reads_as_50() {
+    let f = fixture().await;
+    let id = f.hub.published_one_off_offering("Old pool", 12).await;
+    assert_eq!(f.stored(&id).await["credit_target_reserve"], Value::Null);
+    let v = ok_json(f.get(&format!("/api/admin/offerings/{id}")).await).await;
+    assert_eq!(v["offering"]["credit_target_reserve"], 50);
+    // Its unchanged body (no reserve) is the same terms.
+    let mut b = pool_body("Old pool");
+    b["grants"]["scope"] = json!("site");
+    b["grants"]["seats"] = json!(2);
+    b["grants"]["quota_erasures"] = json!(5000);
+    b["grants"]["features"] = json!(["pdf_certificates"]);
+    b["price_minor"] = json!(120000);
+    b["description"] = json!("Pay once.");
+    b["grants"]["term_months"] = json!(12);
+    ok_json(
+        f.post(&format!("/api/admin/offerings/{id}"), b.clone())
+            .await,
+    )
+    .await;
+
+    // Renaming it writes the copy and leaves the stored NULL alone.
+    b["name"] = json!("Old pool renamed");
+    let v = ok_json(f.post(&format!("/api/admin/offerings/{id}"), b).await).await;
+    assert_eq!(v["offering"]["name"], "Old pool renamed");
+    assert_eq!(v["offering"]["credit_target_reserve"], 50);
+    let row = f.stored(&id).await;
+    assert_eq!(row["name"], "Old pool renamed");
+    assert_eq!(row["credit_target_reserve"], Value::Null);
 }

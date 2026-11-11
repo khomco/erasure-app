@@ -553,6 +553,12 @@ it: three tiers a customer can buy, activate, renew and outgrow.
 - **L-R9 Metering that reconciles.** The station's counter and the hub's view
   must be comparable, and the honor-system stance in CONTEXT §9 stays: the
   audit log is the truth-of-volume artifact.
+  *Hub half started 2026-11-10 (ADR-0013 §3, `controlled-licensing` story 3): an
+  entitlement's erasure quota is an organization credit pool at the hub; owners move
+  credits into air-gapped stations' licence files as vendor-signed credit grants, and a
+  released station's last reported balance returns to the pool, all in append-only
+  ledgers. Stations do not use grants or report balances yet (story 4), so the licence
+  still carries the whole order quota and the hub's view is grants only.*
 
 ### 4.3 The site-licence problem — flagged, not solved
 

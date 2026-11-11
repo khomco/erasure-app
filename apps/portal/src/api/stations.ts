@@ -1,11 +1,13 @@
 // Mirrors the station and licence routes in
 // crates/wipe-hub/src/station_routes.rs and the serde shapes
-// `wipe_hub::stations::{Station, Licence}` (crates/wipe-hub/src/stations.rs).
+// `wipe_hub::stations::{Station, Licence}` (crates/wipe-hub/src/stations.rs)
+// and `wipe_hub::credits::GrantSummary` (crates/wipe-hub/src/credits.rs).
 // Change both together. The organization lapse-policy setting is retired
 // (ADR-0013 §5): the hub no longer serves it or reports it here.
 //
 // The licence file itself is never parsed here: the browser downloads the
-// hub's stored bytes from `licenceDownloadPath`, exactly as they were signed.
+// hub's stored bytes from `licenceDownloadPath`, exactly as they were signed
+// (with a credit grant beside the licence when credits were moved into it).
 
 import { ensureOk, isObject, json, request, type Fetch } from "./auth";
 import { SCOPES, type Scope } from "./adminOfferings";
@@ -58,11 +60,27 @@ export interface Station {
    * entitlement's (renewed) term end. Computed by the hub.
    */
   renewal_available: boolean;
+  /**
+   * The credit balance the station last reported, and when; `null` until it
+   * reports (connected stations report from a later release).
+   */
+  credit_balance: number | null;
+  credit_balance_reported_at: string | null;
+  /** Credits granted to this station from its entitlement's pool. */
+  credits_granted: number;
+}
+
+/** A credit grant issued with a licence: its id and how many credits. */
+export interface CreditGrant {
+  id: string;
+  credits: number;
 }
 
 export interface Registered {
   station: Station;
   licence: Licence;
+  /** The credit grant inside the new licence file, if any. */
+  credit_grant: CreditGrant | null;
 }
 
 /** What an owner enters to register a station; blank optional fields are omitted. */
@@ -72,6 +90,12 @@ export interface RegisterInput {
   station_id?: string;
   label?: string;
   site?: string;
+  /**
+   * Credits to move from a quota entitlement's pool into the licence file
+   * (a whole number, 0 or more). Omitted: the hub gives the smaller of the
+   * target reserve and what is left. Never sent for an unlimited entitlement.
+   */
+  credits?: number;
 }
 
 /** The vendor root public key: what a station passes as `--vendor-root-b64`. */
@@ -91,6 +115,8 @@ export function isInstanceKeyId(v: string): boolean {
 }
 
 const isNullableString = (v: unknown): v is string | null => v === null || typeof v === "string";
+const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
+const isNullableInt = (v: unknown): v is number | null => v === null || isInt(v);
 const oneOf = (values: readonly string[], v: unknown) =>
   typeof v === "string" && values.includes(v);
 
@@ -124,8 +150,15 @@ export function isStation(v: unknown): v is Station {
     typeof v.registered_at === "string" &&
     isNullableString(v.released_at) &&
     (v.licence === null || isLicence(v.licence)) &&
-    typeof v.renewal_available === "boolean"
+    typeof v.renewal_available === "boolean" &&
+    isNullableInt(v.credit_balance) &&
+    isNullableString(v.credit_balance_reported_at) &&
+    isInt(v.credits_granted)
   );
+}
+
+export function isCreditGrant(v: unknown): v is CreditGrant {
+  return isObject(v) && typeof v.id === "string" && isInt(v.credits);
 }
 
 export function isVendorRootKey(v: unknown): v is VendorRootKey {
@@ -136,7 +169,10 @@ const isStationList = (v: unknown): v is { stations: Station[] } =>
   isObject(v) && Array.isArray(v.stations) && v.stations.every(isStation);
 
 const isRegistered = (v: unknown): v is Registered =>
-  isObject(v) && isStation(v.station) && isLicence(v.licence);
+  isObject(v) &&
+  isStation(v.station) &&
+  isLicence(v.licence) &&
+  (v.credit_grant === null || isCreditGrant(v.credit_grant));
 
 const isStationBody = (v: unknown): v is { station: Station } =>
   isObject(v) && isStation(v.station);
@@ -154,7 +190,16 @@ export function registerBody(input: RegisterInput): RegisterInput {
     const value = input[key]?.trim();
     if (value) body[key] = value;
   }
+  if (input.credits !== undefined) body.credits = input.credits;
   return body;
+}
+
+/**
+ * The credits the register form suggests for an entitlement's pool: the
+ * smaller of its target reserve and what is left, as the hub's default.
+ */
+export function suggestedCredits(pool: { available: number; target_reserve: number }): number {
+  return Math.max(0, Math.min(pool.target_reserve, pool.available));
 }
 
 // ---------------------------------------------------------------------------
@@ -187,12 +232,19 @@ export async function releaseStation(id: string, fetchImpl: Fetch = fetch): Prom
 
 /**
  * `POST /api/stations/{id}/reissue` (owner, 201): the station and its renewed
- * licence, to the entitlement's current term end. The old licence is
- * superseded; its file still works until its own expiry.
+ * licence, to the entitlement's current term end, or, with `credits` (1 or
+ * more, quota entitlements only), a new licence file carrying that many
+ * credits from the pool. The old licence is superseded; its file still works
+ * until its own expiry.
  */
-export async function reissueStation(id: string, fetchImpl: Fetch = fetch): Promise<Registered> {
+export async function reissueStation(
+  id: string,
+  fetchImpl: Fetch = fetch,
+  credits?: number,
+): Promise<Registered> {
+  const body = credits === undefined ? {} : { credits };
   const res = await ensureOk(
-    await request(fetchImpl, "POST", `/api/stations/${encodeURIComponent(id)}/reissue`, {}),
+    await request(fetchImpl, "POST", `/api/stations/${encodeURIComponent(id)}/reissue`, body),
   );
   return json(res, isRegistered, "licence reissue");
 }

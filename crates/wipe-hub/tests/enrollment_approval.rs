@@ -918,3 +918,41 @@ async fn the_eleventh_wrong_code_in_fifteen_minutes_is_locked_and_right_codes_ar
         .await
         .is_empty());
 }
+
+/// Approval on a credit-pool entitlement issues the bare licence and moves
+/// no credits (controlled-licensing story 3): its response carries only the
+/// licence, so a grant nobody receives would strand credits.
+#[tokio::test]
+async fn approval_on_a_credit_pool_grants_nothing() {
+    let f = fixture().await;
+    let one_off = f.hub.published_one_off_offering("Site pool", 12).await;
+    let pool = buy(&f.hub, &f.owner, &one_off).await;
+    let s = start(&f.hub).await;
+    let v = ok_json(
+        approve(&f.hub, &f.owner, &s.user_code, &pool).await,
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(v["station"]["credits_granted"], 0);
+    assert_eq!(f.hub.count("credit_grants").await, 0);
+    assert!(f.hub.audited("credits.granted").await.is_empty());
+    let ents = ok_json(
+        f.hub.get("/api/entitlements", Some(&f.owner.cookie)).await,
+        StatusCode::OK,
+    )
+    .await;
+    let credits = ents["entitlements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == json!(pool))
+        .unwrap()["credits"]
+        .clone();
+    assert_eq!(credits["granted"], 0);
+    assert_eq!(credits["available"], 5000);
+    // The station collects the bare licence.
+    backdate_poll(&f.hub, s.id).await;
+    let got = ok_json(poll(&f.hub, &s).await, StatusCode::OK).await;
+    let file = parse_license(&got["licence"].to_string()).unwrap();
+    check_installable(&file, &s.key.public_key_id(), &[f.root.verifying_key()]).unwrap();
+}

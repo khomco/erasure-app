@@ -32,7 +32,8 @@
 //!   (decision 8).
 //! - [`list`] gives an organization its entitlements and its available seats:
 //!   the seats of every entitlement that is not refunded and whose term has
-//!   not ended.
+//!   not ended. Each entitlement with an erasure quota carries its credit
+//!   pool ([`crate::credits::CreditPool`], ADR-0013 §3).
 //!
 //! The owner-approved auto-renewal notice ([`renewal_notice`]) is built here,
 //! once, for the portal and for Stripe's checkout page.
@@ -47,6 +48,7 @@ use uuid::Uuid;
 
 use crate::admin::RFC3339_UTC;
 use crate::audit::{self, AuditEntry};
+use crate::credits::{CreditPool, DEFAULT_TARGET_RESERVE};
 use crate::offering_admin::Grants;
 use crate::orders::{self, ApplyError, ApplyOutcome};
 use crate::payments::{EventKind, VerifiedEvent};
@@ -83,6 +85,9 @@ pub struct Entitlement {
     pub current: bool,
     pub cancelled_at: Option<String>,
     pub refunded_at: Option<String>,
+    /// The organization's credit pool for this entitlement; `None` when it
+    /// is unlimited.
+    pub credits: Option<CreditPool>,
 }
 
 /// An organization's entitlements, newest first, and the seats they make
@@ -112,10 +117,19 @@ struct EntitlementRow {
     current: bool,
     cancelled_at: Option<String>,
     refunded_at: Option<String>,
+    credits_granted: i64,
+    credits_returned: i64,
+    credit_target_reserve: i64,
 }
 
 impl From<EntitlementRow> for Entitlement {
     fn from(r: EntitlementRow) -> Self {
+        let credits = CreditPool::of(
+            r.quota_erasures,
+            r.credits_granted,
+            r.credits_returned,
+            r.credit_target_reserve,
+        );
         Entitlement {
             id: r.id,
             order_id: r.order_id,
@@ -135,6 +149,7 @@ impl From<EntitlementRow> for Entitlement {
             current: r.current,
             cancelled_at: r.cancelled_at,
             refunded_at: r.refunded_at,
+            credits,
         }
     }
 }
@@ -157,7 +172,14 @@ fn select_entitlements() -> String {
                 e.status, e.renews, \
                 {CURRENT_SQL} AS current, \
                 to_char(e.cancelled_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS cancelled_at, \
-                to_char(e.refunded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS refunded_at \
+                to_char(e.refunded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS refunded_at, \
+                COALESCE((SELECT sum(g.credits) FROM credit_grants g \
+                          WHERE g.entitlement_id = e.id), 0)::bigint AS credits_granted, \
+                COALESCE((SELECT sum(r.credits) FROM credit_returns r \
+                          WHERE r.entitlement_id = e.id), 0)::bigint AS credits_returned, \
+                COALESCE((SELECT f.credit_target_reserve FROM offerings f \
+                          WHERE f.id = o.offering_id), {DEFAULT_TARGET_RESERVE}) \
+                    AS credit_target_reserve \
          FROM entitlements e JOIN orders o ON o.id = e.order_id"
     )
 }

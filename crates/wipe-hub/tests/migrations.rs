@@ -1305,3 +1305,85 @@ async fn trial_offerings_orders_and_entitlements_are_checked() {
     insert_ent("gift").execute(pool).await.expect_err("gift");
     insert_ent("trial").execute(pool).await.unwrap();
 }
+
+/// Migration 0022 (controlled-licensing story 3): an offering's credit
+/// target reserve exists only with a counted quota and freezes at
+/// publication; an existing offering keeps NULL.
+#[tokio::test]
+async fn an_offering_target_reserve_needs_a_quota_and_freezes_at_publication() {
+    let t = TestDb::migrated().await;
+    let pool = &t.pool;
+    let insert = |quota: Option<i64>, reserve: Option<i64>| {
+        sqlx::query_scalar::<_, uuid::Uuid>(
+            "INSERT INTO offerings (name, price_minor, currency, billing_interval, scope, seats, \
+                                    quota_erasures, term_months, credit_target_reserve) \
+             VALUES ('Pool ' || gen_random_uuid(), 1000, 'USD', 'one_off', 'site', 1, $1, 12, \
+                     $2) RETURNING id",
+        )
+        .bind(quota)
+        .bind(reserve)
+    };
+    for (quota, reserve) in [
+        (None, Some(50)),
+        (Some(500), Some(0)),
+        (Some(500), Some(1_000_000_001)),
+    ] {
+        let err = insert(quota, reserve).fetch_one(pool).await.unwrap_err();
+        assert_eq!(
+            err.as_database_error().and_then(|d| d.constraint()),
+            Some("offerings_credit_target_reserve_check"),
+            "{quota:?} {reserve:?}"
+        );
+    }
+    insert(None, None).fetch_one(pool).await.unwrap();
+    insert(Some(500), None).fetch_one(pool).await.unwrap();
+    let id = insert(Some(500), Some(80)).fetch_one(pool).await.unwrap();
+    // A draft may change it; a published offering may not.
+    sqlx::query("UPDATE offerings SET credit_target_reserve = 90 WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE offerings SET status = 'published', published_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let m = refused(
+        pool,
+        "UPDATE offerings SET credit_target_reserve = 100 WHERE id = $1",
+        id,
+    )
+    .await;
+    assert!(m.contains("commercial terms cannot change"), "{m}");
+}
+
+/// Migration 0022: a station's reported balance is never negative and comes
+/// with its report time.
+#[tokio::test]
+async fn a_station_balance_is_never_negative_and_has_a_report_time() {
+    let t = TestDb::migrated().await;
+    let pool = &t.pool;
+    for sql in [
+        "ALTER TABLE stations VALIDATE CONSTRAINT stations_credit_balance_reported_check",
+        "SELECT 1 FROM credit_grants",
+        "SELECT 1 FROM credit_returns",
+    ] {
+        sqlx::query(sql).execute(pool).await.unwrap();
+    }
+    let checks: Vec<String> = sqlx::query_scalar(
+        "SELECT conname::text FROM pg_constraint WHERE conrelid = 'stations'::regclass \
+         AND contype = 'c' ORDER BY conname",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert!(
+        checks.contains(&"stations_credit_balance_check".to_string()),
+        "{checks:?}"
+    );
+    assert!(
+        checks.contains(&"stations_credit_balance_reported_check".to_string()),
+        "{checks:?}"
+    );
+}

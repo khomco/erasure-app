@@ -3,7 +3,8 @@
 // serde shapes `wipe_hub::orders::{CatalogOffering, Order}`
 // (crates/wipe-hub/src/orders.rs) and
 // `wipe_hub::entitlements::{Entitlement, Seats, RenewalNotice}`
-// (crates/wipe-hub/src/entitlements.rs). Change both together.
+// (crates/wipe-hub/src/entitlements.rs) and `wipe_hub::credits::CreditPool`
+// (crates/wipe-hub/src/credits.rs). Change both together.
 //
 // An order becomes `paid` only when the hub applies a verified provider event:
 // nothing here, and no redirect back from a provider, marks one paid. The one
@@ -73,6 +74,20 @@ export interface Order {
 export const ENTITLEMENT_STATUSES = ["active", "cancelled", "refunded"] as const;
 export type EntitlementStatus = (typeof ENTITLEMENT_STATUSES)[number];
 
+/** An entitlement's credit pool (ADR-0013 §3). */
+export interface CreditPool {
+  /** The order's erasure quota. */
+  purchased: number;
+  /** Credits moved to stations as signed credit grants. */
+  granted: number;
+  /** Credits released stations handed back. */
+  returned: number;
+  /** `purchased - granted + returned`. */
+  available: number;
+  /** How many credits a station gets when the owner chooses none. */
+  target_reserve: number;
+}
+
 /**
  * What the organization may license because it paid for an order: the
  * order's grants for a term. `current` is false once refunded or once the
@@ -92,6 +107,11 @@ export interface Entitlement {
   current: boolean;
   cancelled_at: string | null;
   refunded_at: string | null;
+  /**
+   * The organization's credit pool for an entitlement with an erasure quota
+   * (ADR-0013 §3); `null` when it is unlimited.
+   */
+  credits: CreditPool | null;
 }
 
 export interface Seats {
@@ -164,6 +184,17 @@ export function isOrder(v: unknown): v is Order {
   );
 }
 
+export function isCreditPool(v: unknown): v is CreditPool {
+  return (
+    isObject(v) &&
+    isInt(v.purchased) &&
+    isInt(v.granted) &&
+    isInt(v.returned) &&
+    isInt(v.available) &&
+    isInt(v.target_reserve)
+  );
+}
+
 export function isEntitlement(v: unknown): v is Entitlement {
   return (
     isObject(v) &&
@@ -178,7 +209,8 @@ export function isEntitlement(v: unknown): v is Entitlement {
     typeof v.renews === "boolean" &&
     typeof v.current === "boolean" &&
     isNullableString(v.cancelled_at) &&
-    isNullableString(v.refunded_at)
+    isNullableString(v.refunded_at) &&
+    (v.credits === null || isCreditPool(v.credits))
   );
 }
 

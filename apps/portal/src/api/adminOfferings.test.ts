@@ -35,6 +35,7 @@ const input: OfferingInput = {
 
 const offering: Offering = {
   ...input,
+  credit_target_reserve: null,
   id: "0f8fad5b-d9cb-469f-a165-70867728950e",
   status: "draft",
   created_at: "2026-11-08T10:00:00Z",

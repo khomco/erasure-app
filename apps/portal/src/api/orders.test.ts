@@ -92,6 +92,7 @@ const entitlement: Entitlement = {
   current: true,
   cancelled_at: null,
   refunded_at: null,
+  credits: null,
 };
 
 interface Call {
@@ -173,6 +174,14 @@ describe("guards", () => {
     expect(isEntitlement({ ...entitlement, renews: "yes" })).toBe(false);
     expect(isEntitlement({ ...entitlement, current: undefined })).toBe(false);
     expect(isEntitlement({ ...entitlement, refunded_at: undefined })).toBe(false);
+    // The credit pool: null when unlimited, every count an integer.
+    const pool = { purchased: 5000, granted: 50, returned: 0, available: 4950, target_reserve: 50 };
+    expect(isEntitlement({ ...entitlement, credits: pool })).toBe(true);
+    expect(isEntitlement({ ...entitlement, credits: undefined })).toBe(false);
+    expect(isEntitlement({ ...entitlement, credits: { ...pool, available: "4950" } })).toBe(false);
+    expect(isEntitlement({ ...entitlement, credits: { ...pool, target_reserve: undefined } })).toBe(
+      false,
+    );
     expect(isSeats({ entitlements: [entitlement], available_seats: 1.5 })).toBe(false);
     expect(isSeats({ entitlements: [{ ...entitlement, id: 1 }], available_seats: 1 })).toBe(false);
     expect(isSeats({ available_seats: 1 })).toBe(false);

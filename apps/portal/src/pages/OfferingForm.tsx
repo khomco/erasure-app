@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import {
   ANNUAL_TERM_MONTHS,
+  DEFAULT_TARGET_RESERVE,
   FEATURES,
   TRIAL_DEFAULT_QUOTA_ERASURES,
   FEATURE_LABELS,
@@ -51,6 +52,8 @@ export interface OfferingFields {
   quota: string;
   features: Feature[];
   term: string;
+  /** The credit target reserve; blank leaves the hub's default (50). */
+  reserve?: string;
 }
 
 /**
@@ -74,6 +77,7 @@ export function offeringBody(
         interval: locked.interval,
         trial: locked.trial,
         grants: locked.grants,
+        credit_target_reserve: locked.credit_target_reserve,
       },
     };
   }
@@ -98,6 +102,11 @@ export function offeringBody(
   if (seatCount === null || (!isUnlimited && quotaCount === null) || termMonths === null) {
     return { error: "Seats, erasure quota and term are whole numbers." };
   }
+  const reserveText = f.reserve?.trim() ?? "";
+  const reserve = quotaCount === null || reserveText === "" ? null : wholeNumber(reserveText);
+  if (quotaCount !== null && reserveText !== "" && reserve === null) {
+    return { error: "The credit target reserve is a whole number." };
+  }
   return {
     body: {
       name: f.name,
@@ -113,6 +122,7 @@ export function offeringBody(
         features: FEATURES.filter((x) => f.features.includes(x)),
         term_months: termMonths,
       },
+      ...(reserve === null ? {} : { credit_target_reserve: reserve }),
     },
   };
 }
@@ -154,6 +164,9 @@ export function OfferingForm({
   const [quota, setQuota] = useState(String(initial?.grants.quota_erasures ?? ""));
   const [features, setFeatures] = useState<Feature[]>(initial?.grants.features ?? []);
   const [term, setTerm] = useState(String(initial?.grants.term_months ?? ANNUAL_TERM_MONTHS));
+  const [reserve, setReserve] = useState(
+    String(initial?.credit_target_reserve ?? DEFAULT_TARGET_RESERVE),
+  );
   const [localError, setLocalError] = useState<string | null>(null);
 
   const annual = !trial && interval === "annual";
@@ -186,6 +199,7 @@ export function OfferingForm({
         quota,
         features,
         term,
+        reserve,
       },
       termsLocked ? initial : undefined,
     );
@@ -348,7 +362,31 @@ export function OfferingForm({
               className={inputClass}
             />
           )}
+          {annual && (!unlimited || trial) && !locked && (
+            <p className="text-xs text-amber-400">
+              An annual offering must have unlimited erasures: offerings with erasure credits are
+              one-off for now.
+            </p>
+          )}
         </div>
+        {(!unlimited || trial) && (
+          <label className="block space-y-1 text-sm">
+            <span className="text-slate-300">Credit target reserve</span>
+            <input
+              name="reserve"
+              type="number"
+              min={1}
+              step={1}
+              value={reserve}
+              onChange={(e) => setReserve(e.target.value)}
+              className={inputClass}
+            />
+            <span className="block text-xs text-slate-400">
+              Credits a station is given from the organization's pool when its owner chooses
+              none.
+            </span>
+          </label>
+        )}
         <div className="space-y-2 text-sm">
           <span className="text-slate-300">Features</span>
           {FEATURES.map((f) => (

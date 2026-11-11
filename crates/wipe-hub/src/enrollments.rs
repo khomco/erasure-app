@@ -567,6 +567,8 @@ pub async fn approve(
             station_id: Some(e.station_id.clone()),
             label: e.label.clone(),
             site: None,
+            // The approval answers with the bare licence: no grant.
+            credits: crate::credits::CreditChoice::Nothing,
         },
     )
     .await?;

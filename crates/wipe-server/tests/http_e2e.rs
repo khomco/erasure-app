@@ -2694,6 +2694,45 @@ async fn installing_a_licence_on_an_unlicensed_station_licenses_the_next_certifi
     .is_licensed());
 }
 
+/// A licence file from the hub with a credit grant beside the licence
+/// (controlled-licensing story 3) installs exactly as the bare licence does;
+/// the station ignores the grant until it pools credits (story 4), and the
+/// certificate's attestation chain carries the licence alone.
+#[tokio::test]
+async fn a_licence_file_with_a_credit_grant_installs_like_the_bare_licence() {
+    let root = wipe_license::VendorRoot::generate();
+    let key = Arc::new(SigningKey::generate());
+    let (base, _state) =
+        spawn_server_with_roots(key.clone(), vec![root.verifying_key()], None).await;
+
+    let licence = issue_licence(&root, "lic-1", &key.public_key_id(), in_30_days());
+    let grant = root
+        .issue_credit_grant(
+            "grant-1",
+            "org-1",
+            key.public_key_id(),
+            50,
+            time::OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let file = wipe_license::LicenseFile {
+        license: licence.clone(),
+        credit_grant: Some(grant),
+    };
+    let (status, view) = post_license(&base, serde_json::to_string_pretty(&file).unwrap()).await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["status"]["status"], "valid", "{view}");
+    assert_eq!(view["instance_public_key_id"], key.public_key_id());
+
+    let signed = erase_and_certify(&base, "dev-nvme-0").await;
+    assert_eq!(signed["certificate"]["evaluation"], false, "{signed}");
+    assert_eq!(
+        signed["attestation"]["license"],
+        serde_json::to_value(&licence).unwrap()
+    );
+    assert!(!signed.to_string().contains("credit_grant"), "{signed}");
+}
+
 #[tokio::test]
 async fn replacing_a_licence_restarts_only_the_licensed_count() {
     let root = wipe_license::VendorRoot::generate();

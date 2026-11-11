@@ -477,7 +477,8 @@ pub async fn detail(
 /// `admin.licence_file_inspected {license_id, canonical_sha256_hex,
 /// verified, known}` (subject `inspect:licence-file`): `license_id` only when
 /// it is a UUID (else null), and the hash computed by the hub over the
-/// pasted body, not the one the file claims.
+/// pasted licence body, not the one the file claims. A pasted
+/// `{license, credit_grant}` file is inspected by its licence.
 pub async fn inspect_document(
     conn: &mut PgConnection,
     admin: &VendorAdmin,
@@ -488,8 +489,11 @@ pub async fn inspect_document(
     if document.len() > INSPECT_MAX_BYTES {
         return Err(not_a_licence());
     }
-    let certificate: LicenseCertificate =
-        serde_json::from_str(document).map_err(|_| not_a_licence())?;
+    // Either form a customer downloads: the bare licence or the
+    // `{license, credit_grant}` file; only the licence is inspected.
+    let certificate: LicenseCertificate = wipe_license::parse_license_file(document)
+        .map_err(|_| not_a_licence())?
+        .license;
     let verification = verification(&certificate, root);
     let parsed_id = Uuid::parse_str(&certificate.body.license_id).ok();
     let licence = match parsed_id {
@@ -523,7 +527,9 @@ pub async fn inspect_document(
     })
 }
 
-/// The stored file of licence `id`, byte for byte, audited as
+/// The file of licence `id`, the same one the customer download serves
+/// (the stored licence byte for byte, or the `{license, credit_grant}` file
+/// when it was issued with a credit grant), audited as
 /// `licence.downloaded {organization_id, by: "vendor"}`; `None` (nothing
 /// audited) for an unknown id. A revoked licence's file is still returned.
 pub async fn document(
@@ -547,7 +553,9 @@ pub async fn document(
         json!({ "organization_id": organization_id, "by": "vendor" }),
     )
     .await?;
-    Ok(Some(document))
+    Ok(Some(
+        crate::credits::licence_file(conn, id, document).await?,
+    ))
 }
 
 #[cfg(test)]

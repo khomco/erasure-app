@@ -212,6 +212,9 @@ pub async fn fetch_licence(
                 organization_id,
                 &station_actor(station),
                 station,
+                // The fetch answers with the bare licence: no grant (story 4
+                // tops connected stations up).
+                crate::credits::CreditChoice::Nothing,
             )
             .await?;
             let document: String =

@@ -79,6 +79,7 @@ const machine: Entitlement = {
   current: true,
   cancelled_at: null,
   refunded_at: null,
+  credits: null,
 };
 
 const site: Entitlement = {
@@ -116,6 +117,9 @@ const station: Station = {
   released_at: null,
   licence,
   renewal_available: false,
+  credit_balance: null,
+  credit_balance_reported_at: null,
+  credits_granted: 0,
 };
 
 describe("activate page", () => {
@@ -228,7 +232,7 @@ describe("activate page", () => {
   });
 
   it("approved: names the station and its licence expiry, collected by the station itself", () => {
-    const html = render(createElement(ApprovedPanel, { registered: { station, licence } }));
+    const html = render(createElement(ApprovedPanel, { registered: { station, licence, credit_grant: null } }));
     const t = text(html);
     expect(t).toContain("Approved. Bench 1 (bench-1) is registered, licensed to 2027-11-08.");
     expect(t).toMatch(/collects its licence by itself/);

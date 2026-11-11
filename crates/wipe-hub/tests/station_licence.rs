@@ -725,3 +725,56 @@ async fn a_hub_without_a_vendor_root_reissues_nothing() {
     assert_eq!(f.hub.count("licences").await, licences);
     assert_eq!(f.audit_rows().await, rows);
 }
+
+/// The renewal fetch on a credit-pool entitlement moves no credits
+/// (controlled-licensing story 3): its answer carries the bare licence, so a
+/// grant would strand credits until release.
+#[tokio::test]
+async fn a_renewal_fetch_on_a_credit_pool_grants_nothing() {
+    let f = fixture().await;
+    let one_off = f.hub.published_one_off_offering("Site pool", 12).await;
+    let pool = buy(&f.hub, &f.owner, &one_off).await;
+    let key = SigningKey::generate();
+    let v = ok_json(
+        f.hub
+            .post(
+                "/api/stations",
+                json!({
+                    "entitlement_id": pool,
+                    "instance_key_id": key.public_key_id(),
+                    "credits": 0,
+                }),
+                Some(&f.owner.cookie),
+            )
+            .await,
+        StatusCode::CREATED,
+    )
+    .await;
+    let held = v["licence"]["id"].as_str().unwrap().to_string();
+    sqlx::query(
+        "UPDATE entitlements SET term_end = term_end + interval '1 year' WHERE id = $1::uuid",
+    )
+    .bind(&pool)
+    .execute(&f.hub.db.pool)
+    .await
+    .unwrap();
+
+    let new = fetched_licence(fetch(&f.hub, &key, Some(&held)).await, &key, &f.root).await;
+    assert_ne!(new, held);
+    assert_eq!(f.hub.count("credit_grants").await, 0);
+    assert!(f.hub.audited("credits.granted").await.is_empty());
+    let ents = ok_json(
+        f.hub.get("/api/entitlements", Some(&f.owner.cookie)).await,
+        StatusCode::OK,
+    )
+    .await;
+    let credits = ents["entitlements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == json!(pool))
+        .unwrap()["credits"]
+        .clone();
+    assert_eq!(credits["granted"], 0);
+    assert_eq!(credits["available"], 5000);
+}

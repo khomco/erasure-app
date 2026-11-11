@@ -17,6 +17,7 @@ pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod cors;
+pub mod credits;
 pub mod csrf;
 pub mod db;
 pub mod deployment;

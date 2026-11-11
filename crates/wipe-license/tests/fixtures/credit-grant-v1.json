@@ -1,0 +1,17 @@
+{
+  "body": {
+    "grant_format_version": 1,
+    "grant_id": "0b6f2a4e-3c1d-4f5a-9e8b-7c6d5e4f3a2b",
+    "root_key_id": "ed25519:/oEsEvOrTOasXbaaw1L5Bg",
+    "organization_id": "org-1",
+    "instance_public_key_id": "ed25519:28KYJRxRMhtyZueNHBUcKw",
+    "credits": 50,
+    "issued_at": "2026-05-28T20:26:40Z"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "public_key_id": "ed25519:/oEsEvOrTOasXbaaw1L5Bg",
+    "canonical_sha256_hex": "33942f321df373b45389b2761118a457784b3f4d96a9ee28fc688ce8511fcef6",
+    "signature_b64": "IJE30IXSNmbqOtQ6SeTxNS+t+ynEe1OkfPHu/XegmYC97Plcgop7z10sp+AGEphjMeixAeeAV7gdHiHMT2YxBQ"
+  }
+}

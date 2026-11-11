@@ -166,6 +166,7 @@ async fn buying_an_annual_offering_shows_one_available_seat() {
         keys,
         [
             "cancelled_at",
+            "credits",
             "current",
             "grants",
             "id",
@@ -190,6 +191,8 @@ async fn buying_an_annual_offering_shows_one_available_seat() {
     assert!(e["term_end"].as_str().unwrap().ends_with('Z'));
     assert_eq!(e["cancelled_at"], Value::Null);
     assert_eq!(e["refunded_at"], Value::Null);
+    // Unlimited: no credit pool.
+    assert_eq!(e["credits"], Value::Null);
 
     let id = first_id(&seats);
     assert_eq!(f.row(&id).await, ("active".into(), true, 12, true, true));

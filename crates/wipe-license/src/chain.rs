@@ -137,6 +137,12 @@ impl VendorRoot {
         self.key.verifying_key()
     }
 
+    /// The signing key, for the other documents the root signs
+    /// ([`crate::credit`]).
+    pub(crate) fn signing_key(&self) -> &SigningKey {
+        &self.key
+    }
+
     /// Raw seed, for writing to an offline signer's key file. The only place
     /// this should ever be called is the issuance tool.
     pub fn seed_bytes(&self) -> [u8; 32] {
@@ -179,15 +185,8 @@ impl VendorRoot {
             issued_at,
             lapse_policy,
         };
-        let bytes = canonical_bytes(&body).map_err(|e| LicenseError::Encoding(e.to_string()))?;
-        let sig: Signature = self.key.0.sign(&bytes);
         Ok(LicenseCertificate {
-            signature: LicenseSignature {
-                algorithm: "ed25519".into(),
-                public_key_id: self.public_key_id(),
-                canonical_sha256_hex: hex::encode(Sha256::digest(&bytes)),
-                signature_b64: B64.encode(sig.to_bytes()),
-            },
+            signature: sign_body(&self.key, &body)?,
             body,
         })
     }
@@ -199,47 +198,84 @@ impl LicenseCertificate {
     /// Checks the payload digest before the signature so a mutated license
     /// reports as tampered rather than as an opaque signature failure.
     pub fn verify(&self, roots: &[VerifyingKey]) -> LicenseResult<String> {
-        if self.signature.algorithm != "ed25519" {
-            return Err(LicenseError::Verification(format!(
-                "unsupported algorithm: {}",
-                self.signature.algorithm
-            )));
-        }
-        if self.body.license_format_version != LICENSE_FORMAT_VERSION {
-            return Err(LicenseError::Verification(format!(
-                "license_format_version {} but this build understands {}",
-                self.body.license_format_version, LICENSE_FORMAT_VERSION
-            )));
-        }
-
-        let bytes =
-            canonical_bytes(&self.body).map_err(|e| LicenseError::Encoding(e.to_string()))?;
-        let digest = hex::encode(Sha256::digest(&bytes));
-        if digest != self.signature.canonical_sha256_hex {
-            return Err(LicenseError::Tampered(
-                "license payload was modified after signing".into(),
-            ));
-        }
-
-        let sig_bytes = B64
-            .decode(&self.signature.signature_b64)
-            .map_err(|e| LicenseError::Verification(format!("base64: {e}")))?;
-        let sig = Signature::from_slice(&sig_bytes)
-            .map_err(|e| LicenseError::Verification(e.to_string()))?;
-
-        for root in roots {
-            if root.public_key_id() != self.signature.public_key_id {
-                continue;
-            }
-            return match root.0.verify(&bytes, &sig) {
-                Ok(()) => Ok(root.public_key_id()),
-                Err(e) => Err(LicenseError::Tampered(format!("license signature: {e}"))),
-            };
-        }
-        Err(LicenseError::UntrustedRoot(
-            self.signature.public_key_id.clone(),
-        ))
+        verify_signed(
+            &self.body,
+            &self.signature,
+            roots,
+            "license",
+            (
+                "license_format_version",
+                self.body.license_format_version,
+                LICENSE_FORMAT_VERSION,
+            ),
+        )
     }
+}
+
+/// Sign `body`'s canonical bytes with `key`: the vendor signature shared by
+/// licences and credit grants ([`crate::credit`]).
+pub(crate) fn sign_body<T: Serialize>(
+    key: &SigningKey,
+    body: &T,
+) -> LicenseResult<LicenseSignature> {
+    let bytes = canonical_bytes(body).map_err(|e| LicenseError::Encoding(e.to_string()))?;
+    let sig: Signature = key.0.sign(&bytes);
+    Ok(LicenseSignature {
+        algorithm: "ed25519".into(),
+        public_key_id: key.public_key_id(),
+        canonical_sha256_hex: hex::encode(Sha256::digest(&bytes)),
+        signature_b64: B64.encode(sig.to_bytes()),
+    })
+}
+
+/// The verification shared by licences and credit grants: the algorithm,
+/// the exact format version (`version` is `(field, found, expected)`), the
+/// re-canonicalized digest (a mismatch is `Tampered`), then the signature
+/// under the trusted root it names (none is `UntrustedRoot`). `noun` words
+/// the errors. The id of the root that verified.
+pub(crate) fn verify_signed<T: Serialize>(
+    body: &T,
+    signature: &LicenseSignature,
+    roots: &[VerifyingKey],
+    noun: &str,
+    (field, found, expected): (&str, u32, u32),
+) -> LicenseResult<String> {
+    if signature.algorithm != "ed25519" {
+        return Err(LicenseError::Verification(format!(
+            "unsupported algorithm: {}",
+            signature.algorithm
+        )));
+    }
+    if found != expected {
+        return Err(LicenseError::Verification(format!(
+            "{field} {found} but this build understands {expected}"
+        )));
+    }
+
+    let bytes = canonical_bytes(body).map_err(|e| LicenseError::Encoding(e.to_string()))?;
+    let digest = hex::encode(Sha256::digest(&bytes));
+    if digest != signature.canonical_sha256_hex {
+        return Err(LicenseError::Tampered(format!(
+            "{noun} payload was modified after signing"
+        )));
+    }
+
+    let sig_bytes = B64
+        .decode(&signature.signature_b64)
+        .map_err(|e| LicenseError::Verification(format!("base64: {e}")))?;
+    let sig =
+        Signature::from_slice(&sig_bytes).map_err(|e| LicenseError::Verification(e.to_string()))?;
+
+    for root in roots {
+        if root.public_key_id() != signature.public_key_id {
+            continue;
+        }
+        return match root.0.verify(&bytes, &sig) {
+            Ok(()) => Ok(root.public_key_id()),
+            Err(e) => Err(LicenseError::Tampered(format!("{noun} signature: {e}"))),
+        };
+    }
+    Err(LicenseError::UntrustedRoot(signature.public_key_id.clone()))
 }
 
 /// What rides inside an erasure certificate so the chain travels with it.

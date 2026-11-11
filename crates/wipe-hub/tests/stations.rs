@@ -294,7 +294,7 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
     let v = f.register_machine(&format!("  {key} ")).await;
     let mut keys: Vec<&String> = v.as_object().unwrap().keys().collect();
     keys.sort();
-    assert_eq!(keys, ["licence", "station"]);
+    assert_eq!(keys, ["credit_grant", "licence", "station"]);
     // The exact shapes, nullable keys present.
     let sorted_keys = |v: &Value| {
         let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
@@ -304,6 +304,9 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
     assert_eq!(
         sorted_keys(&v["station"]),
         [
+            "credit_balance",
+            "credit_balance_reported_at",
+            "credits_granted",
             "entitlement_id",
             "id",
             "instance_key_id",
@@ -1088,7 +1091,7 @@ async fn a_renewed_station_is_reissued_a_licence_to_the_new_term_end() {
     let r = ok_json(f.reissue(&f.owner, station).await, StatusCode::CREATED).await;
     let mut keys: Vec<&String> = r.as_object().unwrap().keys().collect();
     keys.sort();
-    assert_eq!(keys, ["licence", "station"]);
+    assert_eq!(keys, ["credit_grant", "licence", "station"]);
     let licence = &r["licence"];
     let new = licence["id"].as_str().unwrap();
     assert_ne!(new, old);

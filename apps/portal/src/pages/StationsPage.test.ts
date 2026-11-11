@@ -5,7 +5,12 @@ import { describe, expect, it } from "vitest";
 import type { Entitlement } from "@/api/orders";
 import type { Station } from "@/api/stations";
 import {
+  AddCreditsAction,
+  creditsText,
   installCommand,
+  parseCredits,
+  RegisterForm,
+  registerInput,
   KeyIdHowTo,
   preselected,
   RenewalAction,
@@ -31,6 +36,7 @@ const machine: Entitlement = {
   current: true,
   cancelled_at: null,
   refunded_at: null,
+  credits: null,
 };
 
 const site: Entitlement = {
@@ -65,6 +71,9 @@ const station: Station = {
     revoked_at: null,
   },
   renewal_available: false,
+  credit_balance: null,
+  credit_balance_reported_at: null,
+  credits_granted: 0,
 };
 
 /** The markup's text with tags removed. */
@@ -323,5 +332,162 @@ describe("no lapse policy (retired, ADR-0013 §5)", () => {
     expect(renderRow(renewable, true)).toContain("Issue renewed licence");
     expect(renderRow(renewable, false)).toContain("An owner can issue the renewed licence.");
     expect(renderRow(station, true)).not.toContain("Issue renewed licence");
+  });
+});
+
+describe("credits", () => {
+  const pool = { purchased: 5000, granted: 50, returned: 0, available: 4950, target_reserve: 50 };
+  const pooled: Station = { ...station, entitlement_id: site.id, credits_granted: 50 };
+
+  function renderRow(s: Station, canRelease: boolean, withPool: boolean): string {
+    return text(
+      renderToStaticMarkup(
+        createElement(
+          QueryClientProvider,
+          { client: new QueryClient() },
+          createElement(
+            "table",
+            null,
+            createElement(
+              "tbody",
+              null,
+              createElement(StationRow, { station: s, canRelease, pool: withPool ? pool : null }),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  it("states credits granted and the last reported balance", () => {
+    expect(creditsText(pooled)).toBe("50 granted · Not reported yet");
+    expect(
+      creditsText({
+        ...pooled,
+        credit_balance: 30,
+        credit_balance_reported_at: "2026-11-10T08:00:00Z",
+      }),
+    ).toBe("50 granted · Last reported credits: 30 (2026-11-10)");
+  });
+
+  it("shows a pool station's credits and lets an owner add more", () => {
+    const owner = renderRow(pooled, true, true);
+    expect(owner).toContain("50 granted · Not reported yet");
+    expect(owner).toContain("Add credits");
+    const member = renderRow(pooled, false, true);
+    expect(member).toContain("50 granted");
+    expect(member).not.toContain("Add credits");
+  });
+
+  it("shows Unlimited and no Add credits for an unlimited station", () => {
+    const t = renderRow(station, true, false);
+    expect(t).toContain("Unlimited");
+    expect(t).not.toContain("Add credits");
+  });
+
+  it("offers no Add credits on a released station", () => {
+    const released = { ...pooled, released_at: "2026-12-01T00:00:00Z" };
+    const html = renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client: new QueryClient() },
+        createElement(AddCreditsAction, { station: released, pool }),
+      ),
+    );
+    expect(html).toBe("");
+  });
+
+  it("reads only whole numbers of credits", () => {
+    expect(parseCredits("20")).toBe(20);
+    expect(parseCredits(" 0 ")).toBe(0);
+    for (const bad of ["", "-1", "1.5", "abc", "1e3"]) expect(parseCredits(bad)).toBeNull();
+  });
+});
+
+describe("the register form", () => {
+  function renderForm(e: Entitlement): string {
+    return renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client: new QueryClient() },
+        createElement(RegisterForm, { choices: [{ entitlement: e, free: 1 }], issuance: true }),
+      ),
+    );
+  }
+
+  it("offers a Credits field prefilled with the hub's default for a pool", () => {
+    const pooled: Entitlement = {
+      ...site,
+      credits: { purchased: 25, granted: 0, returned: 0, available: 25, target_reserve: 50 },
+    };
+    const html = renderForm(pooled);
+    expect(text(html)).toContain("Credits");
+    expect(html).toMatch(/name="credits"[^>]*value="25"/);
+    expect(text(html)).toContain("Credit pool: 25 of 25 available");
+  });
+
+  it("has no Credits field for an unlimited entitlement", () => {
+    expect(renderForm(machine)).not.toContain('name="credits"');
+  });
+});
+
+describe("the register request", () => {
+  const pooled: Entitlement = {
+    ...site,
+    credits: { purchased: 5000, granted: 0, returned: 0, available: 5000, target_reserve: 50 },
+  };
+  const fields = {
+    entitlement_id: pooled.id,
+    instance_key_id: "ed25519:q83vEjRWeJA0MlR4kKvN7w",
+    station_id: "",
+    label: "",
+    site: "Dock 4",
+  };
+
+  it("leaves credits to the hub while the field is untouched", () => {
+    const input = registerInput({ ...fields, entitlement: pooled, creditsInput: null });
+    expect("credits" in input).toBe(false);
+    expect(input.site).toBe("Dock 4");
+  });
+
+  it("sends the typed count once edited, 0 included", () => {
+    expect(registerInput({ ...fields, entitlement: pooled, creditsInput: "20" }).credits).toBe(20);
+    expect(registerInput({ ...fields, entitlement: pooled, creditsInput: "0" }).credits).toBe(0);
+  });
+
+  it("never sends credits for an unlimited entitlement", () => {
+    const input = registerInput({
+      ...fields,
+      entitlement_id: machine.id,
+      entitlement: machine,
+      creditsInput: "20",
+    });
+    expect("credits" in input).toBe(false);
+    expect(input.site).toBeUndefined();
+  });
+});
+
+describe("a station row before the seats load", () => {
+  it("shows … and no Add credits", () => {
+    const t = text(
+      renderToStaticMarkup(
+        createElement(
+          QueryClientProvider,
+          { client: new QueryClient() },
+          createElement(
+            "table",
+            null,
+            createElement(
+              "tbody",
+              null,
+              createElement(StationRow, { station, canRelease: true, pool: "unknown" }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(t).toContain("…");
+    expect(t).not.toContain("Unlimited");
+    expect(t).not.toContain("Add credits");
   });
 });

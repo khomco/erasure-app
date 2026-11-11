@@ -20,6 +20,16 @@ export function entitlementState(e: Entitlement): string {
 }
 
 /**
+ * An entitlement's credit pool: "4950 of 5000 available · 50 granted · 0
+ * returned", or "Unlimited" when it has no erasure quota.
+ */
+export function creditPoolText(e: Entitlement): string {
+  const c = e.credits;
+  if (c === null) return "Unlimited";
+  return `${c.available} of ${c.purchased} available · ${c.granted} granted · ${c.returned} returned`;
+}
+
+/**
  * `/seats`: the organization's licence seats. Every member sees the seats
  * its paid orders grant and each entitlement's term; refunded or ended
  * entitlements no longer count. Stations take seats on `/stations`.
@@ -89,6 +99,7 @@ function EntitlementTable({ entitlements }: { entitlements: Entitlement[] }) {
         <tr>
           <th className="py-1 pr-3 font-medium">Offering</th>
           <th className="py-1 pr-3 font-medium">Grants</th>
+          <th className="py-1 pr-3 font-medium">Credit pool</th>
           <th className="py-1 pr-3 font-medium">From</th>
           <th className="py-1 font-medium">State</th>
         </tr>
@@ -106,6 +117,7 @@ function EntitlementTable({ entitlements }: { entitlements: Entitlement[] }) {
               </Link>
             </td>
             <td className="py-1 pr-3">{grantsText(e.grants)}</td>
+            <td className="py-1 pr-3">{creditPoolText(e)}</td>
             <td className="py-1 pr-3">{day(e.term_start)}</td>
             <td className="py-1">{entitlementState(e)}</td>
           </tr>

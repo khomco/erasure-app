@@ -7,12 +7,31 @@
 //!   issuance tool does.
 //! * the **licence** — a `LicenseCertificate` as JSON, safe to hand a
 //!   customer. It contains no secrets: it is a vendor signature over public
-//!   entitlements naming a public key id.
+//!   entitlements naming a public key id. A licence file is either that bare
+//!   licence or a [`LicenseFile`] `{license, credit_grant}` carrying one
+//!   credit grant beside it (ADR-0013 §3); every parser here accepts both.
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use crate::chain::LicenseCertificate;
+use crate::credit::CreditGrant;
 use crate::{LicenseError, LicenseResult};
+
+/// A licence file with a credit grant beside the licence: what the hub
+/// hands an air-gapped station whose owner moved credits from the pool
+/// (ADR-0013 §3). The licence itself is unchanged, so erasure-certificate
+/// attestation chains never carry a grant.
+///
+/// Unknown keys are ignored, so a station accepts a file a later hub adds
+/// keys to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LicenseFile {
+    pub license: LicenseCertificate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_grant: Option<CreditGrant>,
+}
 
 /// Load a licence from disk.
 ///
@@ -34,8 +53,28 @@ pub fn load_license(path: &Path) -> LicenseResult<LicenseCertificate> {
 /// run [`check_installable`]. The error is an `Encoding` error whose text
 /// starts `not a licence file: `.
 pub fn parse_license(raw: &str) -> LicenseResult<LicenseCertificate> {
-    serde_json::from_str(raw)
-        .map_err(|e| LicenseError::Encoding(format!("not a licence file: {e}")))
+    parse_license_file(raw).map(|file| file.license)
+}
+
+/// Parse a licence file in either form: the bare licence (no grant) or a
+/// [`LicenseFile`] `{license, credit_grant}`. An object with a `license` key
+/// is the second form. Parsing is not trusting: the grant, like the licence,
+/// is still to be checked ([`crate::check_grant_for`]). Errors as
+/// [`parse_license`].
+pub fn parse_license_file(raw: &str) -> LicenseResult<LicenseFile> {
+    let not_a_file =
+        |e: serde_json::Error| LicenseError::Encoding(format!("not a licence file: {e}"));
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(not_a_file)?;
+    if value.get("license").is_some() {
+        serde_json::from_value(value).map_err(not_a_file)
+    } else {
+        serde_json::from_value(value)
+            .map(|license| LicenseFile {
+                license,
+                credit_grant: None,
+            })
+            .map_err(not_a_file)
+    }
 }
 
 pub fn save_license(path: &Path, license: &LicenseCertificate) -> LicenseResult<()> {

@@ -52,6 +52,12 @@ export const ANNUAL_TERM_MONTHS = 12;
  */
 export const TRIAL_DEFAULT_QUOTA_ERASURES = 25;
 
+/**
+ * The credit target reserve the hub uses when none is entered
+ * (`wipe_hub::credits::DEFAULT_TARGET_RESERVE`, ADR-0013 §3).
+ */
+export const DEFAULT_TARGET_RESERVE = 50;
+
 /** What an offering grants its buyer. */
 export interface Grants {
   scope: Scope;
@@ -76,11 +82,19 @@ export interface OfferingInput {
   interval: Interval;
   trial: boolean;
   grants: Grants;
+  /**
+   * How many credits a station gets from the pool by default: only with a
+   * numeric `quota_erasures` (omitted: the hub uses 50), never with an
+   * unlimited one. An annual offering cannot have a numeric quota.
+   */
+  credit_target_reserve?: number | null;
 }
 
 /** An offering. Timestamps are RFC 3339 UTC; absent values are `null`. */
 export interface Offering extends OfferingInput {
   id: string;
+  /** Set exactly when the quota is numeric. */
+  credit_target_reserve: number | null;
   status: OfferingStatus;
   created_at: string;
   updated_at: string;
@@ -122,6 +136,7 @@ export function isOffering(v: unknown): v is Offering {
     typeof v.trial === "boolean" &&
     oneOf(OFFERING_STATUSES, v.status) &&
     isGrants(v.grants) &&
+    (v.credit_target_reserve === null || isInt(v.credit_target_reserve)) &&
     typeof v.created_at === "string" &&
     typeof v.updated_at === "string" &&
     isNullableString(v.published_at) &&

@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { fetchMe, type Account } from "@/api/auth";
-import { fetchSeats, type Entitlement } from "@/api/orders";
+import { fetchSeats, type CreditPool, type Entitlement } from "@/api/orders";
 import {
   fetchStations,
   fetchVendorRoot,
@@ -11,7 +11,9 @@ import {
   registerStation,
   reissueStation,
   releaseStation,
+  suggestedCredits,
   type Licence,
+  type RegisterInput,
   type Station,
   type VendorRootKey,
 } from "@/api/stations";
@@ -79,6 +81,31 @@ export function stationState(s: Station, now: Date = new Date()): string {
   return "No licence";
 }
 
+/**
+ * A station's credits: "50 granted · Last reported credits: 30 (2026-11-10)",
+ * or "… · Not reported yet" until the station reports its balance.
+ */
+export function creditsText(s: Station): string {
+  const reported =
+    s.credit_balance === null
+      ? "Not reported yet"
+      : `Last reported credits: ${s.credit_balance}${
+          s.credit_balance_reported_at ? ` (${day(s.credit_balance_reported_at)})` : ""
+        }`;
+  return `${s.credits_granted} granted · ${reported}`;
+}
+
+/**
+ * A whole number of credits from a form field, or `null` when it is not one
+ * (blank, negative, fractional or not a number).
+ */
+export function parseCredits(value: string): number | null {
+  const v = value.trim();
+  if (!/^\d+$/.test(v)) return null;
+  const n = Number(v);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
 /** The `wipestation serve` flags that install a downloaded licence. */
 export function installCommand(root: VendorRootKey | null): string {
   return `wipestation serve --station-id <station id> --license <licence file> --vendor-root-b64 ${
@@ -128,7 +155,13 @@ function StationsSection({ account }: { account: Account }) {
       <SupersessionNote />
       {stations.isPending && <p className="text-sm text-slate-400">Loading…</p>}
       <FormError error={stations.error} />
-      {stations.data && <StationTable stations={stations.data} canRelease={owner} />}
+      {stations.data && (
+        <StationTable
+          stations={stations.data}
+          canRelease={owner}
+          entitlements={seats.data?.entitlements}
+        />
+      )}
       {!owner && (
         <p className="text-sm text-slate-400">
           Only an organization owner can register, renew or release stations.
@@ -208,7 +241,12 @@ export function RenewalAction({ station: s, canRenew }: { station: Station; canR
   const reissue = useMutation({
     mutationFn: () => reissueStation(s.id),
     // Also after a refusal: another owner or tab may have reissued or released it.
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ["stations"] }),
+    // Seats too: a renewal on a credit pool takes the default reserve from it.
+    onSettled: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["stations"] }),
+        queryClient.invalidateQueries({ queryKey: ["seats"] }),
+      ]),
   });
   if (s.released_at !== null) return null;
   if (reissue.isSuccess) return <RenewedNotice licence={reissue.data.licence} />;
@@ -231,7 +269,16 @@ export function RenewalAction({ station: s, canRenew }: { station: Station; canR
   );
 }
 
-function StationTable({ stations, canRelease }: { stations: Station[]; canRelease: boolean }) {
+function StationTable({
+  stations,
+  canRelease,
+  entitlements,
+}: {
+  stations: Station[];
+  canRelease: boolean;
+  /** `undefined` while the seats are loading or failed to load. */
+  entitlements: Entitlement[] | undefined;
+}) {
   if (stations.length === 0) {
     return <p className="text-sm text-slate-400">No stations registered yet.</p>;
   }
@@ -243,24 +290,108 @@ function StationTable({ stations, canRelease }: { stations: Station[]; canReleas
           <th className="py-1 pr-3 font-medium">Instance key id</th>
           <th className="py-1 pr-3 font-medium">Seat from</th>
           <th className="py-1 pr-3 font-medium">State</th>
+          <th className="py-1 pr-3 font-medium">Credits</th>
           <th className="py-1 font-medium" />
         </tr>
       </thead>
       <tbody className="divide-y divide-slate-800">
         {stations.map((s) => (
-          <StationRow key={s.id} station={s} canRelease={canRelease} />
+          <StationRow
+            key={s.id}
+            station={s}
+            canRelease={canRelease}
+            pool={
+              entitlements === undefined
+                ? "unknown"
+                : (entitlements.find((e) => e.id === s.entitlement_id)?.credits ?? null)
+            }
+          />
         ))}
       </tbody>
     </table>
   );
 }
 
-/** One station's row: its state, download, renewal and (owners) release. */
-export function StationRow({ station: s, canRelease }: { station: Station; canRelease: boolean }) {
+/**
+ * For owners, on a station whose entitlement has a credit pool: move more
+ * credits into a new licence file for an air-gapped station.
+ */
+export function AddCreditsAction({ station: s, pool }: { station: Station; pool: CreditPool }) {
+  const queryClient = useQueryClient();
+  const [count, setCount] = useState("");
+  const credits = parseCredits(count);
+  const add = useMutation({
+    mutationFn: (n: number) => reissueStation(s.id, fetch, n),
+    onSettled: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["stations"] }),
+        queryClient.invalidateQueries({ queryKey: ["seats"] }),
+      ]),
+  });
+  if (s.released_at !== null || s.licence?.status !== "active") return null;
+  if (add.isSuccess) {
+    return (
+      <span className="text-sm whitespace-normal text-emerald-400">
+        Licence file with {add.data.credit_grant?.credits ?? 0} more credits issued.{" "}
+        <a
+          href={licenceDownloadPath(add.data.licence.id)}
+          className="text-indigo-400 hover:underline"
+        >
+          Download it
+        </a>{" "}
+        and install it on the station.
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-2">
+      <input
+        type="number"
+        name="credits"
+        min={1}
+        max={pool.available}
+        step={1}
+        aria-label="Credits to add"
+        value={count}
+        onChange={(e) => setCount(e.target.value)}
+        className="w-20 rounded-md border border-slate-700 bg-slate-900 px-2 py-0.5 text-slate-100"
+      />
+      <button
+        type="button"
+        disabled={add.isPending || credits === null || credits < 1 || credits > pool.available}
+        onClick={() => credits !== null && add.mutate(credits)}
+        className="text-emerald-400 hover:underline disabled:opacity-50"
+      >
+        Add credits
+      </button>
+      <FormError error={add.error} />
+    </span>
+  );
+}
+
+/**
+ * One station's row: its state, credits, download, renewal and (owners)
+ * adding credits and release. `pool` is its entitlement's credit pool, `null`
+ * when unlimited, and `"unknown"` while the seats have not loaded.
+ */
+export function StationRow({
+  station: s,
+  canRelease,
+  pool = null,
+}: {
+  station: Station;
+  canRelease: boolean;
+  pool?: CreditPool | null | "unknown";
+}) {
   const queryClient = useQueryClient();
   const release = useMutation({
     mutationFn: () => releaseStation(s.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["stations"] }),
+    // Seats too: a release returns the station's last reported credits to the pool.
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["stations"] }),
+        queryClient.invalidateQueries({ queryKey: ["seats"] }),
+      ]),
   });
   const released = s.released_at !== null;
   return (
@@ -275,6 +406,9 @@ export function StationRow({ station: s, canRelease }: { station: Station; canRe
         <span className="text-slate-400">({SCOPE_LABELS[s.scope].toLowerCase()})</span>
       </td>
       <td className="py-1 pr-3">{stationState(s)}</td>
+      <td className="py-1 pr-3">
+        {pool === "unknown" ? "…" : pool ? creditsText(s) : "Unlimited"}
+      </td>
       <td className="space-x-3 py-1 whitespace-nowrap">
         {s.licence && !released && s.licence.status !== "revoked" && (
           <a href={licenceDownloadPath(s.licence.id)} className="text-indigo-400 hover:underline">
@@ -282,6 +416,9 @@ export function StationRow({ station: s, canRelease }: { station: Station; canRe
           </a>
         )}
         <RenewalAction station={s} canRenew={canRelease} />
+        {canRelease && pool && pool !== "unknown" && (
+          <AddCreditsAction station={s} pool={pool} />
+        )}
         {canRelease && !released && (
           <button
             type="button"
@@ -290,7 +427,11 @@ export function StationRow({ station: s, canRelease }: { station: Station; canRe
               if (
                 window.confirm(
                   `Release ${stationName(s)}? Its seat becomes free. The licence file on the ` +
-                    "station keeps working until it expires.",
+                    "station keeps working until it expires." +
+                    (pool
+                      ? " Only the credits it last reported holding return to the pool; " +
+                        "credits it has not reported are not returned."
+                      : ""),
                 )
               ) {
                 release.mutate();
@@ -307,32 +448,76 @@ export function StationRow({ station: s, canRelease }: { station: Station; canRe
   );
 }
 
-function RegisterForm({ choices, issuance }: { choices: SeatChoice[]; issuance: boolean }) {
+/**
+ * The register request for the form's fields. The site counts only for a
+ * site entitlement. `credits` is sent only for an entitlement with a pool
+ * and only once the owner has edited the field (`creditsInput` not `null`):
+ * untouched, the hub chooses its default from the pool as it stands, so a
+ * stale suggestion on this page cannot be refused.
+ */
+export function registerInput(f: {
+  entitlement: Entitlement | undefined;
+  entitlement_id: string;
+  instance_key_id: string;
+  station_id: string;
+  label: string;
+  site: string;
+  creditsInput: string | null;
+}): RegisterInput {
+  const input: RegisterInput = {
+    entitlement_id: f.entitlement_id,
+    instance_key_id: f.instance_key_id,
+    station_id: f.station_id,
+    label: f.label,
+    site: f.entitlement?.grants.scope === "site" ? f.site : undefined,
+  };
+  if (f.entitlement?.credits && f.creditsInput !== null) {
+    const credits = parseCredits(f.creditsInput);
+    if (credits !== null) input.credits = credits;
+  }
+  return input;
+}
+
+/** For owners: register a station against a free seat, with credits from a pool. */
+export function RegisterForm({ choices, issuance }: { choices: SeatChoice[]; issuance: boolean }) {
   const queryClient = useQueryClient();
   const [entitlementId, setEntitlementId] = useState(() => preselected(choices));
   const [keyId, setKeyId] = useState("");
   const [stationId, setStationId] = useState("");
   const [label, setLabel] = useState("");
   const [site, setSite] = useState("");
+  // `null`: the suggestion for the chosen entitlement's pool.
+  const [creditsInput, setCreditsInput] = useState<string | null>(null);
   const register = useMutation({
     mutationFn: () =>
-      registerStation({
-        entitlement_id: entitlementId,
-        instance_key_id: keyId,
-        station_id: stationId,
-        label,
-        // The site field shows, and counts, only for a site entitlement.
-        site: chosen?.entitlement.grants.scope === "site" ? site : undefined,
-      }),
+      registerStation(
+        registerInput({
+          entitlement: chosen?.entitlement,
+          entitlement_id: entitlementId,
+          instance_key_id: keyId,
+          station_id: stationId,
+          label,
+          site,
+          creditsInput,
+        }),
+      ),
     onSuccess: () => {
       setKeyId("");
       setStationId("");
       setLabel("");
       setSite("");
-      return queryClient.invalidateQueries({ queryKey: ["stations"] });
+      setCreditsInput(null);
+      return Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["stations"] }),
+        queryClient.invalidateQueries({ queryKey: ["seats"] }),
+      ]);
     },
   });
   const chosen = choices.find((c) => c.entitlement.id === entitlementId);
+  const pool = chosen?.entitlement.credits ?? null;
+  const creditsValue = creditsInput ?? (pool ? String(suggestedCredits(pool)) : "");
+  const credits = parseCredits(creditsValue);
+  const creditsWrong = pool !== null && (credits === null || credits > pool.available);
   const machine = chosen?.entitlement.grants.scope === "machine";
   const keyLooksWrong = keyId.trim() !== "" && !isInstanceKeyId(keyId);
   const onSubmit = (e: FormEvent) => {
@@ -365,7 +550,10 @@ function RegisterForm({ choices, issuance }: { choices: SeatChoice[]; issuance: 
           name="entitlement_id"
           required
           value={entitlementId}
-          onChange={(e) => setEntitlementId(e.target.value)}
+          onChange={(e) => {
+            setEntitlementId(e.target.value);
+            setCreditsInput(null);
+          }}
           className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100"
         >
           <option value="">Choose an entitlement…</option>
@@ -415,9 +603,37 @@ function RegisterForm({ choices, issuance }: { choices: SeatChoice[]; issuance: 
           onChange={setSite}
         />
       )}
+      {pool && (
+        <>
+          <label className="block space-y-1 text-sm">
+            <span className="text-slate-300">Credits</span>
+            <input
+              type="number"
+              name="credits"
+              min={0}
+              max={pool.available}
+              step={1}
+              value={creditsValue}
+              onChange={(e) => setCreditsInput(e.target.value)}
+              className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100"
+            />
+          </label>
+          <p className="text-xs text-slate-400">
+            Credit pool: {pool.available} of {pool.purchased} available. These credits go into
+            the licence file for the station; 0 issues the licence alone.
+          </p>
+          {creditsWrong && (
+            <p className="text-sm text-amber-300">
+              Enter a whole number from 0 to {pool.available}.
+            </p>
+          )}
+        </>
+      )}
       <button
         type="submit"
-        disabled={register.isPending || !issuance || !chosen || chosen.free === 0}
+        disabled={
+          register.isPending || !issuance || !chosen || chosen.free === 0 || creditsWrong
+        }
         className="rounded-md bg-indigo-600 px-3 py-1 text-sm font-medium hover:bg-indigo-500 disabled:opacity-50"
       >
         Register and issue licence
@@ -433,6 +649,8 @@ function RegisterForm({ choices, issuance }: { choices: SeatChoice[]; issuance: 
             Download its licence
           </a>{" "}
           and install it on the station.
+          {register.data.credit_grant &&
+            ` The file carries ${register.data.credit_grant.credits} credits from the pool.`}
         </p>
       )}
     </form>

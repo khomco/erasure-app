@@ -83,6 +83,7 @@ use wipe_license::{
 use crate::admin::{VendorAdmin, RFC3339_UTC};
 use crate::audit::{self, AuditEntry, AuditError};
 use crate::auth::actor;
+use crate::credits::{self, CreditChoice, GrantSummary};
 use crate::licence_admin::NewVendorLicence;
 
 pub const MSG_NO_FREE_SEAT: &str = "every seat of this entitlement is in use; release a station \
@@ -189,9 +190,15 @@ pub struct Station {
     pub licence: Option<Licence>,
     /// A renewed licence can be issued: the station is not released, its
     /// entitlement is current and its latest licence is active but ends
-    /// before the entitlement's `term_end` (it was renewed). [`reissue`] is
-    /// allowed only when this is true.
+    /// before the entitlement's `term_end` (it was renewed). A renewal
+    /// [`reissue`] is allowed only when this is true.
     pub renewal_available: bool,
+    /// The credit balance the station last reported (story 4 fills it);
+    /// `None` until it reports.
+    pub credit_balance: Option<i64>,
+    pub credit_balance_reported_at: Option<String>,
+    /// The credits granted to this station from its entitlement's pool.
+    pub credits_granted: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -214,6 +221,9 @@ struct StationRow {
     superseded_at: Option<String>,
     revoked_at: Option<String>,
     renewal_available: bool,
+    credit_balance: Option<i64>,
+    credit_balance_reported_at: Option<String>,
+    credits_granted: i64,
 }
 
 impl From<StationRow> for Station {
@@ -246,6 +256,9 @@ impl From<StationRow> for Station {
             released_at: r.released_at,
             licence,
             renewal_available: r.renewal_available,
+            credit_balance: r.credit_balance,
+            credit_balance_reported_at: r.credit_balance_reported_at,
+            credits_granted: r.credits_granted,
         }
     }
 }
@@ -283,7 +296,12 @@ fn select_stations() -> String {
                 to_char(l.superseded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS superseded_at, \
                 to_char(l.revoked_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS revoked_at, \
                 COALESCE(s.released_at IS NULL AND {ENTITLEMENT_CURRENT} \
-                         AND {LICENCE_BEHIND_TERM}, false) AS renewal_available \
+                         AND {LICENCE_BEHIND_TERM}, false) AS renewal_available, \
+                s.credit_balance, \
+                to_char(s.credit_balance_reported_at AT TIME ZONE 'UTC', {RFC3339_UTC}) \
+                    AS credit_balance_reported_at, \
+                COALESCE((SELECT sum(g.credits) FROM credit_grants g \
+                          WHERE g.station_id = s.id), 0)::bigint AS credits_granted \
          FROM stations s \
          JOIN entitlements e ON e.id = s.entitlement_id \
          JOIN orders o ON o.id = e.order_id \
@@ -339,6 +357,10 @@ pub struct RegisterRequest {
     pub label: Option<String>,
     #[serde(default)]
     pub site: Option<String>,
+    /// Credits to move from a quota entitlement's pool into the licence
+    /// file (≥ 0); omitted is `min(target reserve, available)`.
+    #[serde(default)]
+    pub credits: Option<i64>,
 }
 
 /// A validated [`RegisterRequest`]: trimmed, blanks as `None`.
@@ -349,6 +371,7 @@ pub struct NewStation {
     pub station_id: Option<String>,
     pub label: Option<String>,
     pub site: Option<String>,
+    pub credits: CreditChoice,
 }
 
 /// Whether `id` (already trimmed) has the shape of a `wipe_cert` public key
@@ -394,6 +417,7 @@ impl RegisterRequest {
             station_id: optional_text("station_id", self.station_id.as_deref())?,
             label: optional_text("label", self.label.as_deref())?,
             site: optional_text("site", self.site.as_deref())?,
+            credits: CreditChoice::from_request(self.credits)?,
         })
     }
 }
@@ -441,6 +465,8 @@ struct LockedEntitlement {
     /// RFC 3339 UTC with microseconds: exactly the stored `term_end`.
     term_end: String,
     current: bool,
+    /// The offering's target reserve (NULL reads as 50).
+    credit_target_reserve: i64,
 }
 
 /// RFC 3339 UTC with microseconds, so a timestamp round-trips through
@@ -452,7 +478,10 @@ fn locked_entitlement_columns() -> String {
     format!(
         "e.id, o.scope, o.seats, o.quota_erasures, o.features, \
          to_char(e.term_end AT TIME ZONE 'UTC', {RFC3339_UTC_MICROS}) AS term_end, \
-         {ENTITLEMENT_CURRENT} AS current"
+         {ENTITLEMENT_CURRENT} AS current, \
+         COALESCE((SELECT credit_target_reserve FROM offerings WHERE id = o.offering_id), \
+                  {DEFAULT_RESERVE}) AS credit_target_reserve",
+        DEFAULT_RESERVE = credits::DEFAULT_TARGET_RESERVE
     )
 }
 
@@ -461,6 +490,8 @@ fn locked_entitlement_columns() -> String {
 pub struct Registered {
     pub station: Station,
     pub licence: Licence,
+    /// The credit grant issued with the licence, if any.
+    pub credit_grant: Option<GrantSummary>,
 }
 
 /// The licence's entitlements for `ent`, held by organization `org`, for a
@@ -636,19 +667,24 @@ struct IssueLicence<'a> {
     site: Option<&'a str>,
     /// The licence this one replaces, recorded in the audit detail.
     reissue_of: Option<Uuid>,
+    /// Credits to grant with it, decided by [`credits::decide`] under the
+    /// entitlement lock; 0 is no grant.
+    credits: i64,
 }
 
 /// Sign a licence mirroring `req.ent` with `root` (`not_before` = `issued_at`
 /// = now, `not_after` = the entitlement's `term_end`), store it as the
 /// station's active licence and audit `licence.issued`, in the caller's
-/// transaction, through [`sign_and_store`]. A term that ended between the
-/// database's clock and ours is 409 [`MSG_ENTITLEMENT_NOT_CURRENT`]; the
-/// caller's transaction then rolls back whatever it wrote.
+/// transaction, through [`sign_and_store`], with a credit grant of
+/// `req.credits` beside it when that is > 0 ([`credits::grant`]). A term that
+/// ended between the database's clock and ours is 409
+/// [`MSG_ENTITLEMENT_NOT_CURRENT`]; the caller's transaction then rolls back
+/// whatever it wrote.
 async fn issue_licence(
     conn: &mut PgConnection,
     root: &VendorRoot,
     req: IssueLicence<'_>,
-) -> Result<Licence, StationError> {
+) -> Result<(Licence, Option<GrantSummary>), StationError> {
     let ent = req.ent;
     let org_name: String = sqlx::query_scalar("SELECT name FROM organizations WHERE id = $1")
         .bind(req.organization_id)
@@ -692,7 +728,28 @@ async fn issue_licence(
         },
     )
     .await?;
-    station_licence(conn, id).await
+    let grant = match (req.credits, ent.quota_erasures) {
+        (credits, Some(purchased)) if credits > 0 => Some(
+            credits::grant(
+                conn,
+                root,
+                credits::NewGrant {
+                    organization_id: req.organization_id,
+                    entitlement_id: ent.id,
+                    purchased,
+                    station: req.station,
+                    licence_id: id,
+                    instance_key_id: req.instance_key_id,
+                    credits,
+                    issued_at: now,
+                    actor: req.actor,
+                },
+            )
+            .await?,
+        ),
+        _ => None,
+    };
+    Ok((station_licence(conn, id).await?, grant))
 }
 
 /// Register `new` for organization `organization_id` on behalf of
@@ -728,6 +785,7 @@ pub async fn register(
     if ent.scope == "machine" && new.station_id.is_none() {
         return Err(StationError::BadRequest(MSG_STATION_ID_REQUIRED.into()));
     }
+    credits::check_applies(ent.quota_erasures, new.credits)?;
     let registered: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM stations \
                         WHERE organization_id = $1 AND instance_key_id = $2 \
@@ -751,6 +809,15 @@ pub async fn register(
     if used >= i64::from(ent.seats) {
         return Err(StationError::Conflict(MSG_NO_FREE_SEAT));
     }
+    // Under the same lock: racing grants cannot overdraw the pool.
+    let credits = credits::decide(
+        conn,
+        ent.id,
+        ent.quota_erasures,
+        ent.credit_target_reserve,
+        new.credits,
+    )
+    .await?;
     let station_id: Uuid = sqlx::query_scalar(
         "INSERT INTO stations (organization_id, entitlement_id, instance_key_id, station_id, \
                                label, site, registered_by) \
@@ -791,7 +858,7 @@ pub async fn register(
         },
     )
     .await?;
-    let licence = issue_licence(
+    let (licence, credit_grant) = issue_licence(
         conn,
         root,
         IssueLicence {
@@ -803,13 +870,18 @@ pub async fn register(
             station_id: new.station_id.as_deref(),
             site: new.site.as_deref(),
             reissue_of: None,
+            credits,
         },
     )
     .await?;
     let station = get(&mut *conn, organization_id, station_id)
         .await?
         .ok_or_else(|| StationError::Issue("a registered station vanished".into()))?;
-    Ok(Registered { station, licence })
+    Ok(Registered {
+        station,
+        licence,
+        credit_grant,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -829,19 +901,24 @@ struct LockedStation {
 /// Issue the organization's station `id` a renewed licence on behalf of
 /// `who` (the audit actor: `user:<id>` for an owner's click, `station:<id>`
 /// for the station's own fetch, [`crate::station_link`]), signing it with
-/// `root`, in the caller's transaction (which the
+/// `root`, with `credits` from a quota entitlement's pool beside it
+/// ([`credits::decide`]), in the caller's transaction (which the
 /// caller commits). Refusals, in this order and before any write (but see
 /// below): 404
 /// [`MSG_NO_STATION`] for an unknown or foreign station, 409
-/// [`MSG_ALREADY_RELEASED`], 409 [`MSG_ENTITLEMENT_NOT_CURRENT`], 409
-/// [`MSG_LICENCE_REVOKED`] when its latest licence is revoked, and 409
-/// [`MSG_LICENCE_UP_TO_DATE`] unless its latest licence is active and ends
-/// before the entitlement's `term_end` (the station's `renewal_available`).
+/// [`MSG_ALREADY_RELEASED`], 409 [`MSG_ENTITLEMENT_NOT_CURRENT`], 400
+/// [`credits::MSG_CREDITS_UNLIMITED`] for a count on an unlimited
+/// entitlement, 409 [`MSG_LICENCE_REVOKED`] when its latest licence is
+/// revoked, 409 [`MSG_LICENCE_UP_TO_DATE`] unless its latest licence is
+/// active and either ends before the entitlement's `term_end` (the
+/// station's `renewal_available`) or `credits` names at least 1 credit on a
+/// quota entitlement (a top-up, reason `"credits added"`), and 409
+/// [`credits::MSG_NOT_ENOUGH_CREDITS`].
 /// Otherwise the old licence is `superseded` and a new one is signed exactly
 /// as [`register`] signs, for the stored key, station id and site, to the
-/// current `term_end`; audits `licence.issued {…, reissue_of}` and
-/// `licence.superseded {station_id, instance_key_id, reason: "renewed",
-/// superseded_by}`.
+/// current `term_end`; audits `licence.issued {…, reissue_of}`,
+/// `licence.superseded {station_id, instance_key_id, reason: "renewed" or
+/// "credits added", superseded_by}` and, with a grant, `credits.granted`.
 /// One refusal comes after the supersede: a term that ends in the instant
 /// between the database's clock and ours, found while signing, is 409
 /// [`MSG_ENTITLEMENT_NOT_CURRENT`] and leaves its writes to roll back with
@@ -852,9 +929,11 @@ pub async fn reissue(
     organization_id: Uuid,
     who: &str,
     id: Uuid,
+    credits: CreditChoice,
 ) -> Result<Registered, StationError> {
-    // Station and entitlement are locked in one statement: register locks
-    // only the entitlement and release only the station, so no lock cycle.
+    // Station and entitlement are locked in one statement: release and
+    // reissue both take the station before the entitlement, and register
+    // takes no station row, so no lock cycle.
     let locked: LockedStation = sqlx::query_as(&format!(
         "SELECT s.released_at IS NOT NULL AS released, s.instance_key_id, s.station_id, \
                 s.site, {} \
@@ -876,6 +955,7 @@ pub async fn reissue(
     if !locked.ent.current {
         return Err(StationError::Conflict(MSG_ENTITLEMENT_NOT_CURRENT));
     }
+    credits::check_applies(locked.ent.quota_erasures, credits)?;
     // A statement of its own, after the lock: under READ COMMITTED it sees a
     // concurrent reissue's licence, or a revocation, that committed while
     // this one waited (revoke takes the same station lock), so that loser
@@ -894,9 +974,24 @@ pub async fn reissue(
     if latest_status.as_deref() == Some("revoked") {
         return Err(StationError::Conflict(MSG_LICENCE_REVOKED));
     }
-    let (Some(old), true) = (old, behind) else {
+    // An up-to-date licence is reissued only when the owner names a credit
+    // count of at least 1 (a renewal instead takes the default reserve).
+    let adds_credits = locked.ent.quota_erasures.is_some()
+        && matches!(credits, CreditChoice::Exactly(n) if n >= 1);
+    let reason = if behind { "renewed" } else { "credits added" };
+    let (Some(old), Some("active"), true) = (old, latest_status.as_deref(), behind || adds_credits)
+    else {
         return Err(StationError::Conflict(MSG_LICENCE_UP_TO_DATE));
     };
+    // Under the entitlement lock, before any write.
+    let granted = credits::decide(
+        conn,
+        locked.ent.id,
+        locked.ent.quota_erasures,
+        locked.ent.credit_target_reserve,
+        credits,
+    )
+    .await?;
 
     // One active licence per station: supersede before inserting.
     sqlx::query_scalar::<_, Uuid>(
@@ -906,7 +1001,7 @@ pub async fn reissue(
     .bind(old)
     .fetch_one(&mut *conn)
     .await?;
-    let licence = issue_licence(
+    let (licence, credit_grant) = issue_licence(
         conn,
         root,
         IssueLicence {
@@ -918,6 +1013,7 @@ pub async fn reissue(
             station_id: locked.station_id.as_deref(),
             site: locked.site.as_deref(),
             reissue_of: Some(old),
+            credits: granted,
         },
     )
     .await?;
@@ -930,7 +1026,7 @@ pub async fn reissue(
             detail: json!({
                 "station_id": id,
                 "instance_key_id": locked.instance_key_id,
-                "reason": "renewed",
+                "reason": reason,
                 "superseded_by": licence.id,
             }),
         },
@@ -939,7 +1035,11 @@ pub async fn reissue(
     let station = get(&mut *conn, organization_id, id)
         .await?
         .ok_or_else(|| StationError::Issue("a reissued station vanished".into()))?;
-    Ok(Registered { station, licence })
+    Ok(Registered {
+        station,
+        licence,
+        credit_grant,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -949,26 +1049,35 @@ pub async fn reissue(
 /// caller's transaction: 404 [`MSG_NO_STATION`] for an unknown or foreign
 /// one, 409 [`MSG_ALREADY_RELEASED`] if it is released. Its seat is free
 /// again and its active licence is `superseded`; audits `station.released`
-/// and `licence.superseded {reason: "station released"}`.
+/// and `licence.superseded {reason: "station released"}`. On a quota
+/// entitlement it returns the station's last reported credits to the pool
+/// ([`credits::return_on_release`]), locking the entitlement after the
+/// station (the order [`reissue`] uses).
 pub async fn release(
     conn: &mut PgConnection,
     organization_id: Uuid,
     user_id: Uuid,
     id: Uuid,
 ) -> Result<Station, StationError> {
-    let released: Option<bool> = sqlx::query_scalar(
-        "SELECT released_at IS NOT NULL FROM stations \
+    let released: Option<(bool, Uuid)> = sqlx::query_as(
+        "SELECT released_at IS NOT NULL, entitlement_id FROM stations \
          WHERE organization_id = $1 AND id = $2 FOR UPDATE",
     )
     .bind(organization_id)
     .bind(id)
     .fetch_optional(&mut *conn)
     .await?;
-    match released {
+    let entitlement = match released {
         None => return Err(StationError::NotFound(MSG_NO_STATION)),
-        Some(true) => return Err(StationError::Conflict(MSG_ALREADY_RELEASED)),
-        Some(false) => {}
-    }
+        Some((true, _)) => return Err(StationError::Conflict(MSG_ALREADY_RELEASED)),
+        Some((false, entitlement)) => entitlement,
+    };
+    // Station, then entitlement: the pool is read and written under the
+    // lock every grant takes.
+    sqlx::query("SELECT 1 FROM entitlements WHERE id = $1 FOR UPDATE")
+        .bind(entitlement)
+        .execute(&mut *conn)
+        .await?;
     let (entitlement_id, instance_key_id): (Uuid, String) = sqlx::query_as(
         "UPDATE stations SET released_by = $2, released_at = now() WHERE id = $1 \
          RETURNING entitlement_id, instance_key_id",
@@ -1010,6 +1119,7 @@ pub async fn release(
         )
         .await?;
     }
+    credits::return_on_release(conn, organization_id, entitlement_id, id, &who).await?;
     get(&mut *conn, organization_id, id)
         .await?
         .ok_or_else(|| StationError::Issue("a released station vanished".into()))
@@ -1018,9 +1128,11 @@ pub async fn release(
 // ---------------------------------------------------------------------------
 // Download
 
-/// The stored file of the organization's station licence `id` and an audit
-/// row `licence.downloaded {station_id}` by `user_id`, in the caller's
-/// transaction; `None` (nothing audited) for an unknown or foreign licence
+/// The file of the organization's station licence `id` and an audit row
+/// `licence.downloaded {station_id}` by `user_id`, in the caller's
+/// transaction: the stored licence, byte for byte, when it was issued with
+/// no credit grant, else the pretty JSON `wipe_license::LicenseFile`
+/// `{license, credit_grant}` of the stored licence and grant; `None` (nothing audited) for an unknown or foreign licence
 /// or a vendor-issued one, and 409 [`MSG_LICENCE_REVOKED`] (nothing
 /// audited) for a revoked one: the hub never hands out a file it revoked.
 pub async fn licence_document(
@@ -1053,7 +1165,7 @@ pub async fn licence_document(
         },
     )
     .await?;
-    Ok(Some(document))
+    Ok(Some(credits::licence_file(conn, id, document).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1227,6 +1339,7 @@ mod tests {
             station_id: None,
             label: None,
             site: None,
+            credits: None,
         }
     }
 

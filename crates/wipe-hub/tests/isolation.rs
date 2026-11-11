@@ -353,7 +353,7 @@ async fn tenant(hub: &Hub, org_name: &str, names: Option<(&str, &str)>, offering
 /// Everything stored about organization `org`, as JSON text: the
 /// organization row, its users, its invitations, its orders, its billing
 /// customers, its entitlements and their renewals, its stations and
-/// licences, and its users' sessions and emailed tokens (hashes, expiries,
+/// licences, its credit grants and returns, and its users' sessions and emailed tokens (hashes, expiries,
 /// `used_at`), each in full.
 async fn rows_of(hub: &Hub, org: Uuid) -> Vec<String> {
     let mut out = Vec::new();
@@ -370,6 +370,8 @@ async fn rows_of(hub: &Hub, org: Uuid) -> Vec<String> {
          WHERE e.organization_id = $1 ORDER BY r.invoice_id",
         "SELECT row_to_json(s)::text FROM stations s WHERE organization_id = $1 ORDER BY id",
         "SELECT row_to_json(l)::text FROM licences l WHERE organization_id = $1 ORDER BY id",
+        "SELECT row_to_json(g)::text FROM credit_grants g WHERE organization_id = $1 ORDER BY id",
+        "SELECT row_to_json(r)::text FROM credit_returns r WHERE organization_id = $1 ORDER BY id",
         "SELECT row_to_json(s)::text FROM sessions s JOIN users u ON u.id = s.user_id \
          WHERE u.organization_id = $1 ORDER BY s.token_hash",
         "SELECT row_to_json(t)::text FROM auth_tokens t JOIN users u ON u.id = t.user_id \
@@ -426,6 +428,41 @@ async fn paid_renewed_entitlement(hub: &Hub, owner: &Who, offering: &str) -> Str
     id.to_string()
 }
 
+/// `owner` buys a one-off credit pool (5000 erasures, two site seats)
+/// through the Fake provider: the entitlement's id.
+async fn paid_one_off_entitlement(hub: &Hub, owner: &Who) -> String {
+    let offering = hub.published_one_off_offering("Pool one-off", 12).await;
+    let resp = hub
+        .post(
+            "/api/checkout",
+            json!({ "offering_id": offering }),
+            Some(&owner.cookie),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: Value = resp.json().await.unwrap();
+    let order = body["order"]["id"].as_str().unwrap().to_string();
+    let session: String =
+        sqlx::query_scalar("SELECT provider_session_id FROM orders WHERE id = $1::uuid")
+            .bind(&order)
+            .fetch_one(&hub.db.pool)
+            .await
+            .unwrap();
+    let resp = hub
+        .post_empty(
+            &format!("/api/payments/fake/sessions/{session}/pay"),
+            Some(&owner.cookie),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let id: Uuid = sqlx::query_scalar("SELECT id FROM entitlements WHERE order_id = $1::uuid")
+        .bind(&order)
+        .fetch_one(&hub.db.pool)
+        .await
+        .unwrap();
+    id.to_string()
+}
+
 /// A fresh session cookie for `user_id`, so routes that end sessions or
 /// change passwords cannot disturb the next call.
 async fn fresh_cookie(hub: &Hub, user_id: &str) -> String {
@@ -478,7 +515,41 @@ async fn organization_a_never_sees_or_changes_organization_b() {
     let body: Value = resp.json().await.unwrap();
     let b_station = body["station"]["id"].as_str().unwrap().to_string();
     let b_licence = body["licence"]["id"].as_str().unwrap().to_string();
+    // B also bought a credit pool and moved credits from it to a station
+    // that has since been released (a grant and a return).
+    let b_pool = paid_one_off_entitlement(&hub, &b.owner).await;
+    let resp = hub
+        .post(
+            "/api/stations",
+            json!({
+                "entitlement_id": b_pool,
+                "instance_key_id": wipe_cert::SigningKey::generate().public_key_id(),
+            }),
+            Some(&b.owner.cookie),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: Value = resp.json().await.unwrap();
+    let b_grant = body["credit_grant"]["id"].as_str().unwrap().to_string();
+    let resp = hub
+        .post_empty(
+            &format!(
+                "/api/stations/{}/release",
+                body["station"]["id"].as_str().unwrap()
+            ),
+            Some(&b.owner.cookie),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
     let b_before = rows_of(&hub, b.org).await;
+    assert!(
+        b_before.iter().any(|r| r.contains(&b_grant)),
+        "{b_before:?}"
+    );
+    assert!(
+        b_before.iter().any(|r| r.contains("\"returned_by\"")),
+        "{b_before:?}"
+    );
     assert!(
         b_before.iter().any(|r| r.contains(&b_entitlement)),
         "{b_before:?}"
@@ -532,6 +603,8 @@ async fn organization_a_never_sees_or_changes_organization_b() {
         b_station.clone(),
         b_licence.clone(),
         b_key.clone(),
+        b_pool.clone(),
+        b_grant.clone(),
         "bravo-bench".into(),
     ];
 

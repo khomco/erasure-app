@@ -13,6 +13,7 @@ const priced: Offering = {
   interval: "annual",
   trial: false,
   grants: { scope: "machine", seats: 1, quota_erasures: null, features: [], term_months: 12 },
+  credit_target_reserve: null,
   status: "draft",
   created_at: "2026-11-10T10:00:00Z",
   updated_at: "2026-11-10T10:00:00Z",
@@ -27,6 +28,7 @@ const trial: Offering = {
   interval: "one_off",
   trial: true,
   grants: { scope: "site", seats: 1, quota_erasures: 25, features: [], term_months: 1 },
+  credit_target_reserve: 50,
 };
 
 function render(initial?: Offering, termsLocked = false): string {
@@ -130,8 +132,31 @@ describe("the body the form sends", () => {
         interval: "one_off",
         trial: true,
         grants: trial.grants,
+        credit_target_reserve: 50,
       },
     });
+  });
+
+  it("sends the credit target reserve only with a counted quota", () => {
+    const pooled = { ...fields, trial: false, interval: "one_off" as const, quota: "500" };
+    expect(offeringBody({ ...pooled, reserve: "80" })).toMatchObject({
+      body: { credit_target_reserve: 80 },
+    });
+    // Blank leaves the hub's default.
+    const blank = offeringBody({ ...pooled, reserve: " " });
+    expect("body" in blank && "credit_target_reserve" in blank.body).toBe(false);
+    // Unlimited never sends one.
+    const unlimited = offeringBody({ ...pooled, unlimited: true, reserve: "80" });
+    expect("body" in unlimited && "credit_target_reserve" in unlimited.body).toBe(false);
+    expect(offeringBody({ ...pooled, reserve: "1.5" })).toEqual({
+      error: "The credit target reserve is a whole number.",
+    });
+  });
+
+  it("shows the target reserve field only with a counted quota", () => {
+    expect(render(trial)).toContain('name="reserve"');
+    expect(render(trial)).toContain('value="50"');
+    expect(render(priced)).not.toContain('name="reserve"');
   });
 
   it("keeps a priced offering's price and Unlimited", () => {

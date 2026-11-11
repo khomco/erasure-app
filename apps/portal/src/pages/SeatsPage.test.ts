@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { Entitlement } from "@/api/orders";
-import { entitlementState, SeatsSummary } from "./SeatsPage";
+import { creditPoolText, entitlementState, SeatsSummary } from "./SeatsPage";
 
 const base: Entitlement = {
   id: "5b0d8b4e-6f1e-4c3a-9d2e-1f6c2a7b8c90",
@@ -17,6 +17,7 @@ const base: Entitlement = {
   current: true,
   cancelled_at: null,
   refunded_at: null,
+  credits: null,
 };
 
 /** The markup's text with tags removed. */
@@ -79,5 +80,17 @@ describe("the seats summary", () => {
       createElement(SeatsSummary, { seats: { entitlements: [], available_seats: 0 } }),
     );
     expect(text(html)).toBe("0 available licence seats");
+  });
+});
+
+describe("credit pool", () => {
+  it("shows what is available of what was bought, granted and returned", () => {
+    expect(
+      creditPoolText({
+        ...base,
+        credits: { purchased: 5000, granted: 80, returned: 30, available: 4950, target_reserve: 50 },
+      }),
+    ).toBe("4950 of 5000 available · 80 granted · 30 returned");
+    expect(creditPoolText(base)).toBe("Unlimited");
   });
 });
