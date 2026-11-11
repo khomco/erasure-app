@@ -61,7 +61,8 @@ deferred: []
 | Method not allowed | Real backend, `AllowedMethods::Only{[BlockOverwrite]}`, device resolves NVMe sanitize | 409 naming the method class | Same as above |
 | Method unresolvable | Real backend, `Only{..}`, device not enumerated | 409 saying the method could not be checked | Under `All`, the start proceeds unpinned and the run fails as today |
 | Reservation not saved | Real backend, `Count` licence, lease save fails or load fault | 409 naming the lease file and the error | Reservation undone in RAM |
-| Lease fault, unlimited | Real backend, `Unlimited` licence, save fault | Start allowed with an `evaluation` decision (not a listed refusal) | Banner reports `lease_state_unavailable` |
+| Lease fault, unlimited | Real backend, valid `Unlimited` licence, lease save or load fault | Start allowed with a **licensed** decision (`evaluation: false`, chain attached); the certificate is licensed. Expiry, not-yet-valid, machine and method still refuse as usual; rollback is checked against the in-memory watermark | Banner reports `lease_state_unavailable` |
+| Lease fault, mock | Simulated backend, valid `Unlimited` licence, lease fault | 200, licensed decision, as above | — |
 | Simulated backend | Mock backend, unlicensed, expired or exhausted | 200. Decision is `evaluation` and the certificate is `evaluation` | — |
 | Spans expiry | Real backend, licence `not_after` falls between start and finish | Certificate is licensed (`evaluation: false`, chain attached) | — |
 | Abort | Licensed Job reserved 1 credit, then aborted (from `InProgress` or `PendingDestruction`) | Reservation returned, `remaining_erasures` back to the previous value | — |
@@ -90,7 +91,7 @@ deferred: []
    - There is no `Failed` Job state: a failed erasure stays `InProgress` and keeps its credit until the operator aborts it.
    - Jobs are not persisted, so `LicenseContext::open` returns every stored reservation at restart.
    - A licence switch (`open`/`with_chain` with a different id) resets reservations along with the count. Settling a decision whose `license_id` is not the lease's changes nothing.
-5. **Lease fault on an `Unlimited` licence.** The start is not refused, because the §0.2 invariant lists no such reason and forbids new gates without a decision. The decision is `evaluation`, as signing behaves today.
+5. **Lease fault on an `Unlimited` licence.** *(Changed at owner review, 2026-11-11.)* The start is not refused, because the §0.2 invariant lists no such reason. The decision is **licensed** when the licence's own checks pass (expiry, not yet valid, machine, method, and rollback against the in-memory watermark): a lease fault alone never makes a start uncovered. ADR-0013's baseline is that a paid licence never yields an `evaluation` certificate, and on an `Unlimited` licence the lease file only guards the rollback watermark. On a `Count` licence a lease fault still refuses (Boundaries).
 6. **A started Job recorded for destruction keeps its start decision.** No second check and no second credit: the start's answer is final.
 7. **`GET /api/license` shape.**
    - Drops `lapse_policy`, which is ignored now.
@@ -98,7 +99,7 @@ deferred: []
    - Adds `simulated_backend: bool`.
    - `LeaseStatus::operator_message` becomes consequence-neutral: it states the status and drops "Erasure still works" and "marked evaluation". The banner adds the consequence.
 8. **Revocation** is listed in ADR-0013 §1, but no revocation channel exists (A2.3, D6). It is not a refusal reason here, and `CONTEXT.md` §10 records the limitation.
-9. **Marketing-site and hub lapse-policy copy** (`sites/www` "Licensing never blocks erasure", `wipe-hub` `lapse_policy`) is owner-approved customer copy owned by `controlled-licensing` CAP-2. It is left untouched and noted as a residual risk. It stays true of every shipped station until a real backend exists, since all of them are simulated.
+9. **Marketing-site and hub lapse-policy copy** is owned by `controlled-licensing` CAP-2, which shipped on 2026-11-10 (8c11473) with owner approval. This story does not touch it.
 
 </intent-contract>
 
@@ -203,6 +204,8 @@ deferred: []
 
 ## Spec Change Log
 
+- 2026-11-11, owner review: decision 5 changed. A lease fault on a valid `Unlimited` licence now yields a licensed decision, not `evaluation` (ADR-0013: a paid licence never produces an `evaluation` certificate). The matrix row and design note follow; a mock-backend row was added. Decision 9 updated: `controlled-licensing` story 2 has shipped.
+
 ## Review Triage Log
 
 ## Design Notes
@@ -212,7 +215,10 @@ The order inside `decide_start`, under the lease write lock, then save:
 ```rust
 let status = evaluate(ent, &lease, &fp, now);          // before folding now in
 lease.observe(now);
-let covered = status.is_valid() && method_ok && credits_ok(req.drives);
+// A LeaseStateUnavailable verdict is not itself uncovered: judge the licence's own
+// checks (expiry, not-yet-valid, machine, rollback vs the in-memory watermark).
+// On a Count licence the fault refuses separately (Boundaries).
+let covered = licence_checks_pass(&status) && method_ok && credits_ok(req.drives);
 if !covered && !req.simulated { return Err(refusal) }  // nothing reserved
 if covered { lease.credits_reserved += req.drives }    // then save; Count + save error => undo, refuse
 ```
@@ -236,5 +242,5 @@ Blocking condition: none. Halted after planning, as the invocation directed, so 
 Planning made nine decisions without halting; they are listed under "Autonomous decisions" in the intent contract. The ones to read first:
 - **Decision 1:** a backend counts as simulated only if it says so (`is_simulated`, default false).
 - **Decision 4:** credits are reserved against the licence's own `Count` quota. Reservations are returned at restart, and a failed erasure keeps its credit until it is aborted.
-- **Decision 5:** a lease fault on an unlimited licence is not a refusal reason.
+- **Decision 5:** a lease fault on an unlimited licence is not a refusal reason, and the start is licensed (changed at owner review, 2026-11-11).
 - **Decision 9:** marketing-site and hub lapse-policy copy is left to `controlled-licensing`.
