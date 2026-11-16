@@ -28,6 +28,7 @@ fn entitlements(quota: Quota, scope: Scope) -> Entitlements {
         features: vec![Feature::EnterpriseMode, Feature::HubSync],
         allowed_methods: AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     }
 }
 
@@ -207,6 +208,69 @@ fn a_licence_round_trips_through_json() {
         &[root.verifying_key()]
     )
     .is_licensed());
+}
+
+#[test]
+fn a_licence_without_a_paid_through_date_writes_no_such_field_and_re_verifies() {
+    // Licences signed before renewal grace existed, and every licence without
+    // grace, carry no `paid_through`. Parsing and re-serializing one must not
+    // add the field, or the canonical hash would change and it would read as
+    // tampered.
+    let root = VendorRoot::generate();
+    let (instance, chain) = issue(&root, unlimited());
+    let json = serde_json::to_string(&chain.license).unwrap();
+    assert!(!json.contains("paid_through"), "{json}");
+
+    let back: wipe_license::LicenseCertificate = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.body.entitlements.paid_through, None);
+    let reserialized = serde_json::to_string(&back).unwrap();
+    let again: wipe_license::LicenseCertificate = serde_json::from_str(&reserialized).unwrap();
+    again
+        .verify(&[root.verifying_key()])
+        .expect("a licence with no paid-through date still verifies");
+    assert!(verify_chain(
+        Some(&AttestationChain::new(again)),
+        &instance.public_key_id(),
+        now(),
+        &[root.verifying_key()]
+    )
+    .is_licensed());
+}
+
+#[test]
+fn a_paid_through_date_is_signed_and_editing_it_is_tampering() {
+    let root = VendorRoot::generate();
+    let mut ent = unlimited();
+    let paid_through = now() + Duration::days(305);
+    ent.paid_through = Some(paid_through);
+    let (instance, chain) = issue(&root, ent);
+
+    let json = serde_json::to_string(&chain.license).unwrap();
+    let back: wipe_license::LicenseCertificate = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.body.entitlements.paid_through, Some(paid_through));
+    back.verify(&[root.verifying_key()]).expect("verifies");
+    assert!(verify_chain(
+        Some(&AttestationChain::new(back.clone())),
+        &instance.public_key_id(),
+        now(),
+        &[root.verifying_key()]
+    )
+    .is_licensed());
+
+    // Moving the paid-through date is a payload edit.
+    let mut moved = back.clone();
+    moved.body.entitlements.paid_through = Some(paid_through + Duration::days(30));
+    match moved.verify(&[root.verifying_key()]) {
+        Err(LicenseError::Tampered(_)) => {}
+        other => panic!("expected Tampered, got {other:?}"),
+    }
+    // So is removing it.
+    let mut removed = back;
+    removed.body.entitlements.paid_through = None;
+    match removed.verify(&[root.verifying_key()]) {
+        Err(LicenseError::Tampered(_)) => {}
+        other => panic!("expected Tampered, got {other:?}"),
+    }
 }
 
 // --- entitlements ----------------------------------------------------------

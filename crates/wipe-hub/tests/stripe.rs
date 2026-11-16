@@ -16,13 +16,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use reqwest::{Response, StatusCode};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use support::hub::{assert_error, error_of, spawn_hub, spawn_hub_args, Hub, Who, BASE};
+use support::hub::{assert_error, error_of, mail_texts, spawn_hub, spawn_hub_args, Hub, Who, BASE};
 use support::stripe_mock::{
     spawn_stripe_hub, StripeMock, BILLING_URL, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
 };
+use support::Mailpit;
 use uuid::Uuid;
 use wipe_hub::csrf::MSG_BAD_CSRF;
 use wipe_hub::entitlements::renewal_notice_now;
+use wipe_hub::mail::RENEWAL_FAILED_SUBJECT;
 use wipe_hub::order_routes::{
     MSG_EVENT_NOT_READY, MSG_NO_BILLING_ACCOUNT, MSG_OWNER_ONLY_BILLING, MSG_PROVIDER_FAILED,
 };
@@ -70,6 +72,7 @@ fn template(name: &str) -> &'static str {
         "invoice.paid" => include_str!("fixtures/stripe/invoice.paid.json"),
         "invoice.paid.create" => include_str!("fixtures/stripe/invoice.paid.create.json"),
         "invoice.paid.parent" => include_str!("fixtures/stripe/invoice.paid.parent.json"),
+        "invoice.payment_failed" => include_str!("fixtures/stripe/invoice.payment_failed.json"),
         "customer.subscription.updated" => {
             include_str!("fixtures/stripe/customer.subscription.updated.json")
         }
@@ -1709,6 +1712,94 @@ async fn an_owner_cancels_and_resumes_in_the_billing_portal() {
     );
     assert_eq!(audits[1].2, json!({"event_id": stop["id"]}));
     assert_eq!(audits[2].2, json!({"event_id": resume["id"]}));
+}
+
+/// A failed renewal charge (controlled-licensing story 5): recorded once,
+/// shown with the grace end, the owner emailed once, cleared by the paid
+/// renewal.
+#[tokio::test]
+async fn a_failed_renewal_charge_is_recorded_once_and_cleared_by_payment() {
+    let s = shop().await;
+    let id = s.subscribed("sub_test_1", "in_test_0").await;
+    let failed = |invoice: &str| {
+        s.sub_event(
+            "invoice.payment_failed",
+            &id,
+            &[
+                ("__SUBSCRIPTION_ID__", "sub_test_1".to_string()),
+                ("__INVOICE_ID__", invoice.to_string()),
+            ],
+        )
+    };
+    // Delivered three days late: the failure is recorded at Stripe's time.
+    let failed_when = now() - 3 * 86400;
+    let first = s.sub_event(
+        "invoice.payment_failed",
+        &id,
+        &[
+            ("__SUBSCRIPTION_ID__", "sub_test_1".to_string()),
+            ("__INVOICE_ID__", "in_test_1".to_string()),
+            ("__CREATED__", failed_when.to_string()),
+        ],
+    );
+    assert_eq!(s.deliver_ok(&first).await.as_deref(), Some("applied"));
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM renewal_failed_at)::bigint FROM entitlements \
+         WHERE order_id = $1::uuid",
+    )
+    .bind(&id)
+    .fetch_one(&s.hub.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(recorded, failed_when);
+    let e = &s.seats().await["entitlements"][0];
+    let failed_at = e["renewal_failed_at"].as_str().unwrap().to_string();
+    assert!(failed_at.ends_with('Z'), "{failed_at}");
+    assert!(e["grace_ends"].as_str().unwrap().ends_with('Z'), "{e}");
+    let texts = mail_texts(&s.owner.email, RENEWAL_FAILED_SUBJECT, 1).await;
+    assert!(texts[0].contains("Station"), "{}", texts[0]);
+    // Stripe retries the same invoice and fails again: nothing changes.
+    let retry = failed("in_test_1");
+    assert_eq!(s.deliver_ok(&retry).await.as_deref(), Some("unchanged"));
+    assert_eq!(
+        s.seats().await["entitlements"][0]["renewal_failed_at"],
+        json!(failed_at)
+    );
+    // A failed first invoice is not a renewal.
+    let mut create = failed("in_test_0");
+    create["data"]["object"]["billing_reason"] = json!("subscription_create");
+    assert_eq!(s.deliver_ok(&create).await.as_deref(), Some("ignored"));
+    // The renewal is paid: the failure is cleared.
+    let paid = renewal(&s, &id, "sub_test_1", "in_test_1");
+    assert_eq!(s.deliver_ok(&paid).await.as_deref(), Some("applied"));
+    assert_eq!(
+        s.seats().await["entitlements"][0]["renewal_failed_at"],
+        Value::Null
+    );
+    let actions: Vec<String> = s
+        .entitlement_audits(&id)
+        .await
+        .into_iter()
+        .map(|a| a.0)
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            "entitlement.granted",
+            "entitlement.renewal_failed",
+            "entitlement.renewed"
+        ]
+    );
+    // One notice in all.
+    assert_eq!(
+        Mailpit::new()
+            .messages_to(&s.owner.email)
+            .await
+            .iter()
+            .filter(|m| m.subject == RENEWAL_FAILED_SUBJECT)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

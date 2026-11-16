@@ -969,6 +969,7 @@ fn cmd_license(cmd: LicenseCmd) -> Result<()> {
                 features,
                 allowed_methods: wipe_license::AllowedMethods::All,
                 machine_binding: machine_fingerprint,
+                paid_through: None,
             };
 
             let license = root

@@ -1482,3 +1482,75 @@ async fn a_topup_grant_needs_no_licence_and_spent_reports_are_never_negative() {
         "{checks:?}"
     );
 }
+
+/// Migration 0024 (controlled-licensing story 5): a renewal failure time is
+/// nullable, and only a station licence may end at or before its issue (a
+/// licence whose renewal grace is withdrawn after its paid term ended).
+#[tokio::test]
+async fn a_renewal_failure_is_nullable_and_only_station_licences_may_end_before_issue() {
+    let t = TestDb::migrated().await;
+    let (order, org) = paid_order(&t, "annual").await;
+    let pool = &t.pool;
+    let nullable: bool = sqlx::query_scalar(
+        "SELECT is_nullable = 'YES' FROM information_schema.columns \
+         WHERE table_name = 'entitlements' AND column_name = 'renewal_failed_at'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert!(nullable);
+    let ent: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO entitlements (organization_id, order_id, provider, subscription_id, \
+                                   term_start, term_end, renews) \
+         VALUES ($1, $2, 'stripe', 'sub_1', now() - interval '13 months', \
+                 now() - interval '1 month', true) RETURNING id",
+    )
+    .bind(org)
+    .bind(order)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE entitlements SET renewal_failed_at = now() WHERE id = $1")
+        .bind(ent)
+        .execute(pool)
+        .await
+        .unwrap();
+    let user: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO users (organization_id, email, name, password_hash, role) \
+         VALUES ($1, 'o@example.test', 'O', 'x', 'owner') RETURNING id",
+    )
+    .bind(org)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let station: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO stations (organization_id, entitlement_id, instance_key_id, registered_by) \
+         VALUES ($1, $2, 'ed25519:AAAAAAAAAAAAAAAAAAAAAA', $3) RETURNING id",
+    )
+    .bind(org)
+    .bind(ent)
+    .bind(user)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let ended = |source: &'static str| {
+        sqlx::query(
+            "INSERT INTO licences (id, organization_id, station_id, entitlement_id, \
+                                   instance_key_id, root_key_id, not_after, issued_at, document, \
+                                   source, issue_reason) \
+             VALUES (gen_random_uuid(), $1, $2, $3, 'ed25519:AAAAAAAAAAAAAAAAAAAAAA', 'r', \
+                     now() - interval '1 month', now(), '{}', $4, $5)",
+        )
+        .bind(org)
+        .bind((source == "station").then_some(station))
+        .bind((source == "station").then_some(ent))
+        .bind(source)
+        .bind((source == "vendor").then_some("evaluation"))
+    };
+    ended("station").execute(pool).await.unwrap();
+    let refused = ended("vendor").execute(pool).await.unwrap_err();
+    assert!(
+        refused.to_string().contains("licences_window_check"),
+        "{refused}"
+    );
+}

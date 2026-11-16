@@ -15,16 +15,30 @@
 //! - **Renewal** ([`renew`]): each paid renewal invoice extends the term by
 //!   12 months from its current end, once per invoice (`entitlement_renewals`
 //!   is keyed by the provider's invoice id).
+//!   A paid renewal clears a recorded renewal failure.
 //! - **Renewal changes** ([`change_renewal`]): an owner cancelling at period
 //!   end (or resuming) at the provider sets `renews`, ordered by the
 //!   provider's event time. **Subscription end** ([`end`]) marks the
 //!   entitlement `cancelled`: the term runs to its end and is not renewed.
+//! - **Failed renewals** ([`renewal_failed`], controlled-licensing story 5):
+//!   the first failed renewal charge since the last paid renewal stamps
+//!   `renewal_failed_at`, which the portal shows with the date new jobs will
+//!   be refused ([`Entitlement::grace_ends`]); the webhook then emails the
+//!   organization's owners. Stripe's retries change nothing more.
+//! - **Renewal grace** ([`RENEWAL_GRACE`], [`LICENCE_END_SQL`], ADR-0013
+//!   §4): while an entitlement is `active` and `renews`, its station
+//!   licences run 30 days past `term_end`. The rule is defined here once;
+//!   [`crate::stations`] signs licences by it and withdraws the grace when a
+//!   cancellation or subscription end makes it no longer due.
 //! - **Refunds** ([`refund`]): a full refund of the first payment or of a
 //!   renewal marks the entitlement `refunded`, which withdraws its seats; the
 //!   caller marks the order `refunded`.
 //! - **Nothing here touches a licence.** Cancellation, refund and failed
-//!   renewals change entitlement and order rows only; no licence is revoked,
-//!   shortened or reissued (ROADMAP §0.2).
+//!   renewals change entitlement and order rows only. Withdrawing grace from
+//!   the licences of a cancelled or ended subscription is
+//!   [`crate::stations::withdraw_grace_for_subscription`], which
+//!   [`crate::payment_events::receive`] calls in the same transaction; a
+//!   refund touches no licence.
 //! - Every grant and every change of status, term or `renews` writes one
 //!   audit row in its transaction (actor `provider:<name>`, subject
 //!   `entitlement:<id>`). Advancing the ordering clock
@@ -61,6 +75,32 @@ pub fn subject(id: Uuid) -> String {
 /// The months one renewal adds.
 pub const RENEWAL_MONTHS: i32 = 12;
 
+/// How long past its paid term a licence for an active, renewing
+/// subscription stays valid (ADR-0013 §4): exactly 30 × 24 hours, the same
+/// span as [`LICENCE_END_SQL`]'s `720 hours`.
+pub const RENEWAL_GRACE: time::Duration = time::Duration::days(30);
+
+/// Whether the entitlement `e` carries renewal grace: it is `active` and set
+/// to renew. Only an annual subscription renews, so one-off, trial and
+/// refunded entitlements never do.
+pub(crate) const IN_GRACE_SQL: &str = "(e.status = 'active' AND e.renews)";
+
+/// [`LICENCE_END_SQL`] as a macro, so [`crate::stations`] can build `const`
+/// SQL fragments from it with `concat!`: the one place the rule is written.
+macro_rules! licence_end_sql {
+    () => {
+        "(e.term_end + CASE WHEN e.status = 'active' AND e.renews \
+         THEN interval '720 hours' ELSE interval '0 hours' END)"
+    };
+}
+pub(crate) use licence_end_sql;
+
+/// When a station licence for the entitlement `e` ends: `term_end`, plus
+/// [`RENEWAL_GRACE`] while it is in grace ([`IN_GRACE_SQL`]). Hours, never
+/// `'30 days'`, so the session time zone cannot shift it across a
+/// daylight-saving change and the stored end equals the signed one.
+pub(crate) const LICENCE_END_SQL: &str = licence_end_sql!();
+
 // ---------------------------------------------------------------------------
 // Shapes
 
@@ -85,6 +125,13 @@ pub struct Entitlement {
     pub current: bool,
     pub cancelled_at: Option<String>,
     pub refunded_at: Option<String>,
+    /// When the first renewal charge since the last paid renewal failed;
+    /// `None` when none has (a paid renewal clears it).
+    pub renewal_failed_at: Option<String>,
+    /// While the entitlement renews: `term_end` plus [`RENEWAL_GRACE`], when
+    /// its station licences end and new jobs will be refused unless the
+    /// renewal is paid. `None` otherwise.
+    pub grace_ends: Option<String>,
     /// The organization's credit pool for this entitlement; `None` when it
     /// is unlimited.
     pub credits: Option<CreditPool>,
@@ -117,6 +164,8 @@ struct EntitlementRow {
     current: bool,
     cancelled_at: Option<String>,
     refunded_at: Option<String>,
+    renewal_failed_at: Option<String>,
+    grace_ends: Option<String>,
     credits_granted: i64,
     credits_returned: i64,
     credit_target_reserve: i64,
@@ -149,6 +198,8 @@ impl From<EntitlementRow> for Entitlement {
             current: r.current,
             cancelled_at: r.cancelled_at,
             refunded_at: r.refunded_at,
+            renewal_failed_at: r.renewal_failed_at,
+            grace_ends: r.grace_ends,
             credits,
         }
     }
@@ -173,6 +224,11 @@ fn select_entitlements() -> String {
                 {CURRENT_SQL} AS current, \
                 to_char(e.cancelled_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS cancelled_at, \
                 to_char(e.refunded_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS refunded_at, \
+                to_char(e.renewal_failed_at AT TIME ZONE 'UTC', {RFC3339_UTC}) \
+                    AS renewal_failed_at, \
+                CASE WHEN {IN_GRACE_SQL} \
+                     THEN to_char({LICENCE_END_SQL} AT TIME ZONE 'UTC', {RFC3339_UTC}) \
+                END AS grace_ends, \
                 COALESCE((SELECT sum(g.credits) FROM credit_grants g \
                           WHERE g.entitlement_id = e.id), 0)::bigint AS credits_granted, \
                 COALESCE((SELECT sum(r.credits) FROM credit_returns r \
@@ -362,9 +418,11 @@ async fn insert_grant(
 ///   (the provider took money the hub will not grant a year for);
 /// - the amount differs from the order's snapshot: [`ApplyOutcome::Mismatch`],
 ///   logged at error, nothing changes;
-/// - otherwise the term grows by 12 months from its current end, one
-///   `entitlement_renewals` row is written, and `entitlement.renewed
-///   {event_id, invoice_id, previous_term_end, term_end}` is audited.
+/// - otherwise the term grows by 12 months from its current end (the
+///   anniversary, however late the payment), a recorded renewal failure is
+///   cleared, one `entitlement_renewals` row is written, and
+///   `entitlement.renewed {event_id, invoice_id, previous_term_end,
+///   term_end}` is audited.
 pub(crate) async fn renew(
     conn: &mut PgConnection,
     event: &VerifiedEvent,
@@ -438,6 +496,7 @@ pub(crate) async fn renew(
         "WITH old AS (SELECT id, term_end FROM entitlements WHERE id = $1), \
               grown AS (UPDATE entitlements e \
                         SET term_end = e.term_end + make_interval(months => $2), \
+                            renewal_failed_at = NULL, \
                             updated_at = now() \
                         FROM old WHERE e.id = old.id \
                         RETURNING e.id, old.term_end AS previous_term_end, e.term_end) \
@@ -601,6 +660,114 @@ pub(crate) async fn end(
     )
     .await?;
     Ok(ApplyOutcome::Applied(order))
+}
+
+/// Apply a [`EventKind::RenewalFailed`] event (called only by
+/// [`orders::apply_event`]): none is [`ApplyOutcome::Unmatched`]; an
+/// entitlement that is not active or does not renew, whose invoice was
+/// already paid (a failure delivered after the payment), or whose renewal
+/// failure is already recorded (a provider retry failing again), is
+/// [`ApplyOutcome::Unchanged`] and writes nothing; otherwise
+/// `renewal_failed_at` is set to the event's time (else now) and
+/// `entitlement.renewal_failed {event_id, invoice_id}` is audited. The
+/// caller emails the organization's owners after it commits an `Applied`
+/// outcome. Nothing here touches a licence: the licences' renewal grace is
+/// the time to pay.
+pub(crate) async fn renewal_failed(
+    conn: &mut PgConnection,
+    event: &VerifiedEvent,
+) -> Result<ApplyOutcome, ApplyError> {
+    let EventKind::RenewalFailed {
+        subscription_id,
+        invoice_id,
+    } = event.kind()
+    else {
+        unreachable!("renewal_failed is only called for RenewalFailed");
+    };
+    let Some(ent) = lock_by_subscription(conn, event.provider(), subscription_id).await? else {
+        return Ok(ApplyOutcome::Unmatched);
+    };
+    let order = orders::fetch(conn, ent.order_id).await?;
+    if ent.status != "active" || !ent.renews {
+        return Ok(ApplyOutcome::Unchanged(order));
+    }
+    // Stripe does not order events: a failure delivered after the same
+    // invoice's payment was applied is stale.
+    let paid: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM entitlement_renewals WHERE provider = $1 AND invoice_id = $2)",
+    )
+    .bind(event.provider())
+    .bind(invoice_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if paid {
+        return Ok(ApplyOutcome::Unchanged(order));
+    }
+    let recorded: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE entitlements \
+         SET renewal_failed_at = coalesce(to_timestamp($2::bigint), now()), updated_at = now() \
+         WHERE id = $1 AND renewal_failed_at IS NULL RETURNING id",
+    )
+    .bind(ent.id)
+    .bind(event.occurred_at())
+    .fetch_optional(&mut *conn)
+    .await?;
+    if recorded.is_none() {
+        return Ok(ApplyOutcome::Unchanged(order));
+    }
+    audit::record(
+        &mut *conn,
+        &AuditEntry {
+            actor: &provider_actor(event),
+            action: "entitlement.renewal_failed",
+            subject: &subject(ent.id),
+            detail: json!({ "event_id": event.id(), "invoice_id": invoice_id }),
+        },
+    )
+    .await?;
+    Ok(ApplyOutcome::Applied(order))
+}
+
+/// What a failed renewal's notice to the owners needs: the entitlement's
+/// organization, offering name and the date its grace ends (UTC).
+#[derive(Debug, Clone)]
+pub struct RenewalFailure {
+    pub organization_id: Uuid,
+    pub offering_name: String,
+    pub grace_ends: Date,
+}
+
+/// The [`RenewalFailure`] notice details of the entitlement on `provider`'s
+/// subscription `subscription_id`; `None` when there is none or it is no
+/// longer in grace.
+pub async fn renewal_failure<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    provider: &str,
+    subscription_id: &str,
+) -> Result<Option<RenewalFailure>, sqlx::Error> {
+    let row: Option<(Uuid, String, String)> = sqlx::query_as(&format!(
+        "SELECT e.organization_id, o.offering_name, \
+                to_char({LICENCE_END_SQL} AT TIME ZONE 'UTC', 'YYYY-MM-DD') \
+         FROM entitlements e JOIN orders o ON o.id = e.order_id \
+         WHERE e.provider = $1 AND e.subscription_id = $2 AND {IN_GRACE_SQL}"
+    ))
+    .bind(provider)
+    .bind(subscription_id)
+    .fetch_optional(executor)
+    .await?;
+    let Some((organization_id, offering_name, day)) = row else {
+        return Ok(None);
+    };
+    let grace_ends = Date::parse(
+        &day,
+        time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .map_err(|e| sqlx::Error::Decode(format!("grace end {day:?}: {e}").into()))?;
+    Ok(Some(RenewalFailure {
+        organization_id,
+        offering_name,
+        grace_ends,
+    }))
 }
 
 /// What [`refund`] found.
@@ -807,6 +974,14 @@ mod tests {
         assert_eq!(format_price(1234567, "BHD"), "1,234.567 BHD");
         assert_eq!(format_price(5, "KWD"), "0.005 KWD");
         assert_eq!(format_price(123456789, "GBP"), "1,234,567.89 GBP");
+    }
+
+    #[test]
+    fn the_grace_is_the_same_span_in_rust_and_sql() {
+        assert_eq!(RENEWAL_GRACE, time::Duration::hours(720));
+        assert!(LICENCE_END_SQL.contains("interval '720 hours'"));
+        assert!(!LICENCE_END_SQL.contains("days"));
+        assert!(LICENCE_END_SQL.contains("e.status = 'active' AND e.renews"));
     }
 
     #[test]

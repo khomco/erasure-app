@@ -59,6 +59,7 @@ fn chain(license_id: &str, quota: Quota, instance_key_id: &str) -> AttestationCh
         features: vec![],
         allowed_methods: wipe_license::AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     };
     AttestationChain::new(root.issue(license_id, instance_key_id, ent, now()).unwrap())
 }

@@ -11,9 +11,17 @@ function day(timestamp: string): string {
   return timestamp.slice(0, 10);
 }
 
-/** "Renews on 2027-11-08", "Ends on …", "Ended on …" or "Refunded". */
+/**
+ * "Renews on 2027-11-08", "Ends on …", "Ended on …", "Refunded", or, while a
+ * renewing subscription's renewal charge has failed, when it failed and from
+ * when new jobs will be refused (ADR-0013 §4; shown even once the paid term
+ * has ended, during the renewal grace).
+ */
 export function entitlementState(e: Entitlement): string {
   if (e.status === "refunded") return "Refunded";
+  if (e.renews && e.status === "active" && e.renewal_failed_at !== null) {
+    return `Renewal payment failed on ${day(e.renewal_failed_at)}. Update your card from Billing: new jobs will be refused from ${day(e.grace_ends ?? e.term_end)} unless it is paid.`;
+  }
   if (!e.current) return `Ended on ${day(e.term_end)}`;
   if (e.status === "cancelled") return `Cancelled; ends on ${day(e.term_end)}`;
   return e.renews ? `Renews on ${day(e.term_end)}` : `Ends on ${day(e.term_end)}, not renewing`;

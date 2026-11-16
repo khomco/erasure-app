@@ -89,6 +89,11 @@ export interface LicenseBody {
     features: string[];
     allowed_methods: { kind: string; classes?: string[] };
     machine_binding?: string;
+    /**
+     * The paid term's end on a licence carrying a renewal grace (ADR-0013
+     * §4); absent on every other licence.
+     */
+    paid_through?: string;
   };
   issued_at: string;
   /** Retired (ADR-0013 §5): parsed if present, never displayed. */
@@ -201,6 +206,7 @@ export function isLicenseBody(v: unknown): v is LicenseBody {
     isObject(e.allowed_methods) &&
     typeof e.allowed_methods.kind === "string" &&
     (e.machine_binding === undefined || typeof e.machine_binding === "string") &&
+    (e.paid_through === undefined || typeof e.paid_through === "string") &&
     (v.lapse_policy === undefined || oneOf(LAPSE_POLICIES, v.lapse_policy))
   );
 }

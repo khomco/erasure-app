@@ -148,6 +148,7 @@ fn licence(root: &wipe_license::VendorRoot, key_id: &str) -> Value {
         features: vec![],
         allowed_methods: wipe_license::AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     };
     serde_json::to_value(root.issue("lic-enrolled", key_id, ent, now).unwrap()).unwrap()
 }

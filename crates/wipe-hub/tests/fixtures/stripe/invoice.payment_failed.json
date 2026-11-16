@@ -1,0 +1,82 @@
+{
+  "id": "__EVENT_ID__",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": __CREATED__,
+  "data": {
+    "object": {
+      "id": "__INVOICE_ID__",
+      "object": "invoice",
+      "account_country": "US",
+      "account_name": "Wipestation Test",
+      "amount_due": __AMOUNT__,
+      "amount_paid": 0,
+      "amount_remaining": __AMOUNT__,
+      "attempt_count": 1,
+      "attempted": true,
+      "billing_reason": "subscription_cycle",
+      "charge": "ch_test_1",
+      "collection_method": "charge_automatically",
+      "created": 1762600000,
+      "currency": "__CURRENCY__",
+      "customer": "cus_test_1",
+      "customer_email": "buyer@example.com",
+      "customer_name": "Test Buyer",
+      "customer_address": {
+        "city": "Springfield",
+        "country": "US",
+        "line1": "1 Example Street",
+        "line2": null,
+        "postal_code": "00000",
+        "state": "IL"
+      },
+      "hosted_invoice_url": "https://invoice.stripe.com/i/test",
+      "invoice_pdf": "https://pay.stripe.com/invoice/test/pdf",
+      "lines": {
+        "object": "list",
+        "data": [
+          {
+            "id": "il_test_1",
+            "object": "line_item",
+            "amount": __AMOUNT__,
+            "currency": "__CURRENCY__",
+            "period": {
+              "start": 1762600000,
+              "end": 1794136000
+            },
+            "quantity": 1,
+            "type": "subscription"
+          }
+        ],
+        "has_more": false
+      },
+      "livemode": false,
+      "metadata": {},
+      "next_payment_attempt": 1763200000,
+      "number": "TEST-0001",
+      "paid": false,
+      "payment_intent": "pi_test_invoice",
+      "period_start": 1731024000,
+      "period_end": 1762600000,
+      "status": "open",
+      "subscription": "__SUBSCRIPTION_ID__",
+      "subscription_details": {
+        "metadata": {
+          "wipehub_hub": "__HUB__",
+          "wipehub_order_id": "__ORDER_ID__",
+          "wipehub_organization_id": "__ORGANIZATION_ID__"
+        }
+      },
+      "subtotal": __AMOUNT__,
+      "tax": null,
+      "total": __AMOUNT__
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "invoice.payment_failed"
+}

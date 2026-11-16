@@ -92,6 +92,8 @@ const entitlement: Entitlement = {
   current: true,
   cancelled_at: null,
   refunded_at: null,
+  renewal_failed_at: null,
+  grace_ends: "2027-12-08T10:01:00Z",
   credits: null,
 };
 
@@ -174,6 +176,13 @@ describe("guards", () => {
     expect(isEntitlement({ ...entitlement, renews: "yes" })).toBe(false);
     expect(isEntitlement({ ...entitlement, current: undefined })).toBe(false);
     expect(isEntitlement({ ...entitlement, refunded_at: undefined })).toBe(false);
+    expect(
+      isEntitlement({ ...entitlement, renewal_failed_at: "2027-11-08T10:05:00Z" }),
+    ).toBe(true);
+    expect(isEntitlement({ ...entitlement, grace_ends: null })).toBe(true);
+    expect(isEntitlement({ ...entitlement, renewal_failed_at: undefined })).toBe(false);
+    expect(isEntitlement({ ...entitlement, grace_ends: undefined })).toBe(false);
+    expect(isEntitlement({ ...entitlement, grace_ends: 30 })).toBe(false);
     // The credit pool: null when unlimited, every count an integer.
     const pool = { purchased: 5000, granted: 50, returned: 0, available: 4950, target_reserve: 50 };
     expect(isEntitlement({ ...entitlement, credits: pool })).toBe(true);

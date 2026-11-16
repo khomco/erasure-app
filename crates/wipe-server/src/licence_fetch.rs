@@ -7,16 +7,23 @@
 //!   holds a hub address that passes [`HubOrigin::parse`]'s rule (read each
 //!   time, so a station that enrolls from the bench app is checked from the
 //!   next round on). No address, no check and no status. A failed check is
-//!   not retried sooner: renewals arrive 30 days early (ADR-0013 §4).
+//!   not retried sooner: a licence for a renewing subscription runs 30 days
+//!   past its paid term (ADR-0013 §4), so a renewal paid on its anniversary
+//!   has that long to arrive.
 //! - **What.** [`check_once`] asks the hub for the station's latest licence,
 //!   saying which one it holds ([`HubClient::fetch_licence`], signed with the
 //!   instance key). A licence it gets is checked against
 //!   [`AppState::vendor_roots`] and this station's key only
 //!   ([`check_licence`]: the hub can never introduce a root, ADR-0008 §4)
-//!   and, only when it ends strictly later than the licence installed when
-//!   it arrives (or none is installed), installed through
-//!   [`AppState::install_license`] and, when the station keeps configuration
-//!   on disk, saved to `enrolled-licence.json` as an enrollment saves it.
+//!   and installed through [`AppState::install_license`] only when it ends
+//!   strictly later than the licence installed when it arrives (or none is
+//!   installed), or when it withdraws a renewal grace
+//!   ([`withdraws_grace`]: the installed licence carries a paid-through date,
+//!   and the fetched one ends sooner, was issued later and names the same
+//!   organization; controlled-licensing story 5). A vendor-issued or
+//!   file-installed licence without a paid-through date is never shortened
+//!   by a fetch. When the station keeps configuration on disk the installed
+//!   licence is saved to `enrolled-licence.json` as an enrollment saves it.
 //!   Nothing loads that file at start-up.
 //! - **Status.** Every check's outcome is held in [`LicenceFetchSlot`] as a
 //!   [`HubCheck`] and shown on `GET /api/license` as `hub_check`. A failure
@@ -190,26 +197,47 @@ async fn check(
         &state.vendor_roots,
     )
     .map_err(|e| not_installed(o, e))?;
-    // Only a newer licence (ADR-0008 §3). Re-read now, with no `.await`
-    // before the install: an operator may have installed a longer licence
-    // while the requests above were in flight.
-    let installed_until = state.license().entitlements().map(|e| e.not_after);
-    if let Some(until) = installed_until {
-        if licence.body.entitlements.not_after <= until {
-            return Ok(format!(
-                "Up to date: the platform at {o} offered no licence newer than this station's, \
-                 which runs until {} UTC, so nothing was installed.",
-                until.date()
-            ));
+    // Only a newer licence (ADR-0008 §3), or one withdrawing a renewal
+    // grace. Re-read now, with no `.await` before the install: an operator
+    // may have installed a longer licence while the requests above were in
+    // flight.
+    let installed = state.license();
+    let fetched_ent = &licence.body.entitlements;
+    let mut shorter = false;
+    if let Some(current) = installed.entitlements() {
+        let until = current.not_after;
+        if fetched_ent.not_after <= until {
+            shorter = withdraws_grace(
+                current,
+                installed.issued_at(),
+                fetched_ent,
+                licence.body.issued_at,
+            );
+            if !shorter {
+                return Ok(format!(
+                    "Up to date: the platform at {o} offered no licence newer than this \
+                     station's, which runs until {} UTC, so nothing was installed.",
+                    until.date()
+                ));
+            }
         }
     }
+    drop(installed);
     state.install_license(&json).map_err(|e| {
         format!("The platform at {o} sent a licence that could not be installed ({e}).")
     })?;
-    let mut message = format!(
-        "Installed a new licence from the platform at {o}, valid until {} UTC.",
-        licence.body.entitlements.not_after.date()
-    );
+    let mut message = if shorter {
+        format!(
+            "Installed a licence from the platform at {o} that ends sooner, on {} UTC: the \
+             subscription it was issued for will not renew.",
+            fetched_ent.not_after.date()
+        )
+    } else {
+        format!(
+            "Installed a new licence from the platform at {o}, valid until {} UTC.",
+            fetched_ent.not_after.date()
+        )
+    };
     if let Some(settings) = &state.settings_path {
         let path = enrolled_licence_path(settings);
         match save_enrolled_licence(&path, &json) {
@@ -229,6 +257,25 @@ async fn check(
         }
     }
     Ok(message)
+}
+
+/// Whether a fetched licence ending no later than the installed one is the
+/// hub withdrawing the installed licence's renewal grace (ADR-0013 §4): the
+/// installed licence carries a paid-through date (it was issued with grace),
+/// the fetched one ends strictly sooner, was issued strictly later, and
+/// names the same organization (`customer_id`). Only grace is ever
+/// withdrawn this way: a licence without a paid-through date (vendor-issued,
+/// installed from a file, or with no grace) is never shortened by a fetch.
+pub fn withdraws_grace(
+    installed: &wipe_license::Entitlements,
+    installed_issued_at: Option<OffsetDateTime>,
+    fetched: &wipe_license::Entitlements,
+    fetched_issued_at: OffsetDateTime,
+) -> bool {
+    installed.paid_through.is_some()
+        && fetched.not_after < installed.not_after
+        && installed_issued_at.is_some_and(|at| fetched_issued_at > at)
+        && fetched.customer_id == installed.customer_id
 }
 
 /// Why a fetched licence was not installed, worded for the bench.

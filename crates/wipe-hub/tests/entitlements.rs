@@ -168,12 +168,14 @@ async fn buying_an_annual_offering_shows_one_available_seat() {
             "cancelled_at",
             "credits",
             "current",
+            "grace_ends",
             "grants",
             "id",
             "interval",
             "offering_name",
             "order_id",
             "refunded_at",
+            "renewal_failed_at",
             "renews",
             "status",
             "term_end",
@@ -191,6 +193,19 @@ async fn buying_an_annual_offering_shows_one_available_seat() {
     assert!(e["term_end"].as_str().unwrap().ends_with('Z'));
     assert_eq!(e["cancelled_at"], Value::Null);
     assert_eq!(e["refunded_at"], Value::Null);
+    // Renewing: its licences carry the 30-day renewal grace.
+    assert_eq!(e["renewal_failed_at"], Value::Null);
+    let term_end = time::OffsetDateTime::parse(
+        e["term_end"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    let grace_ends = time::OffsetDateTime::parse(
+        e["grace_ends"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    assert_eq!(grace_ends - term_end, time::Duration::days(30));
     // Unlimited: no credit pool.
     assert_eq!(e["credits"], Value::Null);
 

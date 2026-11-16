@@ -132,6 +132,8 @@ describe("LicenceStatus", () => {
     operator_message: "Licensed - unlimited, 300 days left",
     customer: { id: "c", name: "Acme Recycling" },
     not_after: "2027-09-06T12:00:00Z",
+    paid_through: null,
+    renewal_overdue: null,
     instance_public_key_id: "ed25519:k",
     new_jobs_refused: null,
     simulated_backend: true,
@@ -142,6 +144,19 @@ describe("LicenceStatus", () => {
     const html = renderToStaticMarkup(createElement(LicenceStatus, { info }));
     expect(html).toContain("Licensed - unlimited, 300 days left");
     expect(html).toContain("Acme Recycling");
+    expect(html).toContain("2027-09-06 UTC");
+  });
+
+  it("shows the paid-through date beside the expiry only when the licence has one", () => {
+    expect(renderToStaticMarkup(createElement(LicenceStatus, { info }))).not.toContain(
+      "Paid through",
+    );
+    const html = renderToStaticMarkup(
+      createElement(LicenceStatus, {
+        info: { ...info, paid_through: "2027-08-07T12:00:00Z" },
+      }),
+    );
+    expect(html.replace(/<[^>]+>/g, "")).toContain("Paid through 2027-08-07 UTC");
     expect(html).toContain("2027-09-06 UTC");
   });
 

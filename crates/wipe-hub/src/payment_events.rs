@@ -9,13 +9,25 @@
 //! are stored, never the payload, which carries the buyer's personal data.
 //!
 //! Both the webhook (`POST /api/payments/webhook`) and the Fake provider's
-//! pay and abandon routes go through [`receive`].
+//! pay, abandon, renew and cancel routes go through [`receive`].
+//!
+//! **Renewal grace** (controlled-licensing story 5, ADR-0013 §4): when an
+//! applied event stops a subscription renewing (a cancellation at period
+//! end) or ends it, [`receive`] withdraws the grace from the licences of the
+//! entitlement's unreleased stations in the same transaction
+//! ([`stations::withdraw_grace_for_subscription`]), so the change and the
+//! reissued licences commit, and are audited, together. Without a vendor
+//! root it logs a warning and the event still applies: each station's next
+//! licence fetch withdraws the grace then ([`crate::station_link`]).
 
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgConnection;
 
+use wipe_license::VendorRoot;
+
 use crate::orders::{self, ApplyError, ApplyOutcome};
 use crate::payments::{EventKind, VerifiedEvent};
+use crate::stations;
 
 /// What [`receive`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +53,12 @@ pub enum Receipt {
 /// 1. `INSERT … ON CONFLICT DO NOTHING` on `(provider, event id)`; a
 ///    conflict is [`Receipt::Duplicate`] and writes nothing more.
 /// 2. [`orders::apply_event`].
-/// 3. Set the stored `outcome`, once.
+/// 3. When it is [`ApplyOutcome::Applied`] and stops the subscription
+///    renewing ([`EventKind::RenewalChanged`] with `renews: false`) or ends
+///    it ([`EventKind::SubscriptionEnded`]), withdraw the renewal grace of
+///    its stations' licences with `root`, actor `provider:<name>`; with no
+///    `root`, warn and skip.
+/// 4. Set the stored `outcome`, once.
 ///
 /// A completed event that matches no order, or a renewal payment, renewal
 /// change or subscription end that matches no entitlement for an order that
@@ -51,6 +68,7 @@ pub async fn receive(
     conn: &mut PgConnection,
     event: &VerifiedEvent,
     raw_body: &[u8],
+    root: Option<&VendorRoot>,
 ) -> Result<Receipt, ApplyError> {
     let digest = hex::encode(Sha256::digest(raw_body));
     let stored = sqlx::query(
@@ -72,6 +90,45 @@ pub async fn receive(
     if outcome == ApplyOutcome::Unmatched && waits_for_its_order(&mut *conn, event).await? {
         return Ok(Receipt::NotReady);
     }
+    if matches!(outcome, ApplyOutcome::Applied(_)) {
+        let ended = match event.kind() {
+            EventKind::RenewalChanged {
+                subscription_id,
+                renews: false,
+            }
+            | EventKind::SubscriptionEnded { subscription_id } => Some(subscription_id),
+            _ => None,
+        };
+        if let Some(subscription_id) = ended {
+            match root {
+                Some(root) => {
+                    let withdrawn = stations::withdraw_grace_for_subscription(
+                        &mut *conn,
+                        root,
+                        event.provider(),
+                        subscription_id,
+                        &format!("provider:{}", event.provider()),
+                    )
+                    .await?;
+                    tracing::info!(
+                        provider = event.provider(),
+                        event_id = event.id(),
+                        subscription_id = %subscription_id,
+                        withdrawn,
+                        "renewal grace withdrawn from the subscription's station licences"
+                    );
+                }
+                None => tracing::warn!(
+                    provider = event.provider(),
+                    event_id = event.id(),
+                    subscription_id = %subscription_id,
+                    "this subscription will not renew, but this hub has no vendor root to \
+                     reissue its stations' licences without renewal grace; each station's next \
+                     licence fetch on a hub with a vendor root withdraws it"
+                ),
+            }
+        }
+    }
     sqlx::query(
         "UPDATE payment_events SET outcome = $3 \
          WHERE provider = $1 AND event_id = $2 AND outcome IS NULL",
@@ -89,7 +146,8 @@ pub async fn receive(
 /// `wipehub_order_id` metadata with this hub's origin), and be:
 ///
 /// - a completed checkout (story 3's rule), or
-/// - a renewal payment, renewal change or subscription end whose order can
+/// - a renewal payment, failed renewal, renewal change or subscription end
+///   whose order can
 ///   still be paid (decision 7): no order with that id exists yet, or it is
 ///   `pending` and no stored payment event for its checkout session was a
 ///   `mismatch`. An order that expired, was refunded, or stays pending after
@@ -106,6 +164,7 @@ async fn waits_for_its_order(
     match event.kind() {
         EventKind::CheckoutCompleted { .. } => Ok(true),
         EventKind::RenewalPaid { .. }
+        | EventKind::RenewalFailed { .. }
         | EventKind::RenewalChanged { .. }
         | EventKind::SubscriptionEnded { .. } => {
             // Any organization's order: the reference is the hub's own.

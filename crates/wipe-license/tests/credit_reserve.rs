@@ -33,6 +33,7 @@ fn pool(customer_id: &str) -> Entitlements {
         features: vec![],
         allowed_methods: AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     }
 }
 

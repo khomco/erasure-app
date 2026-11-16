@@ -17,6 +17,8 @@ const base: Entitlement = {
   current: true,
   cancelled_at: null,
   refunded_at: null,
+  renewal_failed_at: null,
+  grace_ends: "2027-12-08T10:00:00Z",
   credits: null,
 };
 
@@ -57,6 +59,24 @@ describe("entitlementState", () => {
 
   it("says a renewing entitlement renews at its term end", () => {
     expect(entitlementState(base)).toBe("Renews on 2027-11-08");
+  });
+
+  it("says a failed renewal payment, and from when new jobs are refused", () => {
+    const failed = "Renewal payment failed on 2027-11-08. Update your card from Billing: new jobs will be refused from 2027-12-08 unless it is paid.";
+    expect(entitlementState({ ...base, renewal_failed_at: "2027-11-08T10:05:00Z" })).toBe(failed);
+    // Still said once the paid term has ended, during the grace.
+    expect(
+      entitlementState({ ...base, current: false, renewal_failed_at: "2027-11-08T10:05:00Z" }),
+    ).toBe(failed);
+    // Not once it stops renewing.
+    expect(
+      entitlementState({
+        ...base,
+        renews: false,
+        grace_ends: null,
+        renewal_failed_at: "2027-11-08T10:05:00Z",
+      }),
+    ).toBe("Ends on 2027-11-08, not renewing");
   });
 
   it("says an active entitlement that will not renew ends", () => {

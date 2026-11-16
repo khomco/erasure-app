@@ -252,7 +252,7 @@ async fn a_renewal_is_reissued_by_the_station_and_audited_with_it_as_actor() {
     // The station keeps its registration and seat.
     assert_eq!(f.hub.count("stations").await, seats_used);
     let (status, not_after_matches): (String, bool) = sqlx::query_as(
-        "SELECT l.status, l.not_after = e.term_end FROM licences l \
+        "SELECT l.status, l.not_after = e.term_end + interval '720 hours' FROM licences l \
          JOIN entitlements e ON e.id = l.entitlement_id WHERE l.id = $1::uuid",
     )
     .bind(&new)

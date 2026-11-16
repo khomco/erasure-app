@@ -75,6 +75,7 @@ pub const CHECKOUT_SESSION_ASYNC_SUCCEEDED: &str = "checkout.session.async_payme
 pub const CHECKOUT_SESSION_ASYNC_FAILED: &str = "checkout.session.async_payment_failed";
 pub const CHECKOUT_SESSION_EXPIRED: &str = "checkout.session.expired";
 pub const INVOICE_PAID: &str = "invoice.paid";
+pub const INVOICE_PAYMENT_FAILED: &str = "invoice.payment_failed";
 pub const CUSTOMER_SUBSCRIPTION_UPDATED: &str = "customer.subscription.updated";
 pub const CUSTOMER_SUBSCRIPTION_DELETED: &str = "customer.subscription.deleted";
 pub const CHARGE_REFUNDED: &str = "charge.refunded";
@@ -574,6 +575,10 @@ fn amount_of(minor: &Value, currency: &Value) -> Option<(i64, String)> {
 ///   neither subscription is ignored and logged at error; any other
 ///   `invoice.paid` is ignored (the first invoice is paid through the
 ///   checkout).
+/// - `invoice.payment_failed` with `billing_reason=subscription_cycle` is
+///   [`EventKind::RenewalFailed`] at the event's `created`, its subscription,
+///   invoice and order read exactly as `invoice.paid` reads them; any other
+///   failed invoice is ignored.
 /// - `customer.subscription.updated` is [`EventKind::RenewalChanged`], renewing
 ///   unless `cancel_at_period_end` or `cancel_at` is set, at the event's
 ///   `created`; `customer.subscription.deleted` is
@@ -615,7 +620,9 @@ fn parse_event(body: &[u8], hub_origin: &str) -> Result<VerifiedEvent, ProviderE
                 _ => ignored(),
             }
         }
-        INVOICE_PAID if o["billing_reason"].as_str() == Some(BILLING_REASON_CYCLE) => {
+        t @ (INVOICE_PAID | INVOICE_PAYMENT_FAILED)
+            if o["billing_reason"].as_str() == Some(BILLING_REASON_CYCLE) =>
+        {
             // API 2024-06-20 puts the subscription at the top level; newer
             // versions under `parent.subscription_details` (decision 9).
             let parent = &o["parent"]["subscription_details"];
@@ -624,10 +631,11 @@ fn parse_event(body: &[u8], hub_origin: &str) -> Result<VerifiedEvent, ProviderE
             else {
                 tracing::error!(
                     event_id = %event.id,
+                    event_type = %event.event_type,
                     invoice_id = ?id_of(&o["id"]),
-                    "a paid renewal invoice names no subscription (neither `subscription` nor \
-                     `parent.subscription_details.subscription`); the renewal is ignored and \
-                     its year not granted"
+                    "a renewal invoice names no subscription (neither `subscription` nor \
+                     `parent.subscription_details.subscription`); the event is ignored, so a \
+                     paid renewal's year is not granted and a failed one is not recorded"
                 );
                 return VerifiedEvent::new(
                     event.id.clone(),
@@ -646,9 +654,17 @@ fn parse_event(body: &[u8], hub_origin: &str) -> Result<VerifiedEvent, ProviderE
             fields.customer_id = id_of(&o["customer"]);
             fields.order_ref = order_ref_of(&o["subscription_details"]["metadata"], hub_origin)
                 .or_else(|| order_ref_of(&parent["metadata"], hub_origin));
-            EventKind::RenewalPaid {
-                subscription_id,
-                invoice_id,
+            if t == INVOICE_PAID {
+                EventKind::RenewalPaid {
+                    subscription_id,
+                    invoice_id,
+                }
+            } else {
+                fields.occurred_at = event.created;
+                EventKind::RenewalFailed {
+                    subscription_id,
+                    invoice_id,
+                }
             }
         }
         CUSTOMER_SUBSCRIPTION_UPDATED | CUSTOMER_SUBSCRIPTION_DELETED => {
@@ -1272,6 +1288,52 @@ mod tests {
                 event_type: INVOICE_PAID.into()
             }
         );
+    }
+
+    #[test]
+    fn a_failed_renewal_invoice_is_renewal_failed() {
+        let ev = event_at(INVOICE_PAYMENT_FAILED, 1_800_000_000, renewal_invoice()).unwrap();
+        assert_eq!(
+            ev.kind(),
+            &EventKind::RenewalFailed {
+                subscription_id: "sub_test_1".into(),
+                invoice_id: "in_test_1".into()
+            }
+        );
+        assert_eq!(ev.order_ref(), Some(Uuid::parse_str(ORDER).unwrap()));
+        assert_eq!(ev.occurred_at(), Some(1_800_000_000));
+        assert_eq!(ev.event_type(), INVOICE_PAYMENT_FAILED);
+        // The newer parent shape, read as `invoice.paid` reads it.
+        let ev = event_at(INVOICE_PAYMENT_FAILED, 1, parent_renewal_invoice()).unwrap();
+        assert_eq!(
+            ev.kind(),
+            &EventKind::RenewalFailed {
+                subscription_id: "sub_test_1".into(),
+                invoice_id: "in_test_1".into()
+            }
+        );
+        assert_eq!(ev.order_ref(), Some(Uuid::parse_str(ORDER).unwrap()));
+        // A failed first invoice, or one naming no subscription, is ignored.
+        let ignored = EventKind::Ignored {
+            event_type: INVOICE_PAYMENT_FAILED.into(),
+        };
+        for (field, value) in [
+            ("billing_reason", json!("subscription_create")),
+            ("billing_reason", Value::Null),
+            ("subscription", Value::Null),
+        ] {
+            let mut inv = renewal_invoice();
+            inv[field] = value.clone();
+            assert_eq!(
+                event_at(INVOICE_PAYMENT_FAILED, 1, inv).unwrap().kind(),
+                &ignored,
+                "{field} {value}"
+            );
+        }
+        // A failed renewal invoice without an id is refused.
+        let mut inv = renewal_invoice();
+        inv["id"] = Value::Null;
+        assert!(event_at(INVOICE_PAYMENT_FAILED, 1, inv).is_err());
     }
 
     #[test]

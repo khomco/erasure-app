@@ -318,6 +318,10 @@ async fn a_vendor_issued_machine_licence_installs_and_uses_no_seat() {
     assert_eq!(ent.not_before, body.issued_at);
     assert!(body.issued_at >= before - time::Duration::seconds(1));
     assert_eq!(ent.not_after, body.issued_at + time::Duration::days(30));
+    // A vendor-issued licence never carries renewal grace (ADR-0013 §4): no
+    // paid-through date, and none in the stored file.
+    assert_eq!(ent.paid_through, None);
+    assert!(!file.contains("paid_through"), "{file}");
     assert_eq!(body.issued_at.nanosecond() % 1_000, 0);
     let now = OffsetDateTime::now_utc();
     assert!(matches!(
@@ -563,6 +567,7 @@ async fn without_a_vendor_root_issue_is_503_but_view_and_inspect_work() {
                 features: vec![],
                 allowed_methods: AllowedMethods::All,
                 machine_binding: None,
+                paid_through: None,
             },
             now,
         )

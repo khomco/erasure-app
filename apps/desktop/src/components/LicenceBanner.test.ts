@@ -26,6 +26,8 @@ function info(over: Partial<LicenseInfo>): LicenseInfo {
     operator_message: UNLICENSED_MESSAGE,
     customer: null,
     not_after: null,
+    paid_through: null,
+    renewal_overdue: null,
     instance_public_key_id: null,
     new_jobs_refused: null,
     simulated_backend: true,

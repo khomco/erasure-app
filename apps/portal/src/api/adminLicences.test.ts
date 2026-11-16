@@ -139,6 +139,14 @@ describe("guards", () => {
     expect(
       isLicenseBody({ ...body, entitlements: { ...body.entitlements, quota: { kind: "pool" } } }),
     ).toBe(true);
+    // A licence with renewal grace carries its paid-through date; others omit it.
+    expect("paid_through" in body.entitlements).toBe(false);
+    expect(
+      isLicenseBody({
+        ...body,
+        entitlements: { ...body.entitlements, paid_through: "2027-11-08T10:00:00Z" },
+      }),
+    ).toBe(true);
     // No lapse policy on the record (retired, ADR-0013 §5); an old file's is still parsed.
     expect("lapse_policy" in vendorLicence).toBe(false);
     expect(isAdminLicence({ ...vendorLicence, lapse_policy: "stop" })).toBe(true);
@@ -160,6 +168,12 @@ describe("guards", () => {
       isLicenseBody({ ...body, entitlements: { ...body.entitlements, quota: { kind: "credits" } } }),
     ).toBe(false);
     expect(isLicenseBody({ ...body, license_id: 7 })).toBe(false);
+    expect(
+      isLicenseBody({ ...body, entitlements: { ...body.entitlements, paid_through: 0 } }),
+    ).toBe(false);
+    expect(
+      isLicenseBody({ ...body, entitlements: { ...body.entitlements, paid_through: null } }),
+    ).toBe(false);
     expect(isLicenseBody({ ...body, lapse_policy: "sometimes" })).toBe(false);
     expect(
       isInspected({ body, verification: { ...verified, status: "maybe" }, licence: null }),

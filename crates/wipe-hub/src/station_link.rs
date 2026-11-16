@@ -15,11 +15,19 @@
 //!   fetch is [`Fetch::Ambiguous`] (the hub never guesses an organization).
 //!   No match is [`Fetch::NotFound`]. Then, in this order:
 //!   - `renewal_available` (entitlement current, latest licence active and
-//!     ending before the term): reissued through [`stations::reissue`], the
-//!     owner's path, with actor `station:<station uuid>`, and the new licence
-//!     returned. The station row lock serializes concurrent fetches, so one
-//!     renewal is reissued once. Without a vendor root nothing is reissued
-//!     and the fetch goes on as below.
+//!     ending before the end its entitlement now gives: the term, plus the
+//!     renewal grace while it renews): reissued through [`stations::reissue`],
+//!     the owner's path, with actor `station:<station uuid>`, and the new
+//!     licence returned. The station row lock serializes concurrent fetches,
+//!     so one renewal is reissued once. Without a vendor root nothing is
+//!     reissued and the fetch goes on as below.
+//!   - the latest licence carries a renewal grace that is no longer due (the
+//!     subscription was cancelled or ended while this hub had no vendor root,
+//!     or the station row was busy when it was applied): the grace is
+//!     withdrawn through [`stations::withdraw_grace`] (actor `station:<station
+//!     uuid>`, controlled-licensing story 5) and the trimmed licence, ending
+//!     at the paid term, returned. Without a vendor root the fetch goes on as
+//!     below.
 //!   - the latest licence is not `active` (revoked, superseded by release, or
 //!     none): [`Fetch::Current`], nothing new (revocation distribution is
 //!     A2.3, still open).
@@ -27,7 +35,7 @@
 //!   - otherwise the latest active licence (an owner reissued it, or the
 //!     station holds none): [`Fetch::Licence`].
 //!
-//!   Only a reissue writes or audits anything.
+//!   Only a reissue or a withdrawal writes or audits anything.
 //! - **Top-up** ([`top_up`], controlled-licensing story 4, ADR-0013 §3): the
 //!   same station lookup and locks as the fetch, then its entitlement locked
 //!   `FOR UPDATE` (station → entitlement, the order every path takes). A
@@ -88,7 +96,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use crate::audit::{self, AuditEntry};
 use crate::credits;
 use crate::stations::{
-    self, StationError, ENTITLEMENT_CURRENT, LATEST_LICENCE, LICENCE_BEHIND_TERM,
+    self, StationError, ENTITLEMENT_CURRENT, LATEST_LICENCE, LICENCE_BEHIND_TERM, LICENCE_PAST_END,
 };
 use crate::throttle;
 
@@ -247,6 +255,8 @@ struct LatestState {
     status: Option<String>,
     document: Option<String>,
     renewal_available: bool,
+    /// The latest licence carries a renewal grace that is no longer due.
+    past_end: bool,
 }
 
 /// Find the unreleased station with instance key `key_id` (choosing by
@@ -274,7 +284,8 @@ pub async fn fetch_licence(
     let latest: LatestState = sqlx::query_as(&format!(
         "SELECT l.id AS licence_id, l.status, l.document, \
                 COALESCE({ENTITLEMENT_CURRENT} AND {LICENCE_BEHIND_TERM}, false) \
-                    AS renewal_available \
+                    AS renewal_available, \
+                COALESCE({LICENCE_PAST_END}, false) AS past_end \
          FROM stations s \
          JOIN entitlements e ON e.id = s.entitlement_id \
          {LATEST_LICENCE} \
@@ -309,6 +320,26 @@ pub async fn fetch_licence(
             "a renewal is waiting for this station, but this hub has no vendor root to reissue \
              its licence"
         );
+    }
+    if latest.past_end {
+        if let Some(root) = root {
+            if let Some(trimmed) =
+                stations::withdraw_grace(conn, root, station, &station_actor(station)).await?
+            {
+                let document: String =
+                    sqlx::query_scalar("SELECT document FROM licences WHERE id = $1")
+                        .bind(trimmed.id)
+                        .fetch_one(&mut *conn)
+                        .await?;
+                return parse(trimmed.id, &document).map(Fetch::Licence);
+            }
+        } else {
+            tracing::warn!(
+                station = %station,
+                "this station's licence carries a renewal grace its subscription no longer \
+                 has, but this hub has no vendor root to reissue it"
+            );
+        }
     }
     let (Some(id), Some("active"), Some(document)) = (
         latest.licence_id,

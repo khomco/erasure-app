@@ -105,6 +105,11 @@ export function LicenceStatus({ info, error }: { info?: LicenseInfo; error?: boo
   }
   if (!info) return <div className="card text-sm text-slate-400">Loading…</div>;
   const expiry = info.not_after ? /^\d{4}-\d{2}-\d{2}/.exec(info.not_after)?.[0] : null;
+  // The signed end of the paid term on a licence with renewal grace
+  // (ADR-0013 §4): when renewal is due, beside when the licence ends.
+  const paidThrough = info.paid_through
+    ? /^\d{4}-\d{2}-\d{2}/.exec(info.paid_through)?.[0]
+    : null;
   return (
     <div className="card space-y-1 text-sm">
       <div className="label">Licence status</div>
@@ -117,6 +122,11 @@ export function LicenceStatus({ info, error }: { info?: LicenseInfo; error?: boo
       {expiry && (
         <p className="text-slate-400">
           Expires <span className="text-slate-200">{expiry} UTC</span>
+        </p>
+      )}
+      {paidThrough && (
+        <p className="text-slate-400">
+          Paid through <span className="text-slate-200">{paidThrough} UTC</span>
         </p>
       )}
       {info.hub_check && <HubCheckLine check={info.hub_check} />}

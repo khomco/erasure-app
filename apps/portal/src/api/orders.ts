@@ -108,6 +108,17 @@ export interface Entitlement {
   cancelled_at: string | null;
   refunded_at: string | null;
   /**
+   * When the first renewal charge since the last paid renewal failed; null
+   * when none has (a paid renewal clears it).
+   */
+  renewal_failed_at: string | null;
+  /**
+   * While it renews: `term_end` plus the 30-day renewal grace, when its
+   * station licences end and new jobs will be refused unless the renewal is
+   * paid (ADR-0013 §4). Null otherwise.
+   */
+  grace_ends: string | null;
+  /**
    * The organization's credit pool for an entitlement with an erasure quota
    * (ADR-0013 §3); `null` when it is unlimited.
    */
@@ -210,6 +221,8 @@ export function isEntitlement(v: unknown): v is Entitlement {
     typeof v.current === "boolean" &&
     isNullableString(v.cancelled_at) &&
     isNullableString(v.refunded_at) &&
+    isNullableString(v.renewal_failed_at) &&
+    isNullableString(v.grace_ends) &&
     (v.credits === null || isCreditPool(v.credits))
   );
 }

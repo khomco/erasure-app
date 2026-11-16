@@ -36,6 +36,7 @@ fn entitlements() -> Entitlements {
         features: vec![],
         allowed_methods: AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     }
 }
 

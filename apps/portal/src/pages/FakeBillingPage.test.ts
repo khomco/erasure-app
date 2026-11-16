@@ -18,6 +18,8 @@ const renewing: Entitlement = {
   current: true,
   cancelled_at: null,
   refunded_at: null,
+  renewal_failed_at: null,
+  grace_ends: null,
   credits: null,
 };
 

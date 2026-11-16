@@ -20,22 +20,36 @@
 //!   (credits come from grants out of the organization's pool, ADR-0013 §3,
 //!   controlled-licensing story 4), the features its feature
 //!   names, every method is allowed, `not_before` = `issued_at` = now and
-//!   `not_after` = the entitlement's `term_end`. A machine entitlement's
+//!   `not_after` = the entitlement's `term_end`. While the entitlement is
+//!   `active` and renews (an annual subscription), `not_after` is `term_end`
+//!   plus the 30-day renewal grace ([`crate::entitlements::RENEWAL_GRACE`],
+//!   ADR-0013 §4) and the signed `paid_through` is `term_end`; every other
+//!   station licence has no `paid_through`. A machine entitlement's
 //!   licence names `machine_fingerprint(station_id)` (the bench's
 //!   `--station-id`); a site entitlement's names the entered site, or the
 //!   organization id when none was entered.
 //! - **Renewal reissue** ([`reissue`], licence-delivery story 2, CAP-3): when
-//!   a paid renewal moves an entitlement's `term_end` past the end of a
-//!   station's active licence, the station shows `renewal_available` and an
+//!   a paid renewal moves an entitlement's `term_end` (or a resumed renewal
+//!   restores the grace) past the end of a station's active licence
+//!   ([`LICENCE_BEHIND_TERM`]), the station shows `renewal_available` and an
 //!   owner asks for a renewed licence, or a connected station fetches it
 //!   ([`crate::station_link`], station-enrollment story 5: the same path,
 //!   audited with actor `station:<id>`). With the station and its entitlement
 //!   locked `FOR UPDATE`, the hub supersedes the old licence (`licence.superseded
 //!   {instance_key_id, reason: "renewed", superseded_by}`) and signs a new one
-//!   for the same key, scope, quota and features to the new `term_end`
+//!   for the same key, scope, quota and features to the new end
 //!   (`licence.issued` with `reissue_of`). The station keeps its seat and
-//!   registration. Nothing is reissued by the payment path itself: a missing
-//!   vendor root can never make a renewal payment fail to apply.
+//!   registration. Nothing is reissued by a renewal payment itself: a
+//!   missing vendor root can never make a renewal payment fail to apply.
+//! - **Withdrawing grace** ([`withdraw_grace`], controlled-licensing story
+//!   5): when a subscription stops renewing or ends, a station licence that
+//!   still carries the grace ([`LICENCE_PAST_END`]) is superseded (`reason:
+//!   "grace_withdrawn"`) and reissued to end at `term_end`, with no
+//!   `paid_through` and no credit grant, possibly already ended. Run for
+//!   every station of the subscription when the event is applied
+//!   ([`withdraw_grace_for_subscription`], from
+//!   [`crate::payment_events::receive`], when the hub has a vendor root), and
+//!   by a station's own fetch as a self-heal. A refund touches no licence.
 //! - **Vendor issue** ([`vendor_issue`], licence-delivery story 3, CAP-4): a
 //!   vendor admin signs a licence for a customer organization outside any
 //!   entitlement and seat (a trial, an evaluation, a goodwill grant), with
@@ -86,6 +100,7 @@ use crate::admin::{VendorAdmin, RFC3339_UTC};
 use crate::audit::{self, AuditEntry, AuditError};
 use crate::auth::actor;
 use crate::credits::{self, CreditChoice, GrantSummary};
+use crate::entitlements::{licence_end_sql, RENEWAL_GRACE};
 use crate::licence_admin::NewVendorLicence;
 
 pub const MSG_NO_FREE_SEAT: &str = "every seat of this entitlement is in use; release a station \
@@ -192,8 +207,10 @@ pub struct Station {
     pub licence: Option<Licence>,
     /// A renewed licence can be issued: the station is not released, its
     /// entitlement is current and its latest licence is active but ends
-    /// before the entitlement's `term_end` (it was renewed). A renewal
-    /// [`reissue`] is allowed only when this is true.
+    /// before the end its entitlement now gives (`term_end`, plus the renewal
+    /// grace while it renews: it was renewed, its renewal resumed, or it was
+    /// issued before renewal grace existed). A renewal [`reissue`] is allowed
+    /// only when this is true.
     pub renewal_available: bool,
     /// The credit balance the station last reported (story 4 fills it);
     /// `None` until it reports.
@@ -285,9 +302,26 @@ pub(crate) const LATEST_LICENCE: &str = "LEFT JOIN LATERAL (SELECT * FROM licenc
                                                           issued_at DESC, id DESC \
                                                  LIMIT 1) l ON true";
 
-/// The latest licence `l` is active and ends before its entitlement `e`'s
-/// term (compared as timestamps): a renewal moved the term on.
-pub(crate) const LICENCE_BEHIND_TERM: &str = "(l.status = 'active' AND l.not_after < e.term_end)";
+/// The latest licence `l` is active and ends before the end a licence for
+/// its entitlement `e` should have now ([`crate::entitlements::LICENCE_END_SQL`]: the term, plus
+/// the renewal grace while it renews; compared as timestamps): a renewal
+/// moved the term on, a renewal was resumed, or the licence was issued
+/// without grace before renewal grace existed.
+pub(crate) const LICENCE_BEHIND_TERM: &str = concat!(
+    "(l.status = 'active' AND l.not_after < ",
+    licence_end_sql!(),
+    ")"
+);
+
+/// The latest licence `l` is active and ends after the end a licence for its
+/// not-refunded entitlement `e` should have now: it carries a renewal grace
+/// that is no longer due (the subscription was cancelled or ended).
+/// [`withdraw_grace`] reissues it to end at the paid term.
+pub(crate) const LICENCE_PAST_END: &str = concat!(
+    "(l.status = 'active' AND l.not_after > ",
+    licence_end_sql!(),
+    " AND e.status <> 'refunded')"
+);
 
 /// `SELECT … FROM stations s …`, every column of [`StationRow`] with the
 /// station's latest licence; callers add the `WHERE` on `s`.
@@ -475,8 +509,19 @@ struct LockedEntitlement {
     /// RFC 3339 UTC with microseconds: exactly the stored `term_end`.
     term_end: String,
     current: bool,
+    /// `active`, `cancelled` or `refunded`.
+    status: String,
+    renews: bool,
     /// The offering's target reserve (NULL reads as 50).
     credit_target_reserve: i64,
+}
+
+impl LockedEntitlement {
+    /// Whether its station licences carry the renewal grace
+    /// ([`crate::entitlements::IN_GRACE_SQL`]).
+    fn in_grace(&self) -> bool {
+        self.status == "active" && self.renews
+    }
 }
 
 /// RFC 3339 UTC with microseconds, so a timestamp round-trips through
@@ -488,7 +533,7 @@ fn locked_entitlement_columns() -> String {
     format!(
         "e.id, o.scope, o.seats, o.quota_erasures, o.features, \
          to_char(e.term_end AT TIME ZONE 'UTC', {RFC3339_UTC_MICROS}) AS term_end, \
-         {ENTITLEMENT_CURRENT} AS current, \
+         {ENTITLEMENT_CURRENT} AS current, e.status, e.renews, \
          COALESCE((SELECT credit_target_reserve FROM offerings WHERE id = o.offering_id), \
                   {DEFAULT_RESERVE}) AS credit_target_reserve",
         DEFAULT_RESERVE = credits::DEFAULT_TARGET_RESERVE
@@ -506,7 +551,9 @@ pub struct Registered {
 
 /// The licence's entitlements for `ent`, held by organization `org`, for a
 /// station registered with `station_id` (the bench's `--station-id`) and
-/// `site`.
+/// `site`, valid from `now` to `not_after`, with `paid_through` when it
+/// carries a renewal grace.
+#[allow(clippy::too_many_arguments)]
 fn licence_entitlements(
     ent: &LockedEntitlement,
     org_id: Uuid,
@@ -515,6 +562,7 @@ fn licence_entitlements(
     site: Option<&str>,
     now: OffsetDateTime,
     not_after: OffsetDateTime,
+    paid_through: Option<OffsetDateTime>,
 ) -> Result<Entitlements, StationError> {
     let features = ent
         .features
@@ -557,6 +605,7 @@ fn licence_entitlements(
         features,
         allowed_methods: AllowedMethods::All,
         machine_binding: None,
+        paid_through,
     })
 }
 
@@ -582,8 +631,9 @@ struct SignAndStore<'a> {
     /// The vendor admin's reason for a vendor-issued licence; `None` for a
     /// station licence.
     issue_reason: Option<&'a str>,
-    /// The `licence.issued` audit detail, without `root_key_id` and
-    /// `not_after`, which are added here.
+    /// The `licence.issued` audit detail, without `root_key_id`,
+    /// `not_after` and (for a station licence) `paid_through`, which are
+    /// added here.
     detail: Value,
 }
 
@@ -601,6 +651,7 @@ async fn sign_and_store(
 ) -> Result<Uuid, StationError> {
     let issued = req.entitlements.not_before;
     let not_after = req.entitlements.not_after;
+    let paid_through = req.entitlements.paid_through;
     let licence_id = Uuid::new_v4();
     let certificate = root
         .issue(
@@ -647,6 +698,15 @@ async fn sign_and_store(
     let mut detail = req.detail;
     detail["root_key_id"] = json!(root_key_id);
     detail["not_after"] = json!(stored_not_after);
+    if req.station.is_some() {
+        detail["paid_through"] = match paid_through {
+            Some(t) => json!(t
+                .to_offset(time::UtcOffset::UTC)
+                .format(&Rfc3339)
+                .map_err(|e| StationError::Issue(e.to_string()))?),
+            None => Value::Null,
+        };
+    }
     audit::record(
         &mut *conn,
         &AuditEntry {
@@ -679,16 +739,22 @@ struct IssueLicence<'a> {
     /// Credits to grant with it, decided by [`credits::decide`] under the
     /// entitlement lock; 0 is no grant.
     credits: i64,
+    /// Sign it to end at the paid term, without grace, even when that has
+    /// passed: only [`withdraw_grace`] sets this.
+    withdraw_grace: bool,
 }
 
 /// Sign a licence mirroring `req.ent` with `root` (`not_before` = `issued_at`
-/// = now, `not_after` = the entitlement's `term_end`), store it as the
-/// station's active licence and audit `licence.issued`, in the caller's
-/// transaction, through [`sign_and_store`], with a credit grant of
-/// `req.credits` beside it when that is > 0 ([`credits::grant`]). A term that
-/// ended between the database's clock and ours is 409
-/// [`MSG_ENTITLEMENT_NOT_CURRENT`]; the caller's transaction then rolls back
-/// whatever it wrote.
+/// = now, `not_after` = the entitlement's `term_end`, plus [`RENEWAL_GRACE`]
+/// with `paid_through` = `term_end` while the entitlement is active and
+/// renews), store it as the station's active licence and audit
+/// `licence.issued`, in the caller's transaction, through [`sign_and_store`],
+/// with a credit grant of `req.credits` beside it when that is > 0
+/// ([`credits::grant`]). A term that ended between the database's clock and
+/// ours is 409 [`MSG_ENTITLEMENT_NOT_CURRENT`]; the caller's transaction then
+/// rolls back whatever it wrote. With `req.withdraw_grace` the licence ends at
+/// `term_end` with no `paid_through`, whenever that is (the one path that may
+/// sign a licence already ended).
 async fn issue_licence(
     conn: &mut PgConnection,
     root: &VendorRoot,
@@ -700,12 +766,17 @@ async fn issue_licence(
         .fetch_one(&mut *conn)
         .await?;
     let now = now_micros()?;
-    let not_after = OffsetDateTime::parse(&ent.term_end, &Rfc3339)
+    let term_end = OffsetDateTime::parse(&ent.term_end, &Rfc3339)
         .map_err(|e| StationError::Issue(format!("term_end {:?}: {e}", ent.term_end)))?;
-    if not_after <= now {
+    if term_end <= now && !req.withdraw_grace {
         // The term ended between the database's clock and ours.
         return Err(StationError::Conflict(MSG_ENTITLEMENT_NOT_CURRENT));
     }
+    let (not_after, paid_through) = if ent.in_grace() && !req.withdraw_grace {
+        (term_end + RENEWAL_GRACE, Some(term_end))
+    } else {
+        (term_end, None)
+    };
     let entitlements = licence_entitlements(
         ent,
         req.organization_id,
@@ -714,6 +785,7 @@ async fn issue_licence(
         req.site,
         now,
         not_after,
+        paid_through,
     )?;
     let mut detail = json!({
         "station_id": req.station,
@@ -880,6 +952,7 @@ pub async fn register(
             site: new.site.as_deref(),
             reissue_of: None,
             credits,
+            withdraw_grace: false,
         },
     )
     .await?;
@@ -1023,6 +1096,7 @@ pub async fn reissue(
             site: locked.site.as_deref(),
             reissue_of: Some(old),
             credits: granted,
+            withdraw_grace: false,
         },
     )
     .await?;
@@ -1049,6 +1123,175 @@ pub async fn reissue(
         licence,
         credit_grant,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Withdrawing renewal grace
+
+/// Withdraw the renewal grace from station row `id`'s licence on behalf of
+/// `who` (`provider:<name>` when a cancellation or subscription end is
+/// applied, `station:<id>` for the station's own fetch), signing with
+/// `root`, in the caller's transaction. With the station and its entitlement
+/// locked `FOR UPDATE` (station, then entitlement): when the station is not
+/// released and its latest licence is active and ends after the end its
+/// entitlement now gives ([`LICENCE_PAST_END`]: it carries a grace that is no
+/// longer due), that licence is superseded (`licence.superseded
+/// {station_id, instance_key_id, reason: "grace_withdrawn", superseded_by}`)
+/// and a new one is signed for the same key, scope, quota and features to
+/// end at `term_end`, with no `paid_through` and no credit grant
+/// (`licence.issued {reissue_of, paid_through: null, …}`). The station keeps
+/// its seat and registration. The new licence; `None`, writing nothing, when
+/// there is no grace to withdraw.
+///
+/// The only code that may sign a licence ending at or before now: a
+/// subscription the provider ends after failed retries ends after its paid
+/// term, and connected stations must then stop starting new jobs rather than
+/// run out the grace (ADR-0013 §4).
+pub async fn withdraw_grace(
+    conn: &mut PgConnection,
+    root: &VendorRoot,
+    id: Uuid,
+    who: &str,
+) -> Result<Option<Licence>, StationError> {
+    #[derive(sqlx::FromRow)]
+    struct Withdrawn {
+        organization_id: Uuid,
+        #[sqlx(flatten)]
+        station: LockedStation,
+    }
+    let Some(locked): Option<Withdrawn> = sqlx::query_as(&format!(
+        "SELECT s.organization_id, s.released_at IS NOT NULL AS released, s.instance_key_id, \
+                s.station_id, s.site, {} \
+         FROM stations s \
+         JOIN entitlements e ON e.id = s.entitlement_id \
+         JOIN orders o ON o.id = e.order_id \
+         WHERE s.id = $1 \
+         FOR UPDATE OF s, e",
+        locked_entitlement_columns()
+    ))
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?
+    else {
+        return Ok(None);
+    };
+    if locked.station.released {
+        return Ok(None);
+    }
+    // After the lock, as in `reissue`: sees a reissue that committed while
+    // this waited.
+    let past_end: Option<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT l.id FROM stations s \
+         JOIN entitlements e ON e.id = s.entitlement_id \
+         {LATEST_LICENCE} \
+         WHERE s.id = $1 AND {LICENCE_PAST_END}"
+    ))
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(old) = past_end else {
+        return Ok(None);
+    };
+    sqlx::query_scalar::<_, Uuid>(
+        "UPDATE licences SET status = 'superseded', superseded_at = now() \
+         WHERE id = $1 AND status = 'active' RETURNING id",
+    )
+    .bind(old)
+    .fetch_one(&mut *conn)
+    .await?;
+    let st = &locked.station;
+    let (licence, _) = issue_licence(
+        conn,
+        root,
+        IssueLicence {
+            ent: &st.ent,
+            organization_id: locked.organization_id,
+            actor: who,
+            station: id,
+            instance_key_id: &st.instance_key_id,
+            station_id: st.station_id.as_deref(),
+            site: st.site.as_deref(),
+            reissue_of: Some(old),
+            credits: 0,
+            withdraw_grace: true,
+        },
+    )
+    .await?;
+    audit::record(
+        &mut *conn,
+        &AuditEntry {
+            actor: who,
+            action: "licence.superseded",
+            subject: &licence_subject(old),
+            detail: json!({
+                "station_id": id,
+                "instance_key_id": st.instance_key_id,
+                "reason": "grace_withdrawn",
+                "superseded_by": licence.id,
+            }),
+        },
+    )
+    .await?;
+    Ok(Some(licence))
+}
+
+/// [`withdraw_grace`] for every unreleased station on `provider`'s
+/// subscription `subscription_id`'s entitlement, in the caller's transaction:
+/// how many licences were reissued. Called by
+/// [`crate::payment_events::receive`] after a cancellation or subscription
+/// end is applied, while that transaction already holds the entitlement's
+/// row lock. Station rows another transaction holds (a station fetching,
+/// topping up or being reissued or released at that moment) are skipped
+/// rather than waited for, since waiting would take the locks in the reverse
+/// of the station → entitlement order and could deadlock; such a station
+/// collects its trimmed licence at its next fetch, which withdraws the grace
+/// itself ([`crate::station_link::fetch_licence`]). Each station is withdrawn
+/// in its own savepoint: a database or audit error fails the whole call (the
+/// provider retries the event), but any other error for one station (signing,
+/// unusable stored data) is logged at warn, its savepoint rolled back and the
+/// station skipped, so one bad station never stops the cancellation from
+/// being recorded; its next fetch withdraws the grace.
+pub async fn withdraw_grace_for_subscription(
+    conn: &mut PgConnection,
+    root: &VendorRoot,
+    provider: &str,
+    subscription_id: &str,
+    who: &str,
+) -> Result<usize, StationError> {
+    let stations: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT s.id FROM stations s \
+         JOIN entitlements e ON e.id = s.entitlement_id \
+         WHERE e.provider = $1 AND e.subscription_id = $2 AND s.released_at IS NULL \
+         ORDER BY s.id \
+         FOR UPDATE OF s SKIP LOCKED",
+    )
+    .bind(provider)
+    .bind(subscription_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut withdrawn = 0;
+    for station in stations {
+        let mut savepoint = sqlx::Connection::begin(&mut *conn).await?;
+        match withdraw_grace(&mut savepoint, root, station, who).await {
+            Ok(done) => {
+                savepoint.commit().await?;
+                if done.is_some() {
+                    withdrawn += 1;
+                }
+            }
+            Err(e @ (StationError::Db(_) | StationError::Audit(_))) => return Err(e),
+            Err(e) => {
+                tracing::warn!(
+                    station = %station,
+                    error = %e,
+                    "renewal grace not withdrawn from this station's licence; its next licence \
+                     fetch withdraws it"
+                );
+                savepoint.rollback().await?;
+            }
+        }
+    }
+    Ok(withdrawn)
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,6 +1499,7 @@ pub async fn vendor_issue(
         features,
         allowed_methods: AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     };
     sign_and_store(
         conn,

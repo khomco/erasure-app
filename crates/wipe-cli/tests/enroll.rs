@@ -302,6 +302,7 @@ fn licence_for_key_file(root: &wipe_license::VendorRoot) -> serde_json::Value {
         features: vec![],
         allowed_methods: wipe_license::AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     };
     let licence = root
         .issue("lic-cli", key.public_key_id(), ent, now)

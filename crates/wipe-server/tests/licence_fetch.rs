@@ -189,6 +189,34 @@ async fn closed_port() -> String {
     format!("http://{}", l.local_addr().unwrap())
 }
 
+/// A licence `root` signs for `key_id` at `issued_at` for organization
+/// `customer`, ending at `not_after`, with `paid_through`.
+fn licence_with(
+    root: &VendorRoot,
+    id: &str,
+    key_id: &str,
+    customer: &str,
+    issued_at: time::OffsetDateTime,
+    not_after: time::OffsetDateTime,
+    paid_through: Option<time::OffsetDateTime>,
+) -> Value {
+    let ent = wipe_license::Entitlements {
+        customer_id: customer.into(),
+        customer_name: "Acme Recycling".into(),
+        quota: wipe_license::Quota::Unlimited,
+        scope: wipe_license::Scope::Site {
+            site_id: "s".into(),
+        },
+        not_before: issued_at,
+        not_after,
+        features: vec![],
+        allowed_methods: wipe_license::AllowedMethods::All,
+        machine_binding: None,
+        paid_through,
+    };
+    serde_json::to_value(root.issue(id, key_id, ent, issued_at).unwrap()).unwrap()
+}
+
 fn signed_licence(root: &VendorRoot, id: &str, key_id: &str, days: i64) -> Value {
     let now = time::OffsetDateTime::now_utc();
     let ent = wipe_license::Entitlements {
@@ -203,6 +231,7 @@ fn signed_licence(root: &VendorRoot, id: &str, key_id: &str, days: i64) -> Value
         features: vec![],
         allowed_methods: wipe_license::AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     };
     serde_json::to_value(root.issue(id, key_id, ent, now).unwrap()).unwrap()
 }
@@ -241,6 +270,66 @@ async fn station(root: &VendorRoot, hub: Option<&str>) -> Station {
         wipe_engine_mock::default_devices_public(),
         MockTiming::fast(),
     ));
+    station_on(backend, root, hub).await
+}
+
+/// As [`station`], on a real (not simulated) backend.
+async fn real_station(root: &VendorRoot, hub: Option<&str>) -> Station {
+    let mock = Arc::new(MockBackend::with_catalog(
+        wipe_engine_mock::default_devices_public(),
+        MockTiming::fast(),
+    ));
+    station_on(Arc::new(RealBackend(mock)), root, hub).await
+}
+
+/// The mock underneath, reporting `is_simulated() == false`.
+struct RealBackend(Arc<MockBackend>);
+
+#[async_trait::async_trait]
+impl wipe_engine::DeviceBackend for RealBackend {
+    async fn enumerate(&self) -> wipe_common::WipeResult<Vec<wipe_common::Device>> {
+        self.0.enumerate().await
+    }
+    async fn capabilities(
+        &self,
+        id: &wipe_common::DeviceId,
+    ) -> wipe_common::WipeResult<wipe_common::Capabilities> {
+        self.0.capabilities(id).await
+    }
+    async fn unfreeze(&self, id: &wipe_common::DeviceId) -> wipe_common::WipeResult<()> {
+        self.0.unfreeze(id).await
+    }
+    async fn issue(
+        &self,
+        id: &wipe_common::DeviceId,
+        method: &wipe_common::Method,
+    ) -> wipe_common::WipeResult<wipe_engine::BackendHandle> {
+        self.0.issue(id, method).await
+    }
+    async fn poll(
+        &self,
+        handle: &wipe_engine::BackendHandle,
+    ) -> wipe_common::WipeResult<wipe_engine::BackendProgress> {
+        self.0.poll(handle).await
+    }
+    async fn cancel(&self, handle: &wipe_engine::BackendHandle) -> wipe_common::WipeResult<()> {
+        self.0.cancel(handle).await
+    }
+    async fn verify(
+        &self,
+        id: &wipe_common::DeviceId,
+        method: wipe_common::VerificationMethod,
+        samples: u32,
+    ) -> wipe_common::WipeResult<wipe_common::VerificationReport> {
+        self.0.verify(id, method, samples).await
+    }
+}
+
+async fn station_on(
+    backend: Arc<dyn wipe_engine::DeviceBackend>,
+    root: &VendorRoot,
+    hub: Option<&str>,
+) -> Station {
     let key = Arc::new(SigningKey::generate());
     let dir = tmpdir();
     let settings = dir.join("station-settings.json");
@@ -468,6 +557,128 @@ async fn a_licence_ending_no_later_than_the_installed_one_is_not_installed() {
         .unwrap()
         .join(ENROLLED_LICENCE_FILE)
         .exists());
+}
+
+/// The grace licence a renewing subscription's station holds: issued 20
+/// days ago for `org-1`, paid through 10 days from now, ending 40 days from
+/// now. Installed on `st`.
+fn install_grace_licence(st: &Station, root: &VendorRoot) -> time::OffsetDateTime {
+    let now = time::OffsetDateTime::now_utc();
+    let paid_through = now + time::Duration::days(10);
+    let grace = licence_with(
+        root,
+        "lic-grace",
+        &st.key.public_key_id(),
+        "org-1",
+        now - time::Duration::days(20),
+        paid_through + time::Duration::days(30),
+        Some(paid_through),
+    );
+    st.state
+        .install_license(&serde_json::to_string(&grace).unwrap())
+        .unwrap();
+    paid_through
+}
+
+/// AC 3 (controlled-licensing story 5): a real-backend station holding a
+/// grace licence installs the later-issued, shorter licence the hub sends
+/// when the subscription will not renew.
+#[tokio::test]
+async fn a_licence_withdrawing_the_renewal_grace_is_installed_though_it_ends_sooner() {
+    let root = root();
+    let (origin, hub) = fake_hub(vec![]).await;
+    let st = real_station(&root, Some(&origin)).await;
+    let paid_through = install_grace_licence(&st, &root);
+    let before = license_view(&st.base).await;
+    assert_eq!(st.state.license().license_id(), Some("lic-grace"));
+    assert!(before["paid_through"].is_string(), "{before}");
+    let trimmed = licence_with(
+        &root,
+        "lic-trimmed",
+        &st.key.public_key_id(),
+        "org-1",
+        time::OffsetDateTime::now_utc(),
+        paid_through,
+        None,
+    );
+    hub.lock()
+        .unwrap()
+        .answers
+        .push_back(Answer::Raw(200, json!({ "licence": trimmed })));
+
+    let check = check_once(&st.state).await.unwrap();
+    assert!(check.ok, "{check:?}");
+    assert!(
+        check.message.starts_with(&format!(
+            "Installed a licence from the platform at {origin} that ends sooner, on {} UTC: \
+             the subscription it was issued for will not renew. It is saved at ",
+            paid_through.date()
+        )),
+        "{}",
+        check.message
+    );
+    assert_eq!(st.state.license().license_id(), Some("lic-trimmed"));
+    let after = license_view(&st.base).await;
+    let not_after = time::OffsetDateTime::parse(
+        after["not_after"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    assert_eq!(not_after, paid_through);
+    assert_eq!(after["paid_through"], Value::Null);
+    assert_eq!(after["hub_check"]["message"], check.message.as_str());
+}
+
+/// A licence without a paid-through date (vendor-issued, or installed from
+/// a file) is never shortened by a fetch, and a grace licence is shortened
+/// only by a licence issued later for the same organization.
+#[tokio::test]
+async fn only_a_later_licence_for_the_same_organization_withdraws_grace() {
+    let root = root();
+    let now = time::OffsetDateTime::now_utc();
+    let (origin, hub) = fake_hub(vec![]).await;
+    let st = real_station(&root, Some(&origin)).await;
+    let key = st.key.public_key_id();
+    // `lic-old` (100 days, no paid-through date): a shorter licence issued
+    // now is not installed.
+    let shorter = licence_with(
+        &root,
+        "lic-s",
+        &key,
+        "org-1",
+        now,
+        now + time::Duration::days(50),
+        None,
+    );
+    hub.lock()
+        .unwrap()
+        .answers
+        .push_back(Answer::Raw(200, json!({ "licence": shorter })));
+    let check = check_once(&st.state).await.unwrap();
+    assert!(check.ok, "{check:?}");
+    assert!(check.message.starts_with("Up to date"), "{}", check.message);
+    assert_eq!(st.state.license().license_id(), Some("lic-old"));
+
+    let paid_through = install_grace_licence(&st, &root);
+    for (id, customer, issued_at) in [
+        // Another organization's.
+        ("lic-other-org", "org-2", now),
+        // Issued before the installed one.
+        ("lic-earlier", "org-1", now - time::Duration::days(30)),
+    ] {
+        let offered = licence_with(&root, id, &key, customer, issued_at, paid_through, None);
+        hub.lock()
+            .unwrap()
+            .answers
+            .push_back(Answer::Raw(200, json!({ "licence": offered })));
+        let check = check_once(&st.state).await.unwrap();
+        assert!(
+            check.message.starts_with("Up to date"),
+            "{id}: {}",
+            check.message
+        );
+        assert_eq!(st.state.license().license_id(), Some("lic-grace"), "{id}");
+    }
 }
 
 #[tokio::test]

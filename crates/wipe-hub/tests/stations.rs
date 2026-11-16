@@ -268,6 +268,12 @@ impl Fixture {
     }
 }
 
+/// `t` as the hub writes a `paid_through` in an audit detail.
+fn rfc3339(t: OffsetDateTime) -> String {
+    t.format(&time::format_description::well_known::Rfc3339)
+        .unwrap()
+}
+
 /// Install `file` the way `wipestation serve --license <file>
 /// --vendor-root-b64 <root>` does, on a station whose signing key is `key`.
 fn install(file: &str, key: &str, root: &VendorRoot) -> LicenseCertificate {
@@ -393,7 +399,11 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
     assert_eq!(ent.features, [Feature::HubSync, Feature::PdfCertificates]);
     assert_eq!(ent.allowed_methods, AllowedMethods::All);
     assert_eq!(ent.not_before, body.issued_at);
-    assert_eq!(ent.not_after, f.term_end(&f.machine).await);
+    // An annual subscription that renews: 30 days' grace past the paid term,
+    // which the licence records (ADR-0013 §4).
+    let term_end = f.term_end(&f.machine).await;
+    assert_eq!(ent.not_after, term_end + time::Duration::days(30));
+    assert_eq!(ent.paid_through, Some(term_end));
     let now = OffsetDateTime::now_utc();
     assert!((now - body.issued_at).whole_seconds().abs() < 60);
     let status = evaluate(
@@ -442,6 +452,7 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
             "instance_key_id": key,
             "root_key_id": f.root.public_key_id(),
             "not_after": licence["not_after"],
+            "paid_through": rfc3339(term_end),
         })
     );
     let downloaded = f.hub.audited("licence.downloaded").await;
@@ -498,7 +509,9 @@ async fn a_site_station_names_the_entered_site_or_the_organization() {
     );
     assert_eq!(ent.quota, Quota::Pool);
     assert_eq!(ent.features, [Feature::PdfCertificates]);
+    // A one-off purchase: no grace, no paid-through date.
     assert_eq!(ent.not_after, f.term_end(&f.site).await);
+    assert_eq!(ent.paid_through, None);
     let now = OffsetDateTime::now_utc();
     // A site licence binds no machine: any station id is fine. Its credits
     // are the grant beside it in the file (the pool's default 50).
@@ -1148,8 +1161,10 @@ async fn a_renewed_station_is_reissued_a_licence_to_the_new_term_end() {
     assert_eq!(cert.body.instance_public_key_id, key);
     let ent = &cert.body.entitlements;
     let old_ent = &old_cert.body.entitlements;
-    assert_eq!(ent.not_after, renewed_end);
-    assert_eq!(old_ent.not_after, term_end);
+    assert_eq!(ent.not_after, renewed_end + time::Duration::days(30));
+    assert_eq!(ent.paid_through, Some(renewed_end));
+    assert_eq!(old_ent.not_after, term_end + time::Duration::days(30));
+    assert_eq!(old_ent.paid_through, Some(term_end));
     assert_eq!(ent.not_before, cert.body.issued_at);
     assert_eq!(ent.customer_id, old_ent.customer_id);
     assert_eq!(ent.customer_name, old_ent.customer_name);
@@ -1176,9 +1191,9 @@ async fn a_renewed_station_is_reissued_a_licence_to_the_new_term_end() {
     );
     assert!(matches!(status, LeaseStatus::Valid { .. }), "{status:?}");
 
-    // After the old term end, before the new one: the renewed file is valid
-    // and the old one has expired.
-    let later = term_end + time::Duration::days(30);
+    // After the old file's grace, before the new term end: the renewed file
+    // is valid and the old one has expired.
+    let later = term_end + time::Duration::days(31);
     assert!(later < renewed_end);
     let fingerprint = machine_fingerprint("bench-1");
     let status = evaluate(Some(ent), &LeaseState::new(later), &fingerprint, later);
@@ -1214,6 +1229,7 @@ async fn a_renewed_station_is_reissued_a_licence_to_the_new_term_end() {
                 "instance_key_id": key,
                 "root_key_id": f.root.public_key_id(),
                 "not_after": licence["not_after"],
+                "paid_through": rfc3339(renewed_end),
                 "reissue_of": old,
             }),
         )

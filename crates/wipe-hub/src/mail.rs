@@ -22,6 +22,7 @@ pub const PASSWORD_RESET_SUBJECT: &str = "Reset your Wipestation password";
 pub const INVITATION_SUBJECT: &str = "You're invited to join a Wipestation organization";
 pub const LEAD_EARLY_ACCESS_SUBJECT: &str = "You're on the Wipestation early-access list";
 pub const LEAD_CONTACT_SUBJECT: &str = "We received your message to Wipestation";
+pub const RENEWAL_FAILED_SUBJECT: &str = "Your Wipestation renewal payment failed";
 
 /// The confirmation subject for a sales-lead form.
 pub fn lead_subject(kind: LeadKind) -> &'static str {
@@ -126,6 +127,27 @@ impl Mailer {
             .await
     }
 
+    /// The failed-renewal notice to an organization owner (controlled-licensing
+    /// story 5): which offering's renewal failed, that the provider retries,
+    /// that stations keep working until `grace_ends` and refuse new jobs from
+    /// then unless it is paid, and where to update the card (`seats`, the
+    /// portal's Seats page). `offering_name` is the vendor's own catalog
+    /// text, so it may appear in the body.
+    pub async fn send_renewal_failed(
+        &self,
+        to: &str,
+        offering_name: &str,
+        grace_ends: time::Date,
+        seats: &Url,
+    ) -> Result<(), MailError> {
+        self.send(
+            to,
+            RENEWAL_FAILED_SUBJECT,
+            renewal_failed_body(offering_name, grace_ends, seats),
+        )
+        .await
+    }
+
     async fn send(&self, to: &str, subject: &str, body: String) -> Result<(), MailError> {
         let to: Mailbox = to
             .parse()
@@ -150,6 +172,18 @@ fn invitation_body(organization_name: &str, inviter_name: &str, link: &Url) -> S
          {link}\n\n\
          If you did not expect this invitation, ignore this email. \
          No account is created unless you accept.\n"
+    )
+}
+
+fn renewal_failed_body(offering_name: &str, grace_ends: time::Date, seats: &Url) -> String {
+    let date = crate::entitlements::format_date(grace_ends);
+    format!(
+        "The renewal payment for your Wipestation subscription to {offering_name} failed.\n\n\
+         Our payment provider will retry it. Your stations keep working until {date}, \
+         when new jobs start to be refused unless the renewal is paid.\n\n\
+         To update your card, sign in to the Wipestation portal and open Billing:\n\n\
+         {seats}\n\n\
+         If you have already updated your card, you can ignore this email.\n"
     )
 }
 
@@ -199,6 +233,33 @@ mod tests {
             lead_subject(LeadKind::EarlyAccess),
             lead_subject(LeadKind::Contact)
         );
+    }
+
+    #[test]
+    fn renewal_failed_body_names_the_offering_dates_and_link() {
+        let seats = Url::parse("http://127.0.0.1:7900/seats").unwrap();
+        let body = renewal_failed_body(
+            "Annual station",
+            time::macros::date!(2027 - 12 - 08),
+            &seats,
+        );
+        assert!(
+            body.contains(
+                "renewal payment for your Wipestation subscription to Annual station failed"
+            ),
+            "{body}"
+        );
+        assert!(body.contains("will retry it"), "{body}");
+        assert!(
+            body.contains(
+                "Your stations keep working until 8 December 2027, when new jobs start to be \
+                 refused unless the renewal is paid."
+            ),
+            "{body}"
+        );
+        assert_eq!(body.matches("8 December 2027").count(), 1, "{body}");
+        assert!(body.contains("http://127.0.0.1:7900/seats"), "{body}");
+        assert!(body.contains("Billing"), "{body}");
     }
 
     #[test]

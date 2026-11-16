@@ -57,6 +57,7 @@ fn licence(root: &VendorRoot, key: &str) -> LicenseCertificate {
             features: vec![],
             allowed_methods: AllowedMethods::All,
             machine_binding: None,
+            paid_through: None,
         },
         now(),
     )

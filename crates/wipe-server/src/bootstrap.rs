@@ -986,6 +986,7 @@ mod tests {
                 features: vec![],
                 allowed_methods: wipe_license::AllowedMethods::All,
                 machine_binding: None,
+                paid_through: None,
             };
             let licence = root
                 .issue("lic-rt", state.signing_key.public_key_id(), ent, now)
@@ -1125,6 +1126,7 @@ mod tests {
             features: vec![],
             allowed_methods: wipe_license::AllowedMethods::All,
             machine_binding: None,
+            paid_through: None,
         };
         let license = root.issue("lic-cli", "ed25519:test", ent, now).unwrap();
         let license_path = dir.join("licence.json");

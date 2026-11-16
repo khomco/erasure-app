@@ -14,9 +14,11 @@
 //!   order's status, and only [`crate::payment_events::receive`] calls it.
 //! - **Fulfilment**: the paid transition creates the order's one
 //!   entitlement in the same transaction ([`crate::entitlements::grant`]).
-//!   Subscription events (renewal, renewal change, end) go to
-//!   [`crate::entitlements`]; a refund marks the entitlement and the order
-//!   `refunded`. None of them touches an issued licence (ROADMAP §0.2).
+//!   Subscription events (renewal, failed renewal, renewal change, end) go
+//!   to [`crate::entitlements`]; a refund marks the entitlement and the order
+//!   `refunded`. None of them touches an issued licence here; a stopped or
+//!   ended subscription's renewal grace is withdrawn by
+//!   [`crate::payment_events::receive`] after this applies it.
 //! - **A paid event is checked against the order's snapshot**: a different
 //!   amount, currency or order reference leaves the order pending
 //!   ([`ApplyOutcome::Mismatch`]) for a human to look at.
@@ -213,6 +215,9 @@ pub enum OrderError {
     TrialTaken,
     #[error(transparent)]
     Provider(#[from] ProviderError),
+    /// As [`ApplyError::Licence`].
+    #[error("withdrawing renewal grace failed: {0}")]
+    Licence(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
@@ -224,6 +229,7 @@ impl From<ApplyError> for OrderError {
         match e {
             ApplyError::Db(e) => Self::Db(e),
             ApplyError::Audit(e) => Self::Audit(e),
+            ApplyError::Licence(why) => Self::Licence(why),
         }
     }
 }
@@ -267,6 +273,22 @@ pub enum ApplyError {
     Db(#[from] sqlx::Error),
     #[error(transparent)]
     Audit(#[from] AuditError),
+    /// Withdrawing renewal grace from a station's licence failed (signing,
+    /// or stored data unusable): the event is not stored, and the provider
+    /// retries it.
+    #[error("withdrawing renewal grace failed: {0}")]
+    Licence(String),
+}
+
+impl From<crate::stations::StationError> for ApplyError {
+    fn from(e: crate::stations::StationError) -> Self {
+        use crate::stations::StationError;
+        match e {
+            StationError::Db(e) => Self::Db(e),
+            StationError::Audit(e) => Self::Audit(e),
+            other => Self::Licence(other.to_string()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -609,9 +631,10 @@ pub async fn take_trial(
 ///   the buyer's customer stores it in `billing_customers` ([`store_customer`]):
 ///   inserted, or replacing a different stored customer; the same customer
 ///   writes nothing.
-/// - A renewal payment, a renewal change or a subscription end changes the
-///   subscription's entitlement only ([`entitlements::renew`],
-///   [`entitlements::change_renewal`], [`entitlements::end`]).
+/// - A renewal payment, a failed renewal, a renewal change or a subscription
+///   end changes the subscription's entitlement only ([`entitlements::renew`],
+///   [`entitlements::renewal_failed`], [`entitlements::change_renewal`],
+///   [`entitlements::end`]).
 /// - A full refund marks the refunded payment's entitlement `refunded`
 ///   ([`entitlements::refund`]) and then its order `paid → refunded`, audited
 ///   `order.refunded {event_id, payment_ref}`.
@@ -628,6 +651,7 @@ pub async fn apply_event(
         EventKind::RenewalPaid { .. } => return entitlements::renew(conn, event).await,
         EventKind::RenewalChanged { .. } => return entitlements::change_renewal(conn, event).await,
         EventKind::SubscriptionEnded { .. } => return entitlements::end(conn, event).await,
+        EventKind::RenewalFailed { .. } => return entitlements::renewal_failed(conn, event).await,
         EventKind::Refunded { .. } => match entitlements::refund(conn, event).await? {
             entitlements::Refund::Done(outcome) => return Ok(*outcome),
             entitlements::Refund::Order {

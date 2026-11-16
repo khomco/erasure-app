@@ -44,6 +44,7 @@ fn entitlements() -> Entitlements {
         features: vec![Feature::HubSync],
         allowed_methods: AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     }
 }
 

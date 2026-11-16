@@ -18,7 +18,10 @@
 //! Its renewal payments, renewal changes, end and refunds arrive as events
 //! too ([`EventKind::RenewalPaid`] and the others), and change entitlements
 //! through the same path. The Fake provider simulates them with
-//! [`FAKE_SUBSCRIPTION_RENEWED`] and [`FAKE_SUBSCRIPTION_CANCELLED`].
+//! [`FAKE_SUBSCRIPTION_RENEWED`] and [`FAKE_SUBSCRIPTION_CANCELLED`] (the
+//! portal's Fake billing buttons), and [`FAKE_SUBSCRIPTION_RENEWAL_FAILED`]
+//! and [`FAKE_SUBSCRIPTION_ENDED`] (posted to the webhook by tests and the
+//! local demo, controlled-licensing story 5).
 //!
 //! An order changes status only by [`apply_event`] applying a
 //! [`VerifiedEvent`], called only from [`crate::payment_events::receive`],
@@ -55,6 +58,11 @@ pub const FAKE_CHECKOUT_EXPIRED: &str = "checkout.expired";
 pub const FAKE_SUBSCRIPTION_RENEWED: &str = "subscription.renewed";
 /// A Fake subscription cancelled at period end.
 pub const FAKE_SUBSCRIPTION_CANCELLED: &str = "subscription.cancelled";
+/// A failed renewal charge of a Fake subscription (subscription and
+/// invoice).
+pub const FAKE_SUBSCRIPTION_RENEWAL_FAILED: &str = "subscription.renewal_failed";
+/// A Fake subscription the provider ended (subscription).
+pub const FAKE_SUBSCRIPTION_ENDED: &str = "subscription.ended";
 /// Prefix of Fake subscription ids.
 pub const FAKE_SUBSCRIPTION_PREFIX: &str = "fake_sub_";
 /// Prefix of Fake invoice ids.
@@ -127,6 +135,11 @@ pub enum EventKind {
     CheckoutExpired { session_id: String },
     /// A subscription's renewal invoice was paid.
     RenewalPaid {
+        subscription_id: String,
+        invoice_id: String,
+    },
+    /// A subscription's renewal charge failed (the provider retries it).
+    RenewalFailed {
         subscription_id: String,
         invoice_id: String,
     },
@@ -210,6 +223,10 @@ impl VerifiedEvent {
                 }
             }
             EventKind::RenewalPaid {
+                subscription_id,
+                invoice_id,
+            }
+            | EventKind::RenewalFailed {
                 subscription_id,
                 invoice_id,
             } => {
@@ -559,6 +576,19 @@ impl PaymentProvider for Fake {
                     renews: false,
                 }
             }
+            FAKE_SUBSCRIPTION_RENEWAL_FAILED => {
+                fields.occurred_at = Some(crate::stripe::unix_now());
+                EventKind::RenewalFailed {
+                    subscription_id: required(event.subscription_id, NO_SUBSCRIPTION)?,
+                    invoice_id: required(event.invoice_id, "the event has no invoice_id")?,
+                }
+            }
+            FAKE_SUBSCRIPTION_ENDED => {
+                fields.occurred_at = Some(crate::stripe::unix_now());
+                EventKind::SubscriptionEnded {
+                    subscription_id: required(event.subscription_id, NO_SUBSCRIPTION)?,
+                }
+            }
             _ => EventKind::Ignored {
                 event_type: event.event_type.clone(),
             },
@@ -783,12 +813,40 @@ mod tests {
             }
         );
         assert!(ev.occurred_at().is_some());
+        let (body, sig) = Fake::signed_event_with(
+            FAKE_SUBSCRIPTION_RENEWAL_FAILED,
+            None,
+            Some("fake_sub_1"),
+            Some("fake_in_2"),
+        );
+        let ev = verify(&body, Some(&sig)).unwrap();
+        assert_eq!(
+            ev.kind(),
+            &EventKind::RenewalFailed {
+                subscription_id: "fake_sub_1".into(),
+                invoice_id: "fake_in_2".into()
+            }
+        );
+        assert!(ev.occurred_at().is_some());
+        let (body, sig) =
+            Fake::signed_event_with(FAKE_SUBSCRIPTION_ENDED, None, Some("fake_sub_1"), None);
+        let ev = verify(&body, Some(&sig)).unwrap();
+        assert_eq!(
+            ev.kind(),
+            &EventKind::SubscriptionEnded {
+                subscription_id: "fake_sub_1".into()
+            }
+        );
+        assert!(ev.occurred_at().is_some());
         // Missing ids are refused.
         for (event_type, sub, invoice) in [
             (FAKE_SUBSCRIPTION_RENEWED, None, Some("fake_in_1")),
             (FAKE_SUBSCRIPTION_RENEWED, Some("fake_sub_1"), None),
             (FAKE_SUBSCRIPTION_RENEWED, Some(" "), Some("fake_in_1")),
             (FAKE_SUBSCRIPTION_CANCELLED, None, None),
+            (FAKE_SUBSCRIPTION_RENEWAL_FAILED, Some("fake_sub_1"), None),
+            (FAKE_SUBSCRIPTION_RENEWAL_FAILED, None, Some("fake_in_1")),
+            (FAKE_SUBSCRIPTION_ENDED, None, None),
         ] {
             let (body, sig) = Fake::signed_event_with(event_type, None, sub, invoice);
             assert!(

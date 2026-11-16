@@ -2295,6 +2295,7 @@ fn license_chain(not_after: time::OffsetDateTime) -> wipe_license::AttestationCh
         features: vec![],
         allowed_methods: wipe_license::AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     };
     let cert = wipe_license::VendorRoot::generate()
         .issue("lic-1", "ed25519:instance-key", ent, now)
@@ -2355,6 +2356,8 @@ async fn license_route_on_an_unlicensed_station() {
             "new_jobs_refused",
             "not_after",
             "operator_message",
+            "paid_through",
+            "renewal_overdue",
             "simulated_backend",
             "status"
         ]
@@ -2367,8 +2370,10 @@ async fn license_route_on_an_unlicensed_station() {
     for key in [
         "customer",
         "not_after",
+        "paid_through",
         "instance_public_key_id",
         "new_jobs_refused",
+        "renewal_overdue",
     ] {
         assert_eq!(view[key], json!(null), "{key}");
     }
@@ -2603,6 +2608,7 @@ fn issue_licence(
         features: vec![],
         allowed_methods: wipe_license::AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     };
     root.issue(license_id, key_id, ent, now).unwrap()
 }
@@ -3017,6 +3023,67 @@ async fn spawn_real(
     spawn_gated(false, license, vec![], Arc::new(SigningKey::generate())).await
 }
 
+/// AC 4 (controlled-licensing story 5): a real-backend station whose
+/// licence's paid-through date has passed and whose own end has not says
+/// the renewal payment is overdue, and still starts jobs; a simulated one
+/// never says new jobs will be refused.
+#[tokio::test]
+async fn an_overdue_renewal_is_shown_on_a_real_backend_and_refuses_nothing() {
+    let now = time::OffsetDateTime::now_utc();
+    let paid_through = now - time::Duration::days(2);
+    let not_after = paid_through + time::Duration::days(30);
+    let ent = wipe_license::Entitlements {
+        paid_through: Some(paid_through),
+        not_after,
+        ..gate_ent()
+    };
+    let (base, _state, _mock) = spawn_real(Some(gate_ctx(ent.clone()))).await;
+    let view = get_license(&base).await;
+    assert_eq!(
+        view["renewal_overdue"],
+        json!(format!(
+            "Renewal payment overdue since {}. New jobs will be refused from {} unless it is \
+             paid.",
+            paid_through.date(),
+            not_after.date()
+        ))
+    );
+    let shown = time::OffsetDateTime::parse(
+        view["paid_through"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    assert_eq!(shown, paid_through);
+    assert_eq!(view["new_jobs_refused"], json!(null));
+    assert_eq!(view["status"]["status"], "valid", "{view}");
+    // Payment state never refuses a start (ADR-0013 §1).
+    let client = reqwest::Client::new();
+    let job_id = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    let (status, body) = http_start(&client, &base, &job_id).await;
+    assert_eq!(status, 200, "{body}");
+
+    // Before the paid-through date: nothing overdue.
+    let ahead = wipe_license::Entitlements {
+        paid_through: Some(now + time::Duration::days(5)),
+        not_after: now + time::Duration::days(35),
+        ..gate_ent()
+    };
+    let (base, _state, _mock) = spawn_real(Some(gate_ctx(ahead))).await;
+    assert_eq!(get_license(&base).await["renewal_overdue"], json!(null));
+
+    // A simulated backend shows the date, never the refusal.
+    let (base, _state, _mock) = spawn_gated(
+        true,
+        Some(gate_ctx(ent)),
+        vec![],
+        Arc::new(SigningKey::generate()),
+    )
+    .await;
+    let view = get_license(&base).await;
+    assert_eq!(view["renewal_overdue"], json!(null));
+    assert!(view["paid_through"].is_string(), "{view}");
+}
+
 /// Valid entitlements (unlimited, every method, no binding) to adjust.
 fn gate_ent() -> wipe_license::Entitlements {
     let now = time::OffsetDateTime::now_utc();
@@ -3032,6 +3099,7 @@ fn gate_ent() -> wipe_license::Entitlements {
         features: vec![],
         allowed_methods: wipe_license::AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     }
 }
 
@@ -3269,6 +3337,7 @@ async fn each_licence_problem_refuses_with_its_own_reason() {
         (
             gate_ctx(wipe_license::Entitlements {
                 machine_binding: Some("mf1:another-bench".into()),
+                paid_through: None,
                 ..gate_ent()
             }),
             vec![

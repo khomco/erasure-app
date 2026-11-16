@@ -349,6 +349,7 @@ async fn installing_a_licence_after_construction_reaches_the_cert_generator() {
         features: vec![],
         allowed_methods: wipe_license::AllowedMethods::All,
         machine_binding: None,
+        paid_through: None,
     };
     let license = root
         .issue("lic", instance.public_key_id(), ent, now_utc())

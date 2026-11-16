@@ -714,6 +714,7 @@ mod tests {
             features: vec![],
             allowed_methods: wipe_license::AllowedMethods::All,
             machine_binding: None,
+            paid_through: None,
         };
         let cert = root.issue("l", "k", ent, now).unwrap();
         assert_eq!(verification(&cert, Some(&root)).status, "verified");

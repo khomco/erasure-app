@@ -71,7 +71,9 @@ const SIMULATED_EVALUATION_LINE =
  * refusal text verbatim. Otherwise any non-valid status shows the server's
  * `operator_message` with its consequence. A valid licence warns from
  * `EXPIRY_NOTICE_DAYS` on, says "renew now" from `EXPIRY_URGENT_DAYS`, and
- * turns to danger tone from `EXPIRY_FINAL_DAYS`.
+ * turns to danger tone from `EXPIRY_FINAL_DAYS`. A valid licence whose
+ * renewal payment is overdue (`renewal_overdue`, real backends only) says
+ * so, whatever the days left, with the same tone rule.
  */
 export function licenceBanner(info: LicenseInfo): LicenceBannerView | null {
   if (info.new_jobs_refused) {
@@ -110,8 +112,17 @@ export function licenceBanner(info: LicenseInfo): LicenceBannerView | null {
       lines: [info.operator_message, SIMULATED_EVALUATION_LINE],
     };
   }
-  if (s.days_remaining > EXPIRY_NOTICE_DAYS) return null;
   const date = expiryDate(info.not_after);
+  // Inside a renewal grace whose paid term has passed (ADR-0013 §4): the
+  // server's line says since when and from when new jobs are refused.
+  if (info.renewal_overdue) {
+    return {
+      tone: s.days_remaining <= EXPIRY_FINAL_DAYS ? "danger" : "warning",
+      heading: "Renewal payment overdue",
+      lines: [info.renewal_overdue, expiryConsequence(info, date)],
+    };
+  }
+  if (s.days_remaining > EXPIRY_NOTICE_DAYS) return null;
   return {
     tone: s.days_remaining <= EXPIRY_FINAL_DAYS ? "danger" : "warning",
     heading: expiryHeading(s.days_remaining, date),

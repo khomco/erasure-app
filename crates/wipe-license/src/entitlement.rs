@@ -147,6 +147,18 @@ pub struct Entitlements {
     /// wants it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_binding: Option<String>,
+    /// The end of the paid term when this licence carries a renewal grace
+    /// (ADR-0013 §4): the hub signs a licence for an annual subscription set
+    /// to renew to 30 days past its term, and records the term's end here so
+    /// the bench can say a renewal payment is overdue. Absent on every licence
+    /// without grace (one-off, trial, vendor-issued, cancelled), which keeps
+    /// those files byte-identical to licences signed before the field existed.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub paid_through: Option<OffsetDateTime>,
 }
 
 impl Entitlements {

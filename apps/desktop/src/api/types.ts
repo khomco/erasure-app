@@ -360,6 +360,11 @@ export interface LicenseInfo {
   operator_message: string;
   customer: LicenseCustomer | null;
   not_after: string | null;
+  /**
+   * The end of the paid term when the licence carries a renewal grace
+   * (ADR-0013 §4); null otherwise.
+   */
+  paid_through: string | null;
   instance_public_key_id: string | null;
   /**
    * Why the station's next start would be refused (ADR-0013 §1), in the
@@ -367,6 +372,12 @@ export interface LicenseInfo {
    * simulated backend.
    */
   new_jobs_refused: string | null;
+  /**
+   * While the paid-through date has passed and the licence has not ended:
+   * "Renewal payment overdue since … New jobs will be refused from …".
+   * Null otherwise, and always on a simulated backend.
+   */
+  renewal_overdue: string | null;
   /** The backend only simulates devices: nothing is refused (ADR-0013 §2). */
   simulated_backend: boolean;
   fingerprint: string;

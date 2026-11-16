@@ -14,6 +14,8 @@ function info(status: LeaseStatus, over: Partial<LicenseInfo> = {}): LicenseInfo
     operator_message: `server message for ${status.status}`,
     customer: { id: "c1", name: "Acme ITAD" },
     not_after: "2026-12-08T00:00:00Z",
+    paid_through: null,
+    renewal_overdue: null,
     instance_public_key_id: "k1",
     new_jobs_refused: null,
     simulated_backend: false,
@@ -176,5 +178,45 @@ describe("licenceBanner", () => {
     const text = LICENCE_UNKNOWN_BANNER.lines.join(" ");
     expect(text).toMatch(/could not report its licence/);
     expect(text).toMatch(/new jobs may be refused or their certificates marked evaluation/);
+  });
+
+  const OVERDUE =
+    "Renewal payment overdue since 2026-11-08. New jobs will be refused from 2026-12-08 unless it is paid.";
+
+  it("says the renewal payment is overdue, with the server's line and the expiry consequence", () => {
+    for (const days of [29, 8]) {
+      expect(
+        valid(days, { paid_through: "2026-11-08T00:00:00Z", renewal_overdue: OVERDUE }),
+      ).toEqual({
+        tone: "warning",
+        heading: "Renewal payment overdue",
+        lines: [OVERDUE, REAL_EXPIRY_LINE],
+      });
+    }
+  });
+
+  it("turns the overdue banner to danger tone in the last day", () => {
+    for (const days of [1, 0]) {
+      expect(valid(days, { renewal_overdue: OVERDUE })?.tone).toBe("danger");
+    }
+  });
+
+  it("keeps the expiry countdown when nothing is overdue", () => {
+    expect(valid(40, { paid_through: "2026-11-08T00:00:00Z", renewal_overdue: null })).toBeNull();
+    expect(valid(20, { paid_through: "2026-11-08T00:00:00Z" })?.heading).toBe(
+      "Licence expires in 20 days, on 2026-12-08 UTC",
+    );
+  });
+
+  it("puts a refusal and a non-valid status before an overdue renewal", () => {
+    const refusal = "This station's licence expired on 2026-12-08.";
+    expect(
+      licenceBanner(
+        info(
+          { status: "expired", not_after: "2026-12-08T00:00:00Z" },
+          { new_jobs_refused: refusal, renewal_overdue: OVERDUE },
+        ),
+      )?.heading,
+    ).toBe("New jobs are refused");
   });
 });

@@ -71,7 +71,7 @@ use crate::entitlements;
 use crate::orders::{self, ApplyError, ApplyOutcome, OrderError};
 use crate::payment_events::{self, Receipt};
 use crate::payments::{
-    Fake, ProviderError, VerifiedEvent, FAKE_CHECKOUT_COMPLETED, FAKE_CHECKOUT_EXPIRED,
+    EventKind, Fake, ProviderError, VerifiedEvent, FAKE_CHECKOUT_COMPLETED, FAKE_CHECKOUT_EXPIRED,
     FAKE_INVOICE_PREFIX, FAKE_SUBSCRIPTION_CANCELLED, FAKE_SUBSCRIPTION_PREFIX,
     FAKE_SUBSCRIPTION_RENEWED, MSG_FAKE_LOCAL_ONLY,
 };
@@ -170,6 +170,7 @@ impl From<OrderError> for ApiError {
             OrderError::Provider(p) => p.into(),
             OrderError::Db(e) => e.into(),
             OrderError::Audit(e) => e.into(),
+            OrderError::Licence(why) => ApiError::internal(why),
         }
     }
 }
@@ -179,6 +180,7 @@ impl From<ApplyError> for ApiError {
         match e {
             ApplyError::Db(e) => e.into(),
             ApplyError::Audit(e) => e.into(),
+            ApplyError::Licence(why) => ApiError::internal(why),
         }
     }
 }
@@ -314,7 +316,10 @@ async fn billing_portal(
 
 /// `POST /api/payments/webhook`: verify the raw body with the configured
 /// provider (a bad signature is 400, a Fake event on a non-local hub 503),
-/// then store and apply it in one transaction.
+/// then store and apply it in one transaction (withdrawing renewal grace
+/// with the configured vendor root, [`payment_events::receive`]). After an
+/// applied failed renewal commits, the organization's owners are emailed
+/// ([`notify_renewal_failed`]).
 async fn webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -322,7 +327,8 @@ async fn webhook(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let event = state.payments.verify_event(&headers, &body)?;
     let mut tx = state.pool.begin().await?;
-    let receipt = payment_events::receive(&mut tx, &event, &body).await?;
+    let root = state.config.vendor_root.as_ref().map(|v| &v.root);
+    let receipt = payment_events::receive(&mut tx, &event, &body, root).await?;
     if receipt == Receipt::NotReady {
         tx.rollback().await?;
         tracing::error!(
@@ -355,7 +361,72 @@ async fn webhook(
         ),
         Receipt::NotReady => {}
     }
+    if let (
+        Receipt::Recorded(outcome),
+        EventKind::RenewalFailed {
+            subscription_id, ..
+        },
+    ) = (&receipt, event.kind())
+    {
+        if matches!(**outcome, ApplyOutcome::Applied(_)) {
+            notify_renewal_failed(&state, event.provider(), subscription_id).await;
+        }
+    }
     Ok(Json(json!({ "received": true })))
+}
+
+/// Email every verified owner of the organization whose subscription
+/// `subscription_id` at `provider` just failed to renew: best effort, after
+/// the event committed. A failed lookup or send is logged at warn and never
+/// undoes the event (the provider must not redeliver it for a mail outage).
+/// Not counted against the per-address auth mail limits, which guard sends
+/// a user triggers; this one is sent once per failed renewal.
+async fn notify_renewal_failed(state: &AppState, provider: &str, subscription_id: &str) {
+    let failure = match entitlements::renewal_failure(&state.pool, provider, subscription_id).await
+    {
+        Ok(Some(failure)) => failure,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, provider, subscription_id, "renewal failure notice not sent");
+            return;
+        }
+    };
+    let owners: Vec<String> = match sqlx::query_scalar(
+        "SELECT email FROM users \
+         WHERE organization_id = $1 AND role = 'owner' AND email_verified_at IS NOT NULL \
+         ORDER BY created_at, id",
+    )
+    .bind(failure.organization_id)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(owners) if owners.is_empty() => {
+            tracing::warn!(
+                organization_id = %failure.organization_id,
+                "the renewal failure notice has no recipient: the organization has no verified owner"
+            );
+            return;
+        }
+        Ok(owners) => owners,
+        Err(e) => {
+            tracing::warn!(error = %e, provider, subscription_id, "renewal failure notice not sent");
+            return;
+        }
+    };
+    let seats = crate::payments::page_url(&state.config.public_base_url, "seats");
+    for to in owners {
+        if let Err(e) = state
+            .mailer
+            .send_renewal_failed(&to, &failure.offering_name, failure.grace_ends, &seats)
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                organization_id = %failure.organization_id,
+                "renewal failure notice not sent to an owner"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +470,8 @@ async fn receive_fake(
     let event: VerifiedEvent = state
         .payments
         .verify_event(&Fake::signature_headers(signature), body)?;
-    match payment_events::receive(tx, &event, body).await? {
+    let root = state.config.vendor_root.as_ref().map(|v| &v.root);
+    match payment_events::receive(tx, &event, body, root).await? {
         Receipt::Recorded(outcome) => match *outcome {
             ApplyOutcome::Applied(order) => Ok(order),
             other => Err(format!("{other:?}")),

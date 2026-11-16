@@ -253,6 +253,12 @@ impl LicenseContext {
         self.chain.as_ref().map(|c| &c.license.body.entitlements)
     }
 
+    /// When the installed licence was issued; `None` on an unlicensed
+    /// station.
+    pub fn issued_at(&self) -> Option<OffsetDateTime> {
+        self.chain.as_ref().map(|c| c.license.body.issued_at)
+    }
+
     pub fn lease_state(&self) -> LeaseState {
         self.lease.read().clone()
     }
@@ -400,6 +406,12 @@ impl LicenseContext {
         let status = self.with_fault(raw);
         let operator_message = status.operator_message();
         let body = self.chain.as_ref().map(|c| &c.license.body);
+        let paid_through = body.and_then(|b| b.entitlements.paid_through);
+        let renewal_overdue = if simulated {
+            None
+        } else {
+            body.and_then(|b| renewal_overdue(&b.entitlements, now))
+        };
         LicenseView {
             status,
             operator_message,
@@ -408,8 +420,10 @@ impl LicenseContext {
                 name: b.entitlements.customer_name.clone(),
             }),
             not_after: body.map(|b| b.entitlements.not_after),
+            paid_through,
             instance_public_key_id: body.map(|b| b.instance_public_key_id.clone()),
             new_jobs_refused,
+            renewal_overdue,
             simulated_backend: simulated,
             fingerprint: self.fingerprint.clone(),
             hub_check: None,
@@ -907,6 +921,10 @@ pub struct LicenseView {
     pub customer: Option<LicenseCustomer>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub not_after: Option<OffsetDateTime>,
+    /// The end of the paid term when the installed licence carries a renewal
+    /// grace (ADR-0013 §4); `null` otherwise.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub paid_through: Option<OffsetDateTime>,
     /// The instance key id the licence entitles. The station's own signing
     /// key id is at `GET /api/public_key`.
     pub instance_public_key_id: Option<String>,
@@ -915,6 +933,11 @@ pub struct LicenseView {
     /// simulated backend. A method the licence does not allow is not
     /// predicted: it depends on the drive.
     pub new_jobs_refused: Option<String>,
+    /// While the installed licence's paid-through date has passed and its
+    /// own end has not: that the renewal payment is overdue and when new jobs
+    /// will be refused ([`renewal_overdue`]). `null` otherwise, and always on
+    /// a simulated backend, which refuses nothing.
+    pub renewal_overdue: Option<String>,
     /// The station's backend only simulates devices: nothing is refused, and
     /// an uncovered start is certified `evaluation` (ADR-0013 §2).
     pub simulated_backend: bool,
@@ -930,6 +953,23 @@ pub struct LicenseView {
     /// by `GET /api/license`; absent when none has run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credit_top_up: Option<crate::licence_fetch::HubCheck>,
+}
+
+/// The bench's overdue line for a licence whose renewal grace has begun:
+/// when `paid_through < now <= not_after`, "Renewal payment overdue since
+/// {paid_through date}. New jobs will be refused from {not_after date}
+/// unless it is paid."; `None` otherwise (no paid-through date, not yet due,
+/// or already ended, which the expiry status reports).
+pub fn renewal_overdue(ent: &Entitlements, now: OffsetDateTime) -> Option<String> {
+    let paid_through = ent.paid_through?;
+    (paid_through < now && now <= ent.not_after).then(|| {
+        format!(
+            "Renewal payment overdue since {}. New jobs will be refused from {} unless it is \
+             paid.",
+            paid_through.date(),
+            ent.not_after.date()
+        )
+    })
 }
 
 /// Who a licence is issued to.
@@ -1020,6 +1060,7 @@ mod tests {
             features: vec![],
             allowed_methods,
             machine_binding: None,
+            paid_through: None,
         }
     }
 
@@ -1601,5 +1642,47 @@ mod tests {
             .pool_reserve(),
             None
         );
+    }
+
+    #[test]
+    fn the_overdue_line_shows_between_the_paid_through_date_and_the_licence_end() {
+        let now = OffsetDateTime::now_utc();
+        let mut ent = entitlements(Quota::Unlimited, AllowedMethods::All);
+        // No paid-through date: never overdue.
+        assert_eq!(renewal_overdue(&ent, now), None);
+        // Paid through yesterday, ends in 29 days.
+        let paid_through = now - Duration::days(1);
+        ent.paid_through = Some(paid_through);
+        ent.not_after = now + Duration::days(29);
+        let line = renewal_overdue(&ent, now).unwrap();
+        assert_eq!(
+            line,
+            format!(
+                "Renewal payment overdue since {}. New jobs will be refused from {} unless it \
+                 is paid.",
+                paid_through.date(),
+                ent.not_after.date()
+            )
+        );
+        // Not yet due, or already ended: none.
+        ent.paid_through = Some(now + Duration::days(1));
+        assert_eq!(renewal_overdue(&ent, now), None);
+        ent.paid_through = Some(now - Duration::days(31));
+        ent.not_after = now - Duration::days(1);
+        assert_eq!(renewal_overdue(&ent, now), None);
+
+        // On the view: a real backend shows it, a simulated one never does.
+        let mut ent = entitlements(Quota::Unlimited, AllowedMethods::All);
+        ent.paid_through = Some(paid_through);
+        let ctx = ctx_with(chain_with("lic-g", ent));
+        let real = ctx.view(now, false);
+        assert_eq!(
+            real.paid_through.map(|t| t.unix_timestamp()),
+            Some(paid_through.unix_timestamp())
+        );
+        assert!(real.renewal_overdue.is_some());
+        let simulated = ctx.view(now, true);
+        assert_eq!(simulated.renewal_overdue, None);
+        assert!(simulated.paid_through.is_some());
     }
 }
