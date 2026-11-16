@@ -286,7 +286,8 @@ straight is most of the design work.
 - **A-R5** Certificate and audit search, scoped by tenant, with export. **An
   index, not an authority (§0.3).**
 - **A-R6** Usage and metering: per-station, per-period, reconcilable against
-  the station's own counter, and never a gate (§0.2).
+  the station's own counter, and never a gate itself: a start is decided by
+  the station's own licence and credits, offline (§0.2, ADR-0013 §3).
 - **A-R7** Every vendor action is attributed and auditable. Issuing a licence
   is a financial act; revoking one can stop a customer being able to prove
   compliance.
@@ -521,7 +522,9 @@ it: three tiers a customer can buy, activate, renew and outgrow.
   credits at launch, once per organization), or a vendor-issued trial file for
   air-gapped prospects. The simulated backend stays ungated for demos and tests.
   *Trial offerings and taking one (`POST /api/trials`) shipped in
-  `controlled-licensing` story 1 (CONTEXT §10.2); the station-side refusal has not.*
+  `controlled-licensing` story 1 (CONTEXT §10.2); the station-side refusal shipped
+  2026-11-11 (licence-visibility story 5): on a real backend an unlicensed start is
+  refused, and the simulated backend certifies it `evaluation`.*
 - **L-R2 Per-machine works end to end**: purchase → issue (A1) → deliver →
   install → visible licensed state (O-R9) → licensed certificates → renewal.
   Every step exists in pieces; none of them are joined.
@@ -603,8 +606,8 @@ distribution and expiry behaviour).
   until restart (licence-visibility story 4). The bench UI still has no activation
   screen, and a licence installed at runtime is not persisted.*
 - ~~L1.4 Licence status surface at the bench (O-R9 / O3.5).~~ Shipped 2026-11-08: a persistent banner above every bench page (licence-visibility story 3).
-- L1.5 Expiry warnings and refusing starts a licence does not cover (L-R5, ADR-0013).
-  *Expiry warnings shipped 2026-11-08 (licence-visibility story 3); refusing a start the licence does not cover is licence-visibility story 5.*
+- ~~L1.5 Expiry warnings and refusing starts a licence does not cover (L-R5, ADR-0013).~~
+  *Expiry warnings shipped 2026-11-08 (licence-visibility story 3); refusing a start the licence does not cover shipped 2026-11-11 (licence-visibility story 5, CONTEXT §10.2), with credits reserved against the licence's own `Count` quota until stations use credit grants (`controlled-licensing` story 4) and no revocation reason (A2.3).*
 - **Exit:** a customer can buy one station, activate it with no network, and
   see licensed certificates — and see plainly when they stop being licensed.
 

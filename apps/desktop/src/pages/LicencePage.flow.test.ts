@@ -93,7 +93,8 @@ const unlicensed: LicenseInfo = {
   customer: null,
   not_after: null,
   instance_public_key_id: "ed25519:k",
-  lapse_policy: null,
+  new_jobs_refused: null,
+  simulated_backend: true,
   fingerprint: "fp",
 };
 
@@ -103,7 +104,8 @@ const licensed: LicenseInfo = {
   customer: { id: "org-1", name: "Acme Recycling" },
   not_after: "2027-11-10T00:00:00Z",
   instance_public_key_id: "ed25519:k",
-  lapse_policy: "evaluation",
+  new_jobs_refused: null,
+  simulated_backend: true,
   fingerprint: "fp",
 };
 

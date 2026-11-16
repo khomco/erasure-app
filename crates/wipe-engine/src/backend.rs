@@ -71,6 +71,16 @@ pub trait DeviceBackend: Send + Sync + 'static {
         method: VerificationMethod,
         samples: u32,
     ) -> WipeResult<VerificationReport>;
+
+    /// Whether this backend only simulates devices and erases nothing.
+    ///
+    /// A simulated backend is exempt from the licence's start check
+    /// (ADR-0013 §2): its Jobs are never refused, and a start the licence
+    /// does not cover is certified `evaluation`. Default `false`, so a new
+    /// backend is gated unless it says it touches no hardware.
+    fn is_simulated(&self) -> bool {
+        false
+    }
 }
 
 /// A convenience boxed-trait alias.

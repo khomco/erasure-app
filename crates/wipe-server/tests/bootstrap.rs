@@ -187,7 +187,15 @@ async fn a_config_dir_station_keeps_its_layout_lease_and_key_across_builds() {
     first.save_bay_topology(layout).unwrap();
     first
         .license()
-        .signing_decision(time::OffsetDateTime::now_utc());
+        .decide_start(
+            &wipe_server::StartRequest {
+                method: None,
+                drives: 1,
+                simulated: true,
+            },
+            time::OffsetDateTime::now_utc(),
+        )
+        .unwrap();
     let first_key_id = first.signing_key.public_key_id();
     drop(first);
 
@@ -323,7 +331,8 @@ async fn a_cli_station_reports_its_start_up_lines_in_order() {
         "signing key public b64: ",
         "serving frontend from ",
         "config store: LocalFile at ",
-        "licence: none — free tier, certificates will be marked evaluation",
+        "licence: none — new jobs are refused on a real device backend; on the simulated \
+         backend certificates are marked evaluation",
         "lease store: LocalFile at ",
         "lease counts: ",
         "runtime licence install: disabled",

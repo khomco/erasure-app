@@ -133,7 +133,8 @@ describe("LicenceStatus", () => {
     customer: { id: "c", name: "Acme Recycling" },
     not_after: "2027-09-06T12:00:00Z",
     instance_public_key_id: "ed25519:k",
-    lapse_policy: "evaluation",
+    new_jobs_refused: null,
+    simulated_backend: true,
     fingerprint: "fp",
   };
 

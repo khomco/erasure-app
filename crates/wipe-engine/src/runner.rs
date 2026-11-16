@@ -30,8 +30,8 @@ use uuid::Uuid;
 
 use wipe_common::{
     select_method, AssetDisposition, DestructionEvent, ErasureEvent, ErasureEventSpec,
-    ErasureEventState, Job, JobActivity, JobSpec, JobState, JobUpdate, JobUpdateKind, Progress,
-    VerificationEvent, VerificationMethod, VerificationReport, WipeError, WipeResult,
+    ErasureEventState, Job, JobActivity, JobLicence, JobSpec, JobState, JobUpdate, JobUpdateKind,
+    Progress, VerificationEvent, VerificationMethod, VerificationReport, WipeError, WipeResult,
 };
 
 use crate::{BackendProgress, DynBackend};
@@ -137,7 +137,26 @@ impl JobRunner {
     /// Retries and recording for destruction are explicit operator actions
     /// in v0.2 (`retry_erasure`, `record_for_destruction`) — automatic
     /// policy is deferred to SanitizationProfile in v0.2 #3.
+    ///
+    /// Records no licence decision: the station starts Jobs through
+    /// [`start_with`](Self::start_with) after its licence check. This form is
+    /// for engine and certificate tests.
     pub fn start(&self, id: Uuid) -> WipeResult<()> {
+        self.start_with(id, None, None)
+    }
+
+    /// [`start`](Self::start), recording `licence` on the Job under the same
+    /// write guard that moves it to `InProgress`, and erasing with `method`
+    /// when it is `Some` (the method the licence check resolved and checked,
+    /// so the method checked is the method issued). `None` lets the run
+    /// select a method, as `start` does. The pinned method is passed to the
+    /// spawned run only; nothing is stored on the Job.
+    pub fn start_with(
+        &self,
+        id: Uuid,
+        method: Option<wipe_common::Method>,
+        licence: Option<JobLicence>,
+    ) -> WipeResult<()> {
         {
             let mut inner = self.inner.write();
             let job = inner.jobs.get_mut(&id).ok_or(WipeError::JobNotFound(id))?;
@@ -149,6 +168,7 @@ impl JobRunner {
             }
             job.state = wipe_common::JobState::InProgress;
             job.started_at = Some(OffsetDateTime::now_utc());
+            job.licence = licence;
         }
         let _ = self.events.send(JobBroadcast::JobStateChanged {
             job_id: id,
@@ -158,7 +178,7 @@ impl JobRunner {
         });
         let runner = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = runner.run_job(id).await {
+            if let Err(e) = runner.run_job(id, method).await {
                 // Inner ErasureEvent failed. The outer Job stays
                 // InProgress so the operator can decide next step
                 // (retry, record for destruction, or abort). The failure
@@ -217,9 +237,24 @@ impl JobRunner {
         id: Uuid,
         destruction: DestructionEvent,
     ) -> WipeResult<()> {
+        self.record_for_destruction_with(id, destruction, None)
+            .map(|_| ())
+    }
+
+    /// [`record_for_destruction`](Self::record_for_destruction), recording
+    /// `licence` on the Job when it has no decision yet (a Job never
+    /// started). A Job that already holds one keeps it: its start's answer
+    /// is final (ADR-0013 §1). Returns whether `licence` was recorded, so a
+    /// caller that reserved credits for it can return them when it was not.
+    pub fn record_for_destruction_with(
+        &self,
+        id: Uuid,
+        destruction: DestructionEvent,
+        licence: Option<JobLicence>,
+    ) -> WipeResult<bool> {
         // Check and mutate under one write guard so a concurrent
         // `link_to_manifest` cannot slip between them.
-        let from = {
+        let (from, adopted) = {
             let mut inner = self.inner.write();
             let job = inner.jobs.get_mut(&id).ok_or(WipeError::JobNotFound(id))?;
             if destruction.attestation.is_none() {
@@ -244,10 +279,14 @@ impl JobRunner {
             job.activities
                 .push(JobActivity::Destruction(destruction.clone()));
             job.state = JobState::PendingDestruction;
-            from
+            let adopted = job.licence.is_none() && licence.is_some();
+            if adopted {
+                job.licence = licence;
+            }
+            (from, adopted)
         };
         self.broadcast_recorded(id, from, destruction);
-        Ok(())
+        Ok(adopted)
     }
 
     /// Record a scanned group of drives for destruction, one new Job per
@@ -267,6 +306,17 @@ impl JobRunner {
     pub async fn record_scanned_for_destruction(
         &self,
         drives: Vec<(JobSpec, DestructionEvent)>,
+    ) -> WipeResult<Vec<Uuid>> {
+        self.record_scanned_for_destruction_with(drives, None).await
+    }
+
+    /// [`record_scanned_for_destruction`](Self::record_scanned_for_destruction),
+    /// recording `licence` on every Job it creates (each drive's own share
+    /// of the decision: one credit per drive on a licensed one).
+    pub async fn record_scanned_for_destruction_with(
+        &self,
+        drives: Vec<(JobSpec, DestructionEvent)>,
+        licence: Option<JobLicence>,
     ) -> WipeResult<Vec<Uuid>> {
         if drives.is_empty() {
             return Err(WipeError::InvalidState(
@@ -337,6 +387,7 @@ impl JobRunner {
                 job.created_at = now;
                 job.state = JobState::PendingDestruction;
                 job.activities.push(JobActivity::Destruction(ev.clone()));
+                job.licence = licence.clone();
                 ids.push(job.id);
                 inner.jobs.insert(job.id, job);
             }
@@ -519,7 +570,7 @@ impl JobRunner {
     /// terminates as `Failed` and the outer Job stays `InProgress` — the
     /// operator can call `retry_erasure` or `record_for_destruction` to drive
     /// it further.
-    async fn run_job(&self, id: Uuid) -> WipeResult<()> {
+    async fn run_job(&self, id: Uuid, method: Option<wipe_common::Method>) -> WipeResult<()> {
         let job = self.get(id).ok_or(WipeError::JobNotFound(id))?;
         // An `abort` or `record_for_destruction` may land between `start`
         // returning and this task running; those take precedence, so no
@@ -534,7 +585,7 @@ impl JobRunner {
             device_id: job.spec.device_id.clone(),
             classification: job.spec.classification,
             intent: job.spec.intent,
-            method: None,
+            method,
             verify: true,
             verify_samples: 8,
             operator: job.spec.operator.clone(),

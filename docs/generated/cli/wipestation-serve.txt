@@ -24,7 +24,7 @@ Options:
       --ephemeral-config
           Skip store detection and keep configuration in RAM only. For demos and for reproducing what a PXE station sees. Licence lease state is still saved to `lease-state.json` in the config directory when it is writable
       --license <LICENSE>
-          Path to a vendor-issued licence (ADR-0005). Without one the station runs free-tier: it still erases and still signs, but certificates are marked `evaluation` [env: WIPESTATION_LICENSE=]
+          Path to a vendor-issued licence (ADR-0005). Every Job's start is checked against it (ADR-0013): on a real device backend a start it does not cover, or any start without one, is refused. The simulated backend never refuses; its uncovered Jobs are certified `evaluation` [env: WIPESTATION_LICENSE=]
       --vendor-root-b64 <VENDOR_ROOT_B64>
           Published vendor root public key(s), base64. Required with --license: a licence is only meaningful if we check who signed it. Also the only roots a licence installed while the station runs (`POST /api/license`) is checked against; without one, runtime install is refused. A request can never add a root
       --concurrence-policy <CONCURRENCE_POLICY>

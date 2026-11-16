@@ -301,15 +301,57 @@ fn a_valid_lease_reports_remaining_days_and_quota() {
 }
 
 #[test]
-fn an_expired_lease_stops_licensed_signing_but_is_not_an_erasure_block() {
+fn an_expired_lease_stops_licensed_signing_and_says_when_it_expired() {
     let mut ent = unlimited();
     ent.not_after = now() - Duration::days(1);
     let status = evaluate(Some(&ent), &state_at(now(), 0), "mf1:any", now());
     assert!(matches!(status, LeaseStatus::Expired { .. }));
     assert!(!status.permits_licensed_signing());
-    // The operator message must say erasure still works, or the UI will
-    // imply the station is down.
-    assert!(status.operator_message().contains("evaluation"));
+    // The message states the status only; the station's start check and
+    // the bench banner say what it means for new jobs (ADR-0013 §1).
+    let msg = status.operator_message();
+    assert!(msg.contains(&ent.not_after.date().to_string()), "{msg}");
+    assert!(!msg.contains("evaluation"), "{msg}");
+    assert!(!msg.contains("still"), "{msg}");
+}
+
+#[test]
+fn reserved_credits_count_against_a_count_quota() {
+    let ent = entitlements(
+        Quota::Count { erasures: 5 },
+        Scope::Site {
+            site_id: "s".into(),
+        },
+    );
+    let mut state = state_at(now(), 2);
+    state.credits_reserved = 2;
+    assert!(matches!(
+        evaluate(Some(&ent), &state, "mf1:any", now()),
+        LeaseStatus::Valid {
+            remaining_erasures: Some(1),
+            ..
+        }
+    ));
+    state.credits_reserved = 3;
+    assert_eq!(
+        evaluate(Some(&ent), &state, "mf1:any", now()),
+        LeaseStatus::QuotaExhausted {
+            used: 5,
+            allowed: 5
+        }
+    );
+}
+
+#[test]
+fn lease_state_json_writes_reservations_only_when_there_are_some() {
+    let mut s = state_at(now(), 1);
+    let json = serde_json::to_string(&s).unwrap();
+    assert!(!json.contains("credits_reserved"), "{json}");
+    let back: LeaseState = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.credits_reserved, 0);
+    s.credits_reserved = 4;
+    let back: LeaseState = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+    assert_eq!(back.credits_reserved, 4);
 }
 
 #[test]
@@ -416,8 +458,7 @@ fn unavailable_lease_state_does_not_permit_licensed_signing() {
     assert!(!status.permits_licensed_signing());
     let msg = status.operator_message();
     assert!(msg.contains("/cfg/lease-state.json"), "{msg}");
-    assert!(msg.contains("Erasure still works"), "{msg}");
-    assert!(msg.contains("evaluation"), "{msg}");
+    assert!(!msg.contains("still works"), "{msg}");
 }
 
 #[test]

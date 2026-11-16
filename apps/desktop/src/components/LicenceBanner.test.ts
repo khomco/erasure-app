@@ -18,8 +18,7 @@ function renderWith(info?: LicenseInfo): string {
   return render(client);
 }
 
-const UNLICENSED_MESSAGE =
-  "No licence installed - running in evaluation mode. Erasure works normally and certificates are valid, but are marked as unlicensed.";
+const UNLICENSED_MESSAGE = "No licence installed.";
 
 function info(over: Partial<LicenseInfo>): LicenseInfo {
   return {
@@ -28,7 +27,8 @@ function info(over: Partial<LicenseInfo>): LicenseInfo {
     customer: null,
     not_after: null,
     instance_public_key_id: null,
-    lapse_policy: null,
+    new_jobs_refused: null,
+    simulated_backend: true,
     fingerprint: "fp",
     ...over,
   };
@@ -40,6 +40,16 @@ describe("LicenceBanner", () => {
     expect(html).toContain('role="status"');
     expect(html).toContain("Evaluation mode — no licence installed");
     expect(html).toContain(UNLICENSED_MESSAGE);
+    expect(html).not.toMatch(/<button|<a /);
+  });
+
+  it("renders a refusal in danger tone with the server's text and no button or link", () => {
+    const refusal =
+      "This station has no licence, so it cannot start new jobs. Install a licence to start them.";
+    const html = renderWith(info({ simulated_backend: false, new_jobs_refused: refusal }));
+    expect(html).toContain("bg-rose-950");
+    expect(html).toContain("New jobs are refused");
+    expect(html).toContain(refusal);
     expect(html).not.toMatch(/<button|<a /);
   });
 
@@ -55,6 +65,19 @@ describe("LicenceBanner", () => {
     expect(html).not.toMatch(/<button|<a /);
   });
 
+  it("renders a simulated station's lease fault as a warning that does not claim evaluation", () => {
+    const html = renderWith(
+      info({
+        status: { status: "lease_state_unavailable", detail: "disk full" },
+        operator_message: "Licence state could not be read or saved (disk full).",
+      }),
+    );
+    expect(html).toContain("Licence state needs attention");
+    expect(html).toContain("new jobs still start");
+    expect(html).not.toContain("bg-rose-950");
+    expect(html).not.toMatch(/evaluation/);
+  });
+
   it("renders nothing for a valid licence with 31 days left", () => {
     expect(
       renderWith(
@@ -62,7 +85,6 @@ describe("LicenceBanner", () => {
           status: { status: "valid", days_remaining: 31 },
           operator_message: "Licensed - unlimited, 31 days left",
           not_after: "2026-12-09T00:00:00Z",
-          lapse_policy: "evaluation",
         }),
       ),
     ).toBe("");
@@ -93,7 +115,6 @@ describe("LicenceBanner", () => {
         status: { status: "valid", days_remaining: 31 },
         operator_message: "Licensed - unlimited, 31 days left",
         not_after: "2026-12-09T00:00:00Z",
-        lapse_policy: "evaluation",
       }),
     );
     const query = client.getQueryCache().find({ queryKey: ["license"] })!;

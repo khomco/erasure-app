@@ -4,10 +4,10 @@ import { api, classNames } from "@/api/client";
 import { LICENCE_UNKNOWN_BANNER, licenceBanner } from "@/api/licence";
 
 /**
- * A persistent, non-dismissible bar on every bench page while the station is
- * unlicensed, its licence is not valid, or it expires within 30 days
- * (SPEC CAP-3, ADR-0012 §6). It informs only: no button, link or prompt,
- * and nothing here gates an erasure (ROADMAP §0.2).
+ * A persistent, non-dismissible bar on every bench page while the station
+ * refuses new jobs, is unlicensed, its licence is not valid, or it expires
+ * within 30 days (SPEC CAP-3, ADR-0013 §1). It informs only: no button, link
+ * or prompt. The station refuses starts itself; this bar only says so.
  */
 export function LicenceBanner() {
   const license = useQuery({

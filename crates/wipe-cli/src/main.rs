@@ -81,9 +81,11 @@ enum Cmd {
         /// directory when it is writable.
         #[arg(long)]
         ephemeral_config: bool,
-        /// Path to a vendor-issued licence (ADR-0005). Without one the
-        /// station runs free-tier: it still erases and still signs, but
-        /// certificates are marked `evaluation`.
+        /// Path to a vendor-issued licence (ADR-0005). Every Job's start is
+        /// checked against it (ADR-0013): on a real device backend a start
+        /// it does not cover, or any start without one, is refused. The
+        /// simulated backend never refuses; its uncovered Jobs are
+        /// certified `evaluation`.
         #[arg(long, env = "WIPESTATION_LICENSE")]
         license: Option<PathBuf>,
         /// Published vendor root public key(s), base64. Required with

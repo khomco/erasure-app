@@ -322,7 +322,10 @@ export type ConcurrenceKind = "review" | "witness";
 
 export type ConcurrencePolicy = "none" | "review" | "witness";
 
-/** What a station does once its licence lapses (ADR-0012). */
+/**
+ * The lapse policy carried in a signed licence (ADR-0012). Still parsed,
+ * but ignored by stations (ADR-0013 §5).
+ */
 export type LapsePolicy = "evaluation" | "stop";
 
 /** Mirror of `wipe_license::LeaseStatus`, tagged on `status`. Times are RFC 3339. */
@@ -358,7 +361,14 @@ export interface LicenseInfo {
   customer: LicenseCustomer | null;
   not_after: string | null;
   instance_public_key_id: string | null;
-  lapse_policy: LapsePolicy | null;
+  /**
+   * Why the station's next start would be refused (ADR-0013 §1), in the
+   * refusal's own words; null when it would not be, and always on a
+   * simulated backend.
+   */
+  new_jobs_refused: string | null;
+  /** The backend only simulates devices: nothing is refused (ADR-0013 §2). */
+  simulated_backend: boolean;
   fingerprint: string;
   /** Absent until the station has checked with a saved platform address. */
   hub_check?: HubCheck;
@@ -428,7 +438,7 @@ export interface LicenseBody {
   instance_public_key_id: string;
   entitlements: LicenseEntitlements;
   issued_at: string;
-  /** Omitted when `evaluation` (ADR-0012). */
+  /** Omitted when `evaluation` (ADR-0012). Parsed but ignored by stations (ADR-0013 §5). */
   lapse_policy?: LapsePolicy;
 }
 
@@ -471,6 +481,19 @@ export type JobActivity =
   | ({ type: "verification" } & VerificationEvent)
   | ({ type: "destruction" } & DestructionEvent);
 
+/**
+ * Mirror of `wipe_common::JobLicence`: the licence decision a Job's start
+ * recorded (ADR-0013 §1). Its certificate is marked from it. Not signed.
+ */
+export interface JobLicence {
+  evaluation: boolean;
+  /** The licence attestation chain; absent on an evaluation decision. */
+  attestation?: AttestationChain;
+  license_id?: string;
+  credits_reserved: number;
+  decided_at: string;
+}
+
 export interface Job {
   id: string;
   spec: JobSpec;
@@ -478,6 +501,8 @@ export interface Job {
   activities: JobActivity[];
   manifest_id: string | null;
   certificate_id: string | null;
+  /** Absent until the Job's start has decided. */
+  licence?: JobLicence;
   created_at: string;
   started_at: string | null;
   ended_at: string | null;

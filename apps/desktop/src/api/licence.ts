@@ -1,8 +1,9 @@
 /**
  * How the bench reads `GET /api/license` into the station-wide licence
- * banner (SPEC CAP-3, ADR-0012 §6). Pure, so the wording is tested without
- * rendering. The licence verdict (`status`) is the server's: nothing here
- * re-evaluates the licence.
+ * banner (SPEC CAP-3, ADR-0013 §1). Pure, so the wording is tested without
+ * rendering. The licence verdict (`status`) and whether new jobs are
+ * refused (`new_jobs_refused`) are the server's: nothing here re-evaluates
+ * the licence.
  */
 import type { LicenseInfo } from "./types";
 
@@ -24,7 +25,7 @@ export const LICENCE_UNKNOWN_BANNER: LicenceBannerView = {
   tone: "warning",
   heading: "Licence status unknown",
   lines: [
-    "This station could not report its licence, so its certificates may be marked evaluation.",
+    "This station could not report its licence, so new jobs may be refused or their certificates marked evaluation.",
   ],
 };
 
@@ -49,39 +50,71 @@ function expiryHeading(days: number, date: string | null): string {
     : `Licence expires ${when}${on}`;
 }
 
-function lapsePolicyLine(info: LicenseInfo): string {
-  return info.lapse_policy === "stop"
-    ? "This licence's lapse policy is stop: new jobs will be refused when it expires. Renew and install the new licence before then."
-    : "When it expires, erasure continues, but certificates will be marked evaluation until a renewed licence is installed.";
+/** What expiry will mean for new jobs on this station. */
+function expiryConsequence(info: LicenseInfo, date: string | null): string {
+  if (info.simulated_backend) {
+    return "This station's backend is simulated: when the licence expires, jobs still run, with certificates marked evaluation, until a renewed licence is installed.";
+  }
+  const from = date ? `From ${date}` : "When it expires";
+  return `${from}, new jobs will be refused until a renewed licence is installed. Renew and install it before then.`;
 }
+
+/** The line a simulated station adds to a status that does not cover jobs. */
+const SIMULATED_EVALUATION_LINE =
+  "This station's backend is simulated: jobs still run, and their certificates are marked evaluation.";
 
 /**
  * The banner for this licence report, or `null` when there is nothing to
  * say: a valid licence with more than `EXPIRY_NOTICE_DAYS` left.
  *
- * Any non-valid status shows the server's `operator_message` verbatim. A
- * valid licence warns from `EXPIRY_NOTICE_DAYS` on, says "renew now" from
- * `EXPIRY_URGENT_DAYS`, and turns to danger tone from `EXPIRY_FINAL_DAYS`.
+ * When the server says new jobs are refused, a danger banner shows its
+ * refusal text verbatim. Otherwise any non-valid status shows the server's
+ * `operator_message` with its consequence. A valid licence warns from
+ * `EXPIRY_NOTICE_DAYS` on, says "renew now" from `EXPIRY_URGENT_DAYS`, and
+ * turns to danger tone from `EXPIRY_FINAL_DAYS`.
  */
 export function licenceBanner(info: LicenseInfo): LicenceBannerView | null {
+  if (info.new_jobs_refused) {
+    return {
+      tone: "danger",
+      heading: "New jobs are refused",
+      lines: [info.new_jobs_refused],
+    };
+  }
   const s = info.status;
   if (s.status !== "valid") {
-    return s.status === "unlicensed"
-      ? {
-          tone: "warning",
-          heading: "Evaluation mode — no licence installed",
-          lines: [info.operator_message],
-        }
-      : {
-          tone: "danger",
-          heading: "Licensed signing unavailable — certificates are marked evaluation",
-          lines: [info.operator_message],
-        };
+    if (s.status === "unlicensed") {
+      return {
+        tone: "warning",
+        heading: "Evaluation mode — no licence installed",
+        lines: [info.operator_message, SIMULATED_EVALUATION_LINE],
+      };
+    }
+    // A lease fault that refuses nothing: on an `Unlimited` licence the
+    // station's decision stays licensed, so do not claim evaluation.
+    if (s.status === "lease_state_unavailable" || !info.simulated_backend) {
+      return {
+        tone: "warning",
+        heading: "Licence state needs attention",
+        lines: [
+          info.operator_message,
+          info.simulated_backend
+            ? "This station's backend is simulated: new jobs still start. Fix the problem named above."
+            : "New jobs still start under this licence. Fix the problem named above.",
+        ],
+      };
+    }
+    return {
+      tone: "danger",
+      heading: "Licence not in force — certificates are marked evaluation",
+      lines: [info.operator_message, SIMULATED_EVALUATION_LINE],
+    };
   }
   if (s.days_remaining > EXPIRY_NOTICE_DAYS) return null;
+  const date = expiryDate(info.not_after);
   return {
     tone: s.days_remaining <= EXPIRY_FINAL_DAYS ? "danger" : "warning",
-    heading: expiryHeading(s.days_remaining, expiryDate(info.not_after)),
-    lines: [lapsePolicyLine(info)],
+    heading: expiryHeading(s.days_remaining, date),
+    lines: [expiryConsequence(info, date)],
   };
 }

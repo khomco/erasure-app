@@ -1,9 +1,11 @@
 //! Offline enforcement levers and their honest limits (ADR-0005 §3).
 //!
 //! Nothing here can *prove* consumption — a station with no network can
-//! always under-report. What it can do is refuse to sign under an expired
-//! lease, notice a clock that has moved backwards, and say plainly which of
-//! those guarantees is cryptographic and which is a speed bump.
+//! always under-report. What it can do is judge a licence offline (expired,
+//! not yet valid, wrong machine, out of credits), notice a clock that has
+//! moved backwards, and say plainly which of those guarantees is
+//! cryptographic and which is a speed bump. The station acts on the verdict
+//! when a Job starts (ADR-0013 §1).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,13 +36,23 @@ pub struct LeaseState {
     /// earlier than this (beyond skew) means time moved backwards.
     #[serde(with = "time::serde::rfc3339")]
     pub time_watermark: OffsetDateTime,
-    /// Licensed erasures observed locally under the current licence: the
-    /// count a `Count` quota is checked against. Evaluation erasures are
-    /// counted separately in [`evaluation_erasures`](Self::evaluation_erasures).
+    /// Credits spent locally under the current licence: one per licensed
+    /// certificate (ADR-0013 §3). A `Count` quota is checked against this
+    /// plus [`credits_reserved`](Self::credits_reserved). Evaluation
+    /// erasures are counted separately in
+    /// [`evaluation_erasures`](Self::evaluation_erasures).
     pub erasures_used: u64,
-    /// Certificates this station signed `evaluation` — no licence, or one
-    /// that was expired, exhausted or otherwise not valid at signing time
-    /// (ADR-0005 §5) — for Jobs holding an erasure event. A Job destroyed
+    /// Credits reserved by Jobs that have started but are not yet certified
+    /// or aborted: one per drive. Spending moves a credit from here to
+    /// `erasures_used`; an abort returns it. Jobs are not kept across a
+    /// restart, so a station returns every reservation when it starts, and a
+    /// licence switch clears them with the count. 0, and omitted, when none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub credits_reserved: u64,
+    /// Certificates this station signed `evaluation` — from a start
+    /// decision the licence did not cover, which only a simulated backend
+    /// records rather than refuses (ADR-0013 §2) — for Jobs holding an
+    /// erasure event. A Job destroyed
     /// after an erasure attempt, even a failed one, counts; one destroyed
     /// with no erasure attempt does not. Counted for the life of the station: it survives a
     /// licence change, like the watermark. No limit is attached to it.
@@ -63,6 +75,7 @@ impl LeaseState {
         Self {
             time_watermark: now,
             erasures_used: 0,
+            credits_reserved: 0,
             evaluation_erasures: 0,
             counter_is_monotonic: false,
             license_id: None,
@@ -80,6 +93,15 @@ impl LeaseState {
     pub fn rollback_detected(&self, now: OffsetDateTime) -> bool {
         now < self.time_watermark - CLOCK_SKEW_ALLOWANCE
     }
+
+    /// Credits spent or reserved: what a `Count` quota is checked against.
+    pub fn credits_committed(&self) -> u64 {
+        self.erasures_used.saturating_add(self.credits_reserved)
+    }
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// A counter meant to only move forward (ADR-0005 §3b).
@@ -250,7 +272,8 @@ pub enum LeaseStatus {
         #[serde(with = "time::serde::rfc3339")]
         not_before: OffsetDateTime,
     },
-    /// Quota exhausted by locally-observed usage. Best-effort offline.
+    /// Every credit of a `Count` quota is spent or reserved by a running
+    /// Job (`used` counts both). Best-effort offline.
     QuotaExhausted { used: u64, allowed: u64 },
     /// Licence is bound to a different machine.
     WrongMachine { expected: String, actual: String },
@@ -270,15 +293,16 @@ pub enum LeaseStatus {
 }
 
 impl LeaseStatus {
-    /// Does this permit signing a *licensed* certificate?
+    /// Is this a valid licence with a credit to spare?
     ///
-    /// Note `Unlicensed` is false here but does **not** stop the erasure: a
-    /// free-tier station still erases and still emits a valid evaluation
-    /// certificate. This asks only whether a vendor chain may be attached.
+    /// The station decides at a Job's start, not here, whether a licence
+    /// covers the work (ADR-0013 §1); this only reads the verdict.
     pub fn permits_licensed_signing(&self) -> bool {
         matches!(self, Self::Valid { .. })
     }
 
+    /// The status in words, without its consequence: the station's start
+    /// check and the bench banner say what it means for new Jobs.
     pub fn operator_message(&self) -> String {
         match self {
             Self::Valid {
@@ -288,38 +312,32 @@ impl LeaseStatus {
                 Some(n) => format!("Licensed - {n} erasures remaining, {days_remaining} days left"),
                 None => format!("Licensed - unlimited, {days_remaining} days left"),
             },
-            Self::Expired { not_after } => format!(
-                "Licence expired on {}. Certificates will be marked evaluation until it is renewed.",
-                not_after.date()
-            ),
+            Self::Expired { not_after } => {
+                format!("Licence expired on {}.", not_after.date())
+            }
             Self::NotYetValid { not_before } => {
                 format!("Licence is not valid until {}.", not_before.date())
             }
             Self::QuotaExhausted { used, allowed } => format!(
-                "Licence quota used ({used} of {allowed}). Erasure still works; certificates \
-                 will be marked evaluation."
+                "Licence credits used ({used} of {allowed}, counting credits reserved by running \
+                 jobs)."
             ),
-            Self::WrongMachine { expected, actual } => format!(
-                "Licence is bound to machine {expected}, but this station is {actual}."
-            ),
+            Self::WrongMachine { expected, actual } => {
+                format!("Licence is bound to machine {expected}, but this station is {actual}.")
+            }
             Self::ClockRollback {
                 watermark,
                 observed,
             } => format!(
                 "System clock reads {} but this station has previously seen {}. Time appears to \
-                 have moved backwards; fix the clock to restore licensed signing.",
+                 have moved backwards.",
                 observed.date(),
                 watermark.date()
             ),
-            Self::Unlicensed => {
-                "No licence installed - running in evaluation mode. Erasure works normally and \
-                 certificates are valid, but are marked as unlicensed."
-                    .into()
+            Self::Unlicensed => "No licence installed.".into(),
+            Self::LeaseStateUnavailable { detail } => {
+                format!("Licence state could not be read or saved ({detail}).")
             }
-            Self::LeaseStateUnavailable { detail } => format!(
-                "Licence state could not be read or saved ({detail}). Erasure still works; \
-                 certificates will be marked evaluation until this is fixed."
-            ),
         }
     }
 }
@@ -327,8 +345,9 @@ impl LeaseStatus {
 /// Evaluate a licence offline.
 ///
 /// `fingerprint` is this station's machine fingerprint; `now` is the current
-/// wall clock. `state` supplies the anti-rollback watermark and local usage
-/// count and is **not** mutated here — callers decide when to record usage.
+/// wall clock. `state` supplies the anti-rollback watermark and the credits
+/// spent and reserved, and is **not** mutated here — callers decide when to
+/// reserve or spend.
 pub fn evaluate(
     entitlements: Option<&Entitlements>,
     state: &LeaseState,
@@ -368,17 +387,18 @@ pub fn evaluate(
         };
     }
 
-    if !ent.quota.permits(state.erasures_used) {
+    let committed = state.credits_committed();
+    if !ent.quota.permits(committed) {
         if let crate::entitlement::Quota::Count { erasures } = ent.quota {
             return LeaseStatus::QuotaExhausted {
-                used: state.erasures_used,
+                used: committed,
                 allowed: erasures,
             };
         }
     }
 
     LeaseStatus::Valid {
-        remaining_erasures: ent.quota.remaining(state.erasures_used),
+        remaining_erasures: ent.quota.remaining(committed),
         days_remaining: (ent.not_after - now).whole_days(),
     }
 }

@@ -283,6 +283,10 @@ how a certificate is marked when the station is unlicensed.
    `Method` discriminants as §2 describes. Likewise `feature_available`
    (`lease.rs`) is called only from that test file, so no feature flag in a
    licence turns anything on or off.
+   *`allowed_methods` resolved 2026-11-11 (licence-visibility story 5):* the
+   start check ADR-0013 §1 introduced (`LicenseContext::decide_start`)
+   refuses, on a real backend, a start whose resolved method's
+   `MethodClass` the licence does not allow. `features` is still unenforced.
 4. **§1, root-only verification is not possible yet.** The licence
    certificate carries the instance key's id (`instance_public_key_id`,
    `crates/wipe-license/src/chain.rs`), which `verify_chain` compares with
@@ -338,9 +342,16 @@ how a certificate is marked when the station is unlicensed.
    `stop` policy does not stop a lapsed station from starting new jobs.
    ADR-0012 post-dates the 2026-11-05 audit; this item was added at the
    2026-11-08 re-check.
+   *Superseded 2026-11-11:* ADR-0013 retired the lapse policy; the station
+   ignores the field and refuses any uncovered start on a real backend
+   (licence-visibility story 5).
 
 Conforms as written: licensing never stops a job from running
 (`crates/wipe-server/src/licensing.rs` and the signing decision in `app.rs`);
+*superseded 2026-11-11 by ADR-0013 (licence-visibility story 5): on a real
+backend `LicenseContext::decide_start` refuses a start the licence does not
+cover, though a running Job is still never interrupted, and the certificate
+is marked from the start's decision recorded on the Job;*
 `evaluation` is inside the signed certificate payload
 (`crates/wipe-cert/src/schema.rs`); `verify-cert` prints EVALUATION for an
 evaluation certificate; §6's `CertAnchor` has only the failing

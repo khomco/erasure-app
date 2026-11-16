@@ -27,7 +27,11 @@ pub struct ErasureEventSpec {
     pub device_id: DeviceId,
     pub classification: crate::Classification,
     pub intent: crate::Intent,
-    /// Operator may pin a specific method. None means auto-select.
+    /// The method to issue. The station always pins the method its licence
+    /// check resolved and checked at the Job's start (ADR-0013 §1), so the
+    /// method checked is the method issued. `None` means auto-select: a run
+    /// started without a licence decision, or one whose method could not be
+    /// resolved under a licence that allows every method.
     pub method: Option<Method>,
     pub verify: bool,
     pub verify_samples: u32,

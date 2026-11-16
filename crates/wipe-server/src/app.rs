@@ -49,9 +49,10 @@ pub struct AppState {
     /// by a site-local overlay, served to the UI so the builder and the bay
     /// map agree on what a given `model_ref` means.
     pub catalog: Arc<wipe_common::Catalog>,
-    /// Licensing state (ADR-0005). Never gates erasure — it only decides
-    /// whether a certificate carries a vendor attestation chain or is marked
-    /// `evaluation`.
+    /// Licensing state (ADR-0005, ADR-0013). Decides at each start whether
+    /// the licence covers it ([`AppState::start_job`] and the destruction
+    /// recorders): on a real backend an uncovered start is refused; the
+    /// decision recorded on the Job marks its certificate.
     ///
     /// Behind a shared cell rather than a bare `Arc` because
     /// `spawn_cert_generator` captures a clone of this state at construction
@@ -128,9 +129,9 @@ impl AppState {
             )),
             simulator: None,
             catalog: Arc::new(wipe_common::Catalog::bundled()),
-            // Free tier until a host installs a licence. A station with no
-            // licence still erases and still signs — the certs are just
-            // marked evaluation.
+            // Unlicensed until a host installs a licence: on a real backend
+            // every start is refused (ADR-0013 §2); on the simulated one
+            // certificates are marked evaluation.
             license: Arc::new(RwLock::new(Arc::new(
                 crate::licensing::LicenseContext::unlicensed(
                     "standalone",
@@ -266,7 +267,163 @@ impl AppState {
             installed
         };
         info!(%license_id, "licence installed at runtime");
-        Ok(installed.view(time::OffsetDateTime::now_utc()))
+        Ok(installed.view(time::OffsetDateTime::now_utc(), self.simulated()))
+    }
+
+    /// Whether the station's backend only simulates devices (ADR-0013 §2).
+    pub fn simulated(&self) -> bool {
+        self.runner.backend().is_simulated()
+    }
+
+    /// Start a queued Job (`POST /api/jobs/:id/start`), once the licence
+    /// covers it (ADR-0013 §1).
+    ///
+    /// Resolves the method the run will issue with read-only
+    /// `enumerate`/`capabilities` and `select_method`, asks the licence
+    /// ([`LicenseContext::decide_start`]), which reserves the Job's credit,
+    /// then starts the run with that decision and the method pinned. A
+    /// refusal changes nothing: the Job stays `Queued` and nothing is
+    /// broadcast. If the runner then refuses the start (the Job was aborted
+    /// meanwhile), the reservation is returned.
+    ///
+    /// [`LicenseContext::decide_start`]: crate::licensing::LicenseContext::decide_start
+    pub async fn start_job(&self, id: Uuid) -> Result<(), JobStartError> {
+        let job = self.runner.get(id).ok_or(JobStartError::Runner(
+            wipe_common::WipeError::JobNotFound(id),
+        ))?;
+        if job.state != wipe_common::JobState::Queued {
+            // Let the runner word its refusal; no licence question arises.
+            return self
+                .runner
+                .start_with(id, None, None)
+                .map_err(JobStartError::Runner);
+        }
+        let method = self.resolve_method(&job.spec).await;
+        let decision = self.decide(method.clone(), 1).await?;
+        if let Err(e) = self.runner.start_with(id, method, Some(decision.clone())) {
+            self.release(decision).await;
+            return Err(JobStartError::Runner(e));
+        }
+        Ok(())
+    }
+
+    /// Record a Job for destruction (ADR-0011 §1). A Job that holds a start
+    /// decision keeps it, with no second check and no second credit
+    /// (ADR-0013 §1); one never started is checked as a start of physical
+    /// destruction first, and refused like a start.
+    pub async fn record_for_destruction(
+        &self,
+        id: Uuid,
+        destruction: wipe_common::DestructionEvent,
+    ) -> Result<(), JobStartError> {
+        let job = self.runner.get(id).ok_or(JobStartError::Runner(
+            wipe_common::WipeError::JobNotFound(id),
+        ))?;
+        if job.licence.is_some() || job.state.is_terminal() || job.manifest_id.is_some() {
+            return self
+                .runner
+                .record_for_destruction_with(id, destruction, None)
+                .map(|_| ())
+                .map_err(JobStartError::Runner);
+        }
+        let decision = self.decide(Some(destroy_method()), 1).await?;
+        match self
+            .runner
+            .record_for_destruction_with(id, destruction, Some(decision.clone()))
+        {
+            Ok(true) => Ok(()),
+            // Started meanwhile: its own decision stands.
+            Ok(false) => {
+                self.release(decision).await;
+                Ok(())
+            }
+            Err(e) => {
+                self.release(decision).await;
+                Err(JobStartError::Runner(e))
+            }
+        }
+    }
+
+    /// Record scanned drives for destruction, one new Job each, once the
+    /// licence covers all of them: one credit per drive. A refusal creates
+    /// nothing.
+    pub async fn record_scanned(
+        &self,
+        drives: Vec<(wipe_common::JobSpec, wipe_common::DestructionEvent)>,
+    ) -> Result<Vec<Uuid>, JobStartError> {
+        let count = u32::try_from(drives.len()).unwrap_or(u32::MAX);
+        let decision = self.decide(Some(destroy_method()), count).await?;
+        // Each Job holds its own drive's share.
+        let share = wipe_common::JobLicence {
+            credits_reserved: decision.credits_reserved.min(1),
+            ..decision.clone()
+        };
+        match self
+            .runner
+            .record_scanned_for_destruction_with(drives, Some(share))
+            .await
+        {
+            Ok(ids) => Ok(ids),
+            Err(e) => {
+                self.release(decision).await;
+                Err(JobStartError::Runner(e))
+            }
+        }
+    }
+
+    /// The method a Job's run will issue, from read-only probes; `None` when
+    /// the device is not enumerated or no method fits.
+    async fn resolve_method(&self, spec: &wipe_common::JobSpec) -> Option<wipe_common::Method> {
+        if spec.intent == wipe_common::Intent::Destroy {
+            return Some(destroy_method());
+        }
+        let backend = self.runner.backend();
+        let device = backend
+            .enumerate()
+            .await
+            .ok()?
+            .into_iter()
+            .find(|d| d.id == spec.device_id)?;
+        let caps = backend.capabilities(&spec.device_id).await.ok()?;
+        wipe_common::select_method(&caps, device.media_type, spec.classification, spec.intent)
+    }
+
+    /// Ask the licence about a start. Lease saves touch the disk (up to
+    /// `LEASE_SAVE_TIMEOUT`), so it runs off the async workers.
+    async fn decide(
+        &self,
+        method: Option<wipe_common::Method>,
+        drives: u32,
+    ) -> Result<wipe_common::JobLicence, JobStartError> {
+        let license = self.license();
+        let req = crate::licensing::StartRequest {
+            method,
+            drives,
+            simulated: self.simulated(),
+        };
+        match tokio::task::spawn_blocking(move || {
+            license.decide_start(&req, time::OffsetDateTime::now_utc())
+        })
+        .await
+        {
+            Ok(Ok(decision)) => Ok(decision),
+            Ok(Err(refusal)) => {
+                info!(reason = %refusal, "start refused by the licence");
+                Err(JobStartError::Refused(refusal))
+            }
+            Err(e) => Err(JobStartError::Runner(wipe_common::WipeError::Backend(
+                format!("the licence check did not complete: {e}"),
+            ))),
+        }
+    }
+
+    /// Return a decision's reservation (an abort, or a start the runner
+    /// refused after the licence agreed).
+    async fn release(&self, decision: wipe_common::JobLicence) {
+        let license = self.license();
+        if let Err(e) = tokio::task::spawn_blocking(move || license.release(&decision)).await {
+            tracing::error!(?e, "credit reservation not returned");
+        }
     }
 
     /// Set the station's concurrence policy (default `none`). Runs
@@ -317,6 +474,10 @@ impl AppState {
     /// concurrence; the run is read from `manifests`, where `advance_run`
     /// stores it under the same lock it holds while the Jobs move, so the
     /// stored run is the one the preflight built every record against.
+    ///
+    /// The certificate is marked from the Job's recorded start decision
+    /// (`Job::licence`, ADR-0013 §1), and signing spends its reserved
+    /// credits; a Job reaching `Aborted` returns them.
     fn spawn_cert_generator(&self) {
         let mut rx = self.runner.subscribe();
         let state = self.clone();
@@ -339,6 +500,13 @@ impl AppState {
                     JobBroadcast::JobStateChanged { job_id, to, .. } => (job_id, to),
                     _ => continue,
                 };
+                if new_state == wipe_common::JobState::Aborted {
+                    // An aborted Job returns the credits its start reserved.
+                    if let Some(decision) = state.runner.get(job_id).and_then(|j| j.licence) {
+                        state.release(decision).await;
+                    }
+                    continue;
+                }
                 let needs_cert = matches!(
                     new_state,
                     wipe_common::JobState::Erased | wipe_common::JobState::Destroyed
@@ -375,25 +543,17 @@ impl AppState {
                     damaged: destroyed,
                     notes: None,
                 };
-                // ADR-0005: licensing decides how the cert is *marked*, never
-                // whether the erasure happened. An unlicensed, expired or
-                // quota-exhausted station still signs — the cert just says so.
-                // Lease saves touch the disk (up to LEASE_SAVE_TIMEOUT), so
-                // they run off the async workers.
-                let license = state.license();
-                let decision = match tokio::task::spawn_blocking(move || {
-                    license.signing_decision(time::OffsetDateTime::now_utc())
-                })
-                .await
-                {
-                    Ok(decision) => decision,
-                    Err(e) => crate::licensing::SigningDecision {
-                        evaluation: true,
-                        attestation: None,
-                        status: wipe_license::LeaseStatus::LeaseStateUnavailable {
-                            detail: format!("the licence check did not complete: {e}"),
-                        },
-                    },
+                // ADR-0013 §1: the certificate is marked from the decision
+                // the Job's start recorded, never by re-checking the licence
+                // now, so a Job that started covered stays licensed however
+                // long it ran.
+                let decision = match job.licence.clone() {
+                    Some(decision) => decision,
+                    None => {
+                        tracing::warn!(%job_id,
+                            "job has no recorded licence decision; certificate marked evaluation");
+                        wipe_common::JobLicence::evaluation(time::OffsetDateTime::now_utc())
+                    }
                 };
                 let cert = if destroyed {
                     let run = job
@@ -432,33 +592,31 @@ impl AppState {
                 };
                 match wipe_cert::sign(cert, &state.signing_key) {
                     Ok(mut signed) => {
-                        if let Some(attestation) = decision.attestation {
+                        if let Some(attestation) = decision.attestation.clone() {
                             wipe_cert::attach_attestation(&mut signed, attestation);
                         } else {
-                            tracing::info!(
-                                %job_id, status = ?decision.status,
-                                "certificate marked evaluation (no valid licence)"
-                            );
+                            tracing::info!(%job_id, "certificate marked evaluation");
                         }
-                        // Only drives that were erased count, as at baseline;
-                        // licensed and evaluation erasures are counted apart.
-                        if job.latest_erasure().is_some() {
-                            let license = state.license();
-                            let evaluation = decision.evaluation;
-                            if let Err(e) = tokio::task::spawn_blocking(move || {
-                                if evaluation {
-                                    license.record_evaluation_erasure()
-                                } else {
-                                    license.record_erasure()
-                                }
-                            })
-                            .await
-                            {
-                                tracing::error!(?e, %job_id, evaluation,
-                                    "erasure not recorded against the lease");
+                        // A licensed certificate spends its start's credits,
+                        // erased or destroyed (ADR-0013 §3). An evaluation
+                        // one is counted apart, and only when a drive was
+                        // erased.
+                        let license = state.license();
+                        let evaluation = decision.evaluation;
+                        let erased = job.latest_erasure().is_some();
+                        if let Err(e) = tokio::task::spawn_blocking(move || {
+                            if !evaluation {
+                                license.spend(&decision)
+                            } else if erased {
+                                license.record_evaluation_erasure()
                             }
+                        })
+                        .await
+                        {
+                            tracing::error!(?e, %job_id, evaluation,
+                                "certificate not counted against the lease");
                         }
-                        info!(%job_id, ?new_state, evaluation = decision.evaluation,
+                        info!(%job_id, ?new_state, evaluation,
                               "certificate signed and stored");
                         state.certs.write().insert(job_id, signed);
                     }
@@ -469,6 +627,21 @@ impl AppState {
             }
         });
     }
+}
+
+fn destroy_method() -> wipe_common::Method {
+    wipe_common::Method::Destroy {
+        method: wipe_common::DestructMethod::Disintegrate,
+    }
+}
+
+/// Why a start, or a record for destruction, did not happen.
+#[derive(Debug)]
+pub enum JobStartError {
+    /// The licence does not cover it (ADR-0013 §1): 409 with the reason.
+    Refused(crate::licensing::StartRefusal),
+    /// The runner refused it, or the check could not run.
+    Runner(wipe_common::WipeError),
 }
 
 /// Why `POST /api/license` installed nothing.

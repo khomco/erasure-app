@@ -254,11 +254,14 @@ pub async fn get_job(
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("job {id} not found")))
 }
 
+/// Start a queued Job. 409 when the licence does not cover the start on a
+/// real backend (ADR-0013 §1), with the reason and the fix; the Job stays
+/// queued and nothing is broadcast.
 pub async fn start_job(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    state.runner.start(id).map_err(runner_err)?;
+    state.start_job(id).await.map_err(start_err)?;
     Ok(Json(json!({"ok": true, "job_id": id})))
 }
 
@@ -405,7 +408,10 @@ fn attested_event(
 /// `identifiers`, otherwise read from the device (the latest erasure
 /// snapshot, else the attached device with the Job's `device_id`) beside
 /// the Job's asset tag. A device-sourced record needs a device serial; an
-/// asset tag alone is not "read from the device".
+/// asset tag alone is not "read from the device". A Job never started is
+/// checked against the licence once the request is valid (409 when it does
+/// not cover physical destruction); a started one keeps its start's
+/// decision.
 pub async fn record_for_destruction(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -460,9 +466,9 @@ pub async fn record_for_destruction(
         time::OffsetDateTime::now_utc(),
     )?;
     state
-        .runner
         .record_for_destruction(id, dest)
-        .map_err(runner_err)?;
+        .await
+        .map_err(start_err)?;
     Ok(Json(json!({"ok": true, "job_id": id})))
 }
 
@@ -470,7 +476,8 @@ pub async fn record_for_destruction(
 /// drive (intent `destroy`, device id `scanned:<serial, else asset tag>`),
 /// each with its own attestation, sharing one statement and one time.
 /// All-or-nothing: a blank field, a drive with no identifier or a repeated
-/// identifier is 422; a drive matching an open Job is 409 naming that Job.
+/// identifier is 422; a drive matching an open Job is 409 naming that Job;
+/// a licence that does not cover every drive (one credit each) is 409.
 pub async fn record_scanned(
     State(state): State<AppState>,
     Json(req): Json<RecordScannedRequest>,
@@ -526,11 +533,7 @@ pub async fn record_scanned(
         };
         drives.push((spec, ev));
     }
-    let job_ids = state
-        .runner
-        .record_scanned_for_destruction(drives)
-        .await
-        .map_err(runner_err)?;
+    let job_ids = state.record_scanned(drives).await.map_err(start_err)?;
     Ok(Json(RecordScannedResponse { job_ids }))
 }
 
@@ -972,7 +975,9 @@ pub async fn destruction_policy(State(state): State<AppState>) -> Json<serde_jso
 /// The station's licence state. Read-only: it never moves the clock
 /// watermark, saves lease state or records usage, so a client may poll it.
 pub async fn license(State(state): State<AppState>) -> Json<crate::licensing::LicenseView> {
-    let mut view = state.license().view(time::OffsetDateTime::now_utc());
+    let mut view = state
+        .license()
+        .view(time::OffsetDateTime::now_utc(), state.simulated());
     view.hub_check = state.licence_fetch.last();
     Json(view)
 }
@@ -1056,6 +1061,17 @@ fn runner_err(e: WipeError) -> ApiError {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     ApiError(status, e.to_string())
+}
+
+/// A licence refusal is 409 with its text; a runner refusal maps as
+/// [`runner_err`].
+fn start_err(e: crate::app::JobStartError) -> ApiError {
+    match e {
+        crate::app::JobStartError::Refused(refusal) => {
+            ApiError(StatusCode::CONFLICT, refusal.message())
+        }
+        crate::app::JobStartError::Runner(e) => runner_err(e),
+    }
 }
 
 impl IntoResponse for ApiError {

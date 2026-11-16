@@ -231,8 +231,8 @@ pub fn build_station(cfg: StationConfig, report: &mut dyn FnMut(String)) -> Resu
         );
     }
 
-    // ADR-0005: a licence only decides how certificates are *marked*. A
-    // station with none still erases and still signs. The roots are kept
+    // ADR-0013: the licence decides at each start whether a Job may run on
+    // a real backend, and how its certificate is marked. The roots are kept
     // whether or not a licence is given: they are also what a licence
     // installed at runtime must verify against (ADR-0008 §4).
     let license_ctx = build_license_context(
@@ -707,7 +707,11 @@ fn build_license_context(
 ) -> Result<LicenseContext> {
     let now = time::OffsetDateTime::now_utc();
     let Some(path) = license_path else {
-        report("licence: none — free tier, certificates will be marked evaluation".into());
+        report(
+            "licence: none — new jobs are refused on a real device backend; on the simulated \
+             backend certificates are marked evaluation"
+                .into(),
+        );
         return Ok(LicenseContext::open(station_id, None, lease_store, now));
     };
 
@@ -1007,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unlicensed_station_saves_its_lease_after_a_signing_decision() {
+    fn an_unlicensed_station_saves_its_lease_after_a_start_decision() {
         let dir = lease_tmpdir("unlicensed");
         let path = dir.join("lease-state.json");
         let store = Arc::new(crate::LocalFileLeaseStore::new(path.clone()));
@@ -1016,7 +1020,16 @@ mod tests {
                 .unwrap();
         assert_eq!(ctx.lease_persistence().tier, crate::StoreTier::LocalFile);
 
-        let decision = ctx.signing_decision(time::OffsetDateTime::now_utc());
+        let decision = ctx
+            .decide_start(
+                &crate::StartRequest {
+                    method: None,
+                    drives: 1,
+                    simulated: true,
+                },
+                time::OffsetDateTime::now_utc(),
+            )
+            .unwrap();
         assert!(decision.evaluation);
         let saved: wipe_license::LeaseState =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

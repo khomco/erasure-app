@@ -6,7 +6,7 @@ import {
   LICENCE_UNKNOWN_BANNER,
   licenceBanner,
 } from "./licence";
-import type { LapsePolicy, LeaseStatus, LicenseInfo } from "./types";
+import type { LeaseStatus, LicenseInfo } from "./types";
 
 function info(status: LeaseStatus, over: Partial<LicenseInfo> = {}): LicenseInfo {
   return {
@@ -15,34 +15,63 @@ function info(status: LeaseStatus, over: Partial<LicenseInfo> = {}): LicenseInfo
     customer: { id: "c1", name: "Acme ITAD" },
     not_after: "2026-12-08T00:00:00Z",
     instance_public_key_id: "k1",
-    lapse_policy: "evaluation",
+    new_jobs_refused: null,
+    simulated_backend: false,
     fingerprint: "fp",
     ...over,
   };
 }
 
-function valid(days: number, lapse_policy: LapsePolicy | null = "evaluation", not_after: string | null = "2026-12-08T00:00:00Z") {
-  return licenceBanner(
-    info({ status: "valid", days_remaining: days }, { lapse_policy, not_after }),
-  );
+function valid(
+  days: number,
+  over: Partial<LicenseInfo> = {},
+) {
+  return licenceBanner(info({ status: "valid", days_remaining: days }, over));
 }
+
+const REAL_EXPIRY_LINE =
+  "From 2026-12-08 UTC, new jobs will be refused until a renewed licence is installed. Renew and install it before then.";
 
 describe("licenceBanner", () => {
   it("names the thresholds 30, 7 and 1 days", () => {
     expect([EXPIRY_NOTICE_DAYS, EXPIRY_URGENT_DAYS, EXPIRY_FINAL_DAYS]).toEqual([30, 7, 1]);
   });
 
-  it("shows evaluation mode, in warning tone, on an unlicensed station", () => {
+  it("shows the server's refusal text in danger tone when new jobs are refused", () => {
+    const refusal =
+      "This station's licence expired on 2026-11-01. Install the renewed licence to start new jobs.";
+    for (const status of [
+      { status: "unlicensed" },
+      { status: "expired", not_after: "2026-11-01T00:00:00Z" },
+      { status: "quota_exhausted", used: 10, allowed: 10 },
+    ] as LeaseStatus[]) {
+      expect(licenceBanner(info(status, { new_jobs_refused: refusal }))).toEqual({
+        tone: "danger",
+        heading: "New jobs are refused",
+        lines: [refusal],
+      });
+    }
+  });
+
+  it("shows evaluation mode, in warning tone, on an unlicensed simulated station", () => {
     const view = licenceBanner(
       info(
         { status: "unlicensed" },
-        { customer: null, not_after: null, instance_public_key_id: null, lapse_policy: null },
+        {
+          customer: null,
+          not_after: null,
+          instance_public_key_id: null,
+          simulated_backend: true,
+        },
       ),
     );
     expect(view).toEqual({
       tone: "warning",
       heading: "Evaluation mode — no licence installed",
-      lines: ["server message for unlicensed"],
+      lines: [
+        "server message for unlicensed",
+        "This station's backend is simulated: jobs still run, and their certificates are marked evaluation.",
+      ],
     });
   });
 
@@ -52,31 +81,65 @@ describe("licenceBanner", () => {
     { status: "quota_exhausted", used: 10, allowed: 10 },
     { status: "wrong_machine", expected: "aaa", actual: "bbb" },
     { status: "clock_rollback", watermark: "2026-11-08T00:00:00Z", observed: "2026-01-01T00:00:00Z" },
-    { status: "lease_state_unavailable", detail: "disk full" },
   ];
   for (const status of lapsed) {
-    it(`shows the server's message in danger tone when ${status.status}`, () => {
-      expect(licenceBanner(info(status))).toEqual({
+    it(`on a simulated station, shows the server's message in danger tone when ${status.status}`, () => {
+      expect(licenceBanner(info(status, { simulated_backend: true }))).toEqual({
         tone: "danger",
-        heading: "Licensed signing unavailable — certificates are marked evaluation",
-        lines: [`server message for ${status.status}`],
+        heading: "Licence not in force — certificates are marked evaluation",
+        lines: [
+          `server message for ${status.status}`,
+          "This station's backend is simulated: jobs still run, and their certificates are marked evaluation.",
+        ],
       });
     });
   }
+
+  it("on a simulated station, a lease fault claims neither licensed nor evaluation", () => {
+    expect(
+      licenceBanner(
+        info({ status: "lease_state_unavailable", detail: "disk full" }, { simulated_backend: true }),
+      ),
+    ).toEqual({
+      tone: "warning",
+      heading: "Licence state needs attention",
+      lines: [
+        "server message for lease_state_unavailable",
+        "This station's backend is simulated: new jobs still start. Fix the problem named above.",
+      ],
+    });
+  });
+
+  it("says jobs still start when a real station's lease fault refuses nothing", () => {
+    expect(
+      licenceBanner(info({ status: "lease_state_unavailable", detail: "disk full" })),
+    ).toEqual({
+      tone: "warning",
+      heading: "Licence state needs attention",
+      lines: [
+        "server message for lease_state_unavailable",
+        "New jobs still start under this licence. Fix the problem named above.",
+      ],
+    });
+  });
 
   it("shows nothing with 31 days left", () => {
     expect(valid(31)).toBeNull();
   });
 
-  it("warns from 30 days, naming the expiry date and days left", () => {
+  it("warns from 30 days, naming the expiry date and that new jobs will then be refused", () => {
     for (const days of [30, 8]) {
       const view = valid(days);
       expect(view?.tone).toBe("warning");
       expect(view?.heading).toBe(`Licence expires in ${days} days, on 2026-12-08 UTC`);
-      expect(view?.lines).toEqual([
-        "When it expires, erasure continues, but certificates will be marked evaluation until a renewed licence is installed.",
-      ]);
+      expect(view?.lines).toEqual([REAL_EXPIRY_LINE]);
     }
+  });
+
+  it("says jobs still run with evaluation certificates on a simulated station", () => {
+    expect(valid(8, { simulated_backend: true })?.lines).toEqual([
+      "This station's backend is simulated: when the licence expires, jobs still run, with certificates marked evaluation, until a renewed licence is installed.",
+    ]);
   });
 
   it("says renew now from 7 days, still in warning tone", () => {
@@ -101,24 +164,17 @@ describe("licenceBanner", () => {
     });
   });
 
-  it("says new jobs will be refused under the stop lapse policy", () => {
-    expect(valid(7, "stop")?.lines).toEqual([
-      "This licence's lapse policy is stop: new jobs will be refused when it expires. Renew and install the new licence before then.",
-    ]);
-  });
-
-  it("treats a null lapse policy as evaluation", () => {
-    expect(valid(7, null)?.lines[0]).toMatch(/erasure continues/);
-  });
-
   it("uses days left only when not_after is null", () => {
-    expect(valid(8, "evaluation", null)?.heading).toBe("Licence expires in 8 days");
-    expect(valid(0, "evaluation", null)?.heading).toBe("Licence expires within a day — renew now");
+    expect(valid(8, { not_after: null })?.heading).toBe("Licence expires in 8 days");
+    expect(valid(0, { not_after: null })?.heading).toBe("Licence expires within a day — renew now");
+    expect(valid(8, { not_after: null })?.lines[0]).toMatch(/^When it expires, new jobs will be refused/);
   });
 
-  it("has an unknown-status banner telling the operator the station could not report", () => {
+  it("has an unknown-status banner saying jobs may be refused or marked evaluation", () => {
     expect(LICENCE_UNKNOWN_BANNER.tone).toBe("warning");
     expect(LICENCE_UNKNOWN_BANNER.heading).toBe("Licence status unknown");
-    expect(LICENCE_UNKNOWN_BANNER.lines.join(" ")).toMatch(/could not report its licence/);
+    const text = LICENCE_UNKNOWN_BANNER.lines.join(" ");
+    expect(text).toMatch(/could not report its licence/);
+    expect(text).toMatch(/new jobs may be refused or their certificates marked evaluation/);
   });
 });

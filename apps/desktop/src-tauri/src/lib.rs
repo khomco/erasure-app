@@ -718,7 +718,15 @@ mod tests {
         first.save_bay_topology(layout).unwrap();
         let decision = first
             .license()
-            .signing_decision(time::OffsetDateTime::now_utc());
+            .decide_start(
+                &wipe_server::StartRequest {
+                    method: None,
+                    drives: 1,
+                    simulated: first.simulated(),
+                },
+                time::OffsetDateTime::now_utc(),
+            )
+            .unwrap();
         assert!(decision.evaluation);
         first.license().record_evaluation_erasure();
         let first_lease = first.license().lease_state();

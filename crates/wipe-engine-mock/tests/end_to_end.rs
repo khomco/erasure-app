@@ -84,6 +84,30 @@ async fn nvme_crypto_erase_happy_path_reaches_erased() {
     assert_eq!(v.erasure_event_id, erasure.id);
 }
 
+/// The method `start_with` pins (the one the station's licence check
+/// resolved) is the one the run issues, even where auto-selection would
+/// choose another.
+#[tokio::test]
+async fn start_with_issues_the_pinned_method() {
+    let backend = Arc::new(MockBackend::with_catalog(
+        wipe_engine_mock::default_devices_public(),
+        MockTiming::fast(),
+    ));
+    let runner = JobRunner::new(backend);
+    let pinned = wipe_common::Method::BlockOverwrite {
+        pattern: wipe_common::Pattern::Zeros,
+        passes: 1,
+    };
+
+    let id = runner.create_job(job_spec("dev-nvme-0")).await.unwrap();
+    runner.start_with(id, Some(pinned.clone()), None).unwrap();
+
+    let job = wait_until(&runner, id, |j| j.latest_erasure().is_some()).await;
+    let erasure = job.latest_erasure().unwrap();
+    assert_eq!(erasure.resolved_method, Some(pinned));
+    assert!(erasure.spec.method.is_some());
+}
+
 #[tokio::test]
 async fn sata_failure_keeps_outer_job_in_progress_for_operator_decision() {
     let backend = Arc::new(MockBackend::with_catalog(

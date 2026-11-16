@@ -2281,10 +2281,7 @@ async fn spawn_server_with_license(license: Arc<wipe_server::LicenseContext>) ->
     format!("http://{addr}")
 }
 
-fn license_chain(
-    not_after: time::OffsetDateTime,
-    policy: wipe_license::LapsePolicy,
-) -> wipe_license::AttestationChain {
+fn license_chain(not_after: time::OffsetDateTime) -> wipe_license::AttestationChain {
     let now = time::OffsetDateTime::now_utc();
     let ent = wipe_license::Entitlements {
         customer_id: "cust-42".into(),
@@ -2300,20 +2297,26 @@ fn license_chain(
         machine_binding: None,
     };
     let cert = wipe_license::VendorRoot::generate()
-        .issue_with_lapse_policy("lic-1", "ed25519:instance-key", ent, now, policy)
+        .issue("lic-1", "ed25519:instance-key", ent, now)
         .unwrap();
     wipe_license::AttestationChain::new(cert)
 }
 
-fn licensed_ctx(
-    not_after: time::OffsetDateTime,
-    policy: wipe_license::LapsePolicy,
-) -> Arc<wipe_server::LicenseContext> {
+fn licensed_ctx(not_after: time::OffsetDateTime) -> Arc<wipe_server::LicenseContext> {
     Arc::new(wipe_server::LicenseContext::licensed(
         "station-1",
-        license_chain(not_after, policy),
+        license_chain(not_after),
         wipe_license::LeaseState::new(time::OffsetDateTime::now_utc()),
     ))
+}
+
+/// A one-drive start on the simulated backend, which is never refused.
+fn sim_start() -> wipe_server::StartRequest {
+    wipe_server::StartRequest {
+        method: None,
+        drives: 1,
+        simulated: true,
+    }
 }
 
 async fn get_license(base: &str) -> serde_json::Value {
@@ -2349,9 +2352,10 @@ async fn license_route_on_an_unlicensed_station() {
             "customer",
             "fingerprint",
             "instance_public_key_id",
-            "lapse_policy",
+            "new_jobs_refused",
             "not_after",
             "operator_message",
+            "simulated_backend",
             "status"
         ]
     );
@@ -2364,10 +2368,12 @@ async fn license_route_on_an_unlicensed_station() {
         "customer",
         "not_after",
         "instance_public_key_id",
-        "lapse_policy",
+        "new_jobs_refused",
     ] {
         assert_eq!(view[key], json!(null), "{key}");
     }
+    // The mock backend is simulated: nothing is refused (ADR-0013 §2).
+    assert_eq!(view["simulated_backend"], true);
     assert_eq!(
         view["fingerprint"],
         wipe_license::machine_fingerprint("standalone")
@@ -2377,7 +2383,7 @@ async fn license_route_on_an_unlicensed_station() {
 #[tokio::test]
 async fn license_route_on_a_valid_licence() {
     let not_after = time::OffsetDateTime::now_utc() + time::Duration::days(30);
-    let ctx = licensed_ctx(not_after, wipe_license::LapsePolicy::Evaluation);
+    let ctx = licensed_ctx(not_after);
     let base = spawn_server_with_license(ctx).await;
     let view = get_license(&base).await;
     assert_eq!(view["status"]["status"], "valid");
@@ -2397,7 +2403,7 @@ async fn license_route_on_a_valid_licence() {
     .unwrap();
     assert_eq!(parsed, not_after);
     assert_eq!(view["instance_public_key_id"], "ed25519:instance-key");
-    assert_eq!(view["lapse_policy"], "evaluation");
+    assert!(view.get("lapse_policy").is_none(), "{view}");
     assert_eq!(
         view["fingerprint"],
         wipe_license::machine_fingerprint("station-1")
@@ -2409,19 +2415,9 @@ async fn license_route_on_a_valid_licence() {
 }
 
 #[tokio::test]
-async fn license_route_reports_a_stop_lapse_policy() {
-    let ctx = licensed_ctx(
-        time::OffsetDateTime::now_utc() + time::Duration::days(30),
-        wipe_license::LapsePolicy::Stop,
-    );
-    let base = spawn_server_with_license(ctx).await;
-    assert_eq!(get_license(&base).await["lapse_policy"], "stop");
-}
-
-#[tokio::test]
 async fn license_route_on_an_expired_licence() {
     let not_after = time::OffsetDateTime::now_utc() - time::Duration::days(3);
-    let ctx = licensed_ctx(not_after, wipe_license::LapsePolicy::Evaluation);
+    let ctx = licensed_ctx(not_after);
     let base = spawn_server_with_license(ctx).await;
     let view = get_license(&base).await;
     assert_eq!(view["status"]["status"], "expired");
@@ -2445,7 +2441,6 @@ async fn license_route_reports_unreadable_lease_state() {
         "station-1",
         Some(license_chain(
             time::OffsetDateTime::now_utc() + time::Duration::days(30),
-            wipe_license::LapsePolicy::Evaluation,
         )),
         Arc::new(wipe_server::LocalFileLeaseStore::new(path.clone())),
         time::OffsetDateTime::now_utc(),
@@ -2473,7 +2468,6 @@ async fn license_route_never_writes_lease_state_or_moves_the_watermark() {
         "station-1",
         Some(license_chain(
             time::OffsetDateTime::now_utc() + time::Duration::days(30),
-            wipe_license::LapsePolicy::Evaluation,
         )),
         Arc::new(wipe_server::LocalFileLeaseStore::new(path.clone())),
         start,
@@ -2486,8 +2480,8 @@ async fn license_route_never_writes_lease_state_or_moves_the_watermark() {
     assert!(!path.exists(), "GET /api/license created the lease file");
     assert_eq!(ctx.lease_state().time_watermark, start);
 
-    // A file a signing decision wrote: reads must leave it byte-identical.
-    let decision = ctx.signing_decision(start);
+    // A file a start decision wrote: reads must leave it byte-identical.
+    let decision = ctx.decide_start(&sim_start(), start).unwrap();
     assert!(!decision.evaluation);
     let saved = std::fs::read(&path).unwrap();
     let before = ctx.lease_state();
@@ -2499,9 +2493,10 @@ async fn license_route_never_writes_lease_state_or_moves_the_watermark() {
     assert_eq!(ctx.lease_state().time_watermark, start);
     assert_eq!(ctx.lease_state().erasures_used, 0);
 
-    // And the next signing decision is the one it would have been anyway.
+    // And the next start decision is the one it would have been anyway.
     assert!(
-        !ctx.signing_decision(time::OffsetDateTime::now_utc())
+        !ctx.decide_start(&sim_start(), time::OffsetDateTime::now_utc())
+            .unwrap()
             .evaluation
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -2537,13 +2532,14 @@ async fn license_route_reports_a_failed_lease_save() {
         "station-1",
         Some(license_chain(
             time::OffsetDateTime::now_utc() + time::Duration::days(30),
-            wipe_license::LapsePolicy::Evaluation,
         )),
         Arc::new(FailingSaveStore),
         time::OffsetDateTime::now_utc(),
     ));
+    // A lease fault never uncovers an unlimited licence (decision 5).
     assert!(
-        ctx.signing_decision(time::OffsetDateTime::now_utc())
+        !ctx.decide_start(&sim_start(), time::OffsetDateTime::now_utc())
+            .unwrap()
             .evaluation
     );
     let base = spawn_server_with_license(ctx).await;
@@ -2910,9 +2906,776 @@ async fn installing_over_an_unreadable_lease_file_reports_it_and_never_writes_it
     );
     let decision = state
         .license()
-        .signing_decision(time::OffsetDateTime::now_utc());
-    assert!(decision.evaluation);
-    state.license().record_erasure();
+        .decide_start(&sim_start(), time::OffsetDateTime::now_utc())
+        .unwrap();
+    assert!(!decision.evaluation, "an unlimited licence stays licensed");
+    state.license().spend(&decision);
     assert_eq!(std::fs::read(&path).unwrap(), b"not json");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- The start gate (licence-visibility story 5, ADR-0013 §1) -----------------
+
+/// A backend that touches "real" hardware: the mock underneath, reporting
+/// `is_simulated() == false`, so the station's licence check can refuse.
+struct RealBackend(Arc<MockBackend>);
+
+#[async_trait::async_trait]
+impl wipe_engine::DeviceBackend for RealBackend {
+    async fn enumerate(&self) -> wipe_common::WipeResult<Vec<wipe_common::Device>> {
+        self.0.enumerate().await
+    }
+    async fn capabilities(
+        &self,
+        id: &wipe_common::DeviceId,
+    ) -> wipe_common::WipeResult<wipe_common::Capabilities> {
+        self.0.capabilities(id).await
+    }
+    async fn unfreeze(&self, id: &wipe_common::DeviceId) -> wipe_common::WipeResult<()> {
+        self.0.unfreeze(id).await
+    }
+    async fn issue(
+        &self,
+        id: &wipe_common::DeviceId,
+        method: &wipe_common::Method,
+    ) -> wipe_common::WipeResult<wipe_engine::BackendHandle> {
+        self.0.issue(id, method).await
+    }
+    async fn poll(
+        &self,
+        handle: &wipe_engine::BackendHandle,
+    ) -> wipe_common::WipeResult<wipe_engine::BackendProgress> {
+        self.0.poll(handle).await
+    }
+    async fn cancel(&self, handle: &wipe_engine::BackendHandle) -> wipe_common::WipeResult<()> {
+        self.0.cancel(handle).await
+    }
+    async fn verify(
+        &self,
+        id: &wipe_common::DeviceId,
+        method: wipe_common::VerificationMethod,
+        samples: u32,
+    ) -> wipe_common::WipeResult<wipe_common::VerificationReport> {
+        self.0.verify(id, method, samples).await
+    }
+}
+
+/// Erasures slow enough to observe a running Job's reservation.
+fn gate_timing() -> MockTiming {
+    MockTiming {
+        nvme_sanitize_secs: 1.5,
+        ata_secure_erase_secs: 1.5,
+        block_overwrite_secs: 1.5,
+        deterministic: true,
+    }
+}
+
+/// A station on a real backend (or, with `simulated`, the mock itself),
+/// with `license` if given, trusting `roots` and signing with `key`. Returns
+/// the base URL, the state and the mock underneath (to detach drives).
+async fn spawn_gated(
+    simulated: bool,
+    license: Option<Arc<wipe_server::LicenseContext>>,
+    roots: Vec<VerifyingKey>,
+    key: Arc<SigningKey>,
+) -> (String, AppState, Arc<MockBackend>) {
+    spawn_gated_timed(simulated, license, roots, key, gate_timing()).await
+}
+
+async fn spawn_gated_timed(
+    simulated: bool,
+    license: Option<Arc<wipe_server::LicenseContext>>,
+    roots: Vec<VerifyingKey>,
+    key: Arc<SigningKey>,
+    timing: MockTiming,
+) -> (String, AppState, Arc<MockBackend>) {
+    let mock = Arc::new(MockBackend::with_catalog(
+        wipe_engine_mock::default_devices_public(),
+        timing,
+    ));
+    let backend: Arc<dyn wipe_engine::DeviceBackend> = if simulated {
+        mock.clone()
+    } else {
+        Arc::new(RealBackend(mock.clone()))
+    };
+    let mut state = AppState::new(backend, None, key).with_vendor_roots(roots);
+    if let Some(license) = license {
+        state = state.with_license(license);
+    }
+    let app = router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), state, mock)
+}
+
+async fn spawn_real(
+    license: Option<Arc<wipe_server::LicenseContext>>,
+) -> (String, AppState, Arc<MockBackend>) {
+    spawn_gated(false, license, vec![], Arc::new(SigningKey::generate())).await
+}
+
+/// Valid entitlements (unlimited, every method, no binding) to adjust.
+fn gate_ent() -> wipe_license::Entitlements {
+    let now = time::OffsetDateTime::now_utc();
+    wipe_license::Entitlements {
+        customer_id: "cust-gate".into(),
+        customer_name: "Acme Recycling".into(),
+        quota: wipe_license::Quota::Unlimited,
+        scope: wipe_license::Scope::Site {
+            site_id: "s".into(),
+        },
+        not_before: now - time::Duration::days(60),
+        not_after: now + time::Duration::days(30),
+        features: vec![],
+        allowed_methods: wipe_license::AllowedMethods::All,
+        machine_binding: None,
+    }
+}
+
+/// A licence context for `ent` with a fresh lease in RAM.
+fn gate_ctx(ent: wipe_license::Entitlements) -> Arc<wipe_server::LicenseContext> {
+    gate_ctx_with_lease(
+        ent,
+        wipe_license::LeaseState::new(time::OffsetDateTime::now_utc()),
+    )
+}
+
+fn gate_ctx_with_lease(
+    ent: wipe_license::Entitlements,
+    lease: wipe_license::LeaseState,
+) -> Arc<wipe_server::LicenseContext> {
+    Arc::new(wipe_server::LicenseContext::licensed(
+        "station-1",
+        gate_chain(ent),
+        lease,
+    ))
+}
+
+/// Licence `lic-gate` for `ent`.
+fn gate_chain(ent: wipe_license::Entitlements) -> wipe_license::AttestationChain {
+    let cert = wipe_license::VendorRoot::generate()
+        .issue(
+            "lic-gate",
+            "ed25519:instance-key",
+            ent,
+            time::OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    wipe_license::AttestationChain::new(cert)
+}
+
+fn count(erasures: u64) -> wipe_license::Entitlements {
+    wipe_license::Entitlements {
+        quota: wipe_license::Quota::Count { erasures },
+        ..gate_ent()
+    }
+}
+
+/// A queued Job that erases `device` for reuse at `classification`.
+async fn http_create_reuse_job(
+    client: &reqwest::Client,
+    base: &str,
+    device: &str,
+    classification: &str,
+) -> String {
+    let (status, created) = http_post(
+        client,
+        format!("{base}/api/jobs"),
+        Some(json!({
+            "device_id": device,
+            "classification": classification,
+            "intent": "reuse",
+            "operator": http_op(),
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{created}");
+    created["job_id"].as_str().unwrap().to_string()
+}
+
+async fn http_start(
+    client: &reqwest::Client,
+    base: &str,
+    job_id: &str,
+) -> (u16, serde_json::Value) {
+    http_post(client, format!("{base}/api/jobs/{job_id}/start"), None).await
+}
+
+/// Start `job_id` expecting a refusal: 409 whose text contains every one of
+/// `wanted`; the Job stays queued, and nothing is broadcast.
+async fn assert_refused(
+    client: &reqwest::Client,
+    base: &str,
+    state: &AppState,
+    job_id: &str,
+    wanted: &[&str],
+) -> String {
+    let mut rx = state.runner.subscribe();
+    let (status, body) = http_start(client, base, job_id).await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body.as_object().unwrap().len(), 1, "{body}");
+    let text = body["error"].as_str().unwrap().to_string();
+    for w in wanted {
+        assert!(text.contains(w), "{text:?} should contain {w:?}");
+    }
+    let job = http_get_job(client, base, job_id).await;
+    assert_eq!(job["state"]["state"], "queued", "{job}");
+    assert!(job.get("licence").is_none(), "{job}");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "a refused start broadcast something"
+    );
+    text
+}
+
+/// Credits left as `GET /api/license` reports them: `remaining_erasures`
+/// while valid, 0 once every credit is spent or reserved.
+async fn remaining(base: &str) -> serde_json::Value {
+    let status = get_license(base).await["status"].clone();
+    if status["status"] == "quota_exhausted" {
+        return json!(0);
+    }
+    status["remaining_erasures"].clone()
+}
+
+/// Poll `GET /api/license` until `remaining_erasures` is `want`.
+async fn wait_for_remaining(base: &str, want: u64) {
+    for _ in 0..200 {
+        if remaining(base).await == json!(want) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "remaining_erasures never reached {want}: {}",
+        get_license(base).await
+    );
+}
+
+#[tokio::test]
+async fn a_licensed_start_reserves_a_credit_and_its_certificate_spends_it() {
+    let ctx = gate_ctx(count(5));
+    let (base, state, _) = spawn_real(Some(ctx.clone())).await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    let (status, body) = http_start(&client, &base, &job_id).await;
+    assert_eq!(status, 200, "{body}");
+
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["licence"]["evaluation"], false, "{job}");
+    assert_eq!(job["licence"]["license_id"], "lic-gate");
+    assert_eq!(job["licence"]["credits_reserved"], 1);
+    assert_eq!(
+        job["licence"]["attestation"]["license"]["body"]["license_id"],
+        "lic-gate"
+    );
+    assert_eq!(remaining(&base).await, json!(4));
+    assert_eq!(get_license(&base).await["new_jobs_refused"], json!(null));
+
+    let signed = http_wait_for_certificate(&client, &base, &job_id).await;
+    assert_eq!(signed["certificate"]["evaluation"], false, "{signed}");
+    assert_eq!(
+        signed["attestation"]["license"]["body"]["license_id"],
+        "lic-gate"
+    );
+    // The decision itself is station bookkeeping, never signed.
+    assert!(signed["certificate"].get("licence").is_none(), "{signed}");
+    for _ in 0..100 {
+        if ctx.lease_state().erasures_used == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let lease = state.license().lease_state();
+    assert_eq!((lease.erasures_used, lease.credits_reserved), (1, 0));
+    assert_eq!(remaining(&base).await, json!(4));
+}
+
+#[tokio::test]
+async fn an_unlicensed_real_station_refuses_starts_and_scanned_records() {
+    let (base, state, _) = spawn_real(None).await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    let text = assert_refused(
+        &client,
+        &base,
+        &state,
+        &job_id,
+        &["no licence", "Install a licence"],
+    )
+    .await;
+
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/destruction/records"),
+        Some(group_body(json!([{ "serial": "DEAD-1" }]))),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"], text);
+    assert_eq!(
+        http_list_jobs(&client, &base).await.len(),
+        1,
+        "nothing created"
+    );
+
+    // Recording the queued Job for destruction is a start too.
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/record-for-destruction"),
+        Some(attested("shred", http_op())),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["state"]["state"], "queued");
+    assert_eq!(count_activities(&job, "destruction"), 0);
+
+    let view = get_license(&base).await;
+    assert_eq!(view["new_jobs_refused"], text);
+    assert_eq!(view["simulated_backend"], false);
+}
+
+#[tokio::test]
+async fn each_licence_problem_refuses_with_its_own_reason() {
+    let now = time::OffsetDateTime::now_utc();
+    let expired_on = now - time::Duration::days(3);
+    let valid_from = now + time::Duration::days(3);
+    let cases: Vec<(Arc<wipe_server::LicenseContext>, Vec<String>)> = vec![
+        (
+            gate_ctx(wipe_license::Entitlements {
+                not_after: expired_on,
+                ..gate_ent()
+            }),
+            vec![
+                format!("expired on {}", expired_on.date()),
+                "Install the renewed licence".into(),
+            ],
+        ),
+        (
+            gate_ctx(wipe_license::Entitlements {
+                not_before: valid_from,
+                ..gate_ent()
+            }),
+            vec![format!("not valid until {}", valid_from.date())],
+        ),
+        (
+            gate_ctx(wipe_license::Entitlements {
+                machine_binding: Some("mf1:another-bench".into()),
+                ..gate_ent()
+            }),
+            vec![
+                "bound to machine mf1:another-bench".into(),
+                wipe_license::machine_fingerprint("station-1"),
+            ],
+        ),
+        (
+            gate_ctx_with_lease(
+                gate_ent(),
+                wipe_license::LeaseState::new(now + time::Duration::days(2)),
+            ),
+            vec!["moved backwards".into(), "Correct the system clock".into()],
+        ),
+    ];
+    let mut texts = Vec::new();
+    for (ctx, wanted) in cases {
+        let (base, state, _) = spawn_real(Some(ctx)).await;
+        let client = reqwest::Client::new();
+        let job_id = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+        let wanted: Vec<&str> = wanted.iter().map(String::as_str).collect();
+        let text = assert_refused(&client, &base, &state, &job_id, &wanted).await;
+        assert_eq!(get_license(&base).await["new_jobs_refused"], text);
+        texts.push(text);
+    }
+    texts.dedup();
+    assert_eq!(texts.len(), 4, "{texts:#?}");
+}
+
+#[tokio::test]
+async fn the_last_credit_goes_to_one_start_and_the_next_is_refused() {
+    let (base, state, _) = spawn_real(Some(gate_ctx(count(1)))).await;
+    let client = reqwest::Client::new();
+    let first = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    let second = http_create_reuse_job(&client, &base, "dev-nvme-1", "high").await;
+    assert_eq!(http_start(&client, &base, &first).await.0, 200);
+    assert_refused(
+        &client,
+        &base,
+        &state,
+        &second,
+        &["no credits left", "Add credits"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_method_the_licence_does_not_allow_is_refused_naming_it() {
+    let only_overwrite = wipe_license::Entitlements {
+        allowed_methods: wipe_license::AllowedMethods::Only {
+            classes: vec![wipe_license::MethodClass::BlockOverwrite],
+        },
+        ..gate_ent()
+    };
+    let (base, state, mock) = spawn_real(Some(gate_ctx(only_overwrite))).await;
+    let client = reqwest::Client::new();
+    let nvme = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    assert_refused(&client, &base, &state, &nvme, &["NVMe Sanitize"]).await;
+
+    // A drive that is no longer detected: its method cannot be checked.
+    use wipe_engine::DeviceSimulator;
+    let gone = http_create_reuse_job(&client, &base, "dev-nvme-1", "high").await;
+    mock.detach(&wipe_common::DeviceId("dev-nvme-1".into()))
+        .unwrap();
+    assert_refused(&client, &base, &state, &gone, &["could not be determined"]).await;
+}
+
+#[tokio::test]
+async fn under_every_method_an_undetected_drive_still_starts() {
+    use wipe_engine::DeviceSimulator;
+    let (base, _, mock) = spawn_real(Some(gate_ctx(gate_ent()))).await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    mock.detach(&wipe_common::DeviceId("dev-nvme-0".into()))
+        .unwrap();
+    let (status, body) = http_start(&client, &base, &job_id).await;
+    assert_eq!(status, 200, "{body}");
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["licence"]["evaluation"], false);
+}
+
+#[tokio::test]
+async fn a_counted_reservation_that_cannot_be_saved_is_refused() {
+    let ctx = Arc::new(wipe_server::LicenseContext::open(
+        "station-1",
+        Some(gate_chain(count(5))),
+        Arc::new(FailingSaveStore),
+        time::OffsetDateTime::now_utc(),
+    ));
+    let (base, state, _) = spawn_real(Some(ctx.clone())).await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    assert_refused(&client, &base, &state, &job_id, &["failing-save"]).await;
+    assert_eq!(ctx.lease_state().credits_reserved, 0, "reservation undone");
+}
+
+/// The lease-fault rows: a valid unlimited licence whose lease cannot be
+/// saved starts licensed Jobs, real or simulated, and certifies them
+/// licensed; the banner reports the fault.
+#[tokio::test]
+async fn a_lease_fault_on_an_unlimited_licence_starts_licensed_jobs() {
+    for simulated in [false, true] {
+        let ctx = Arc::new(wipe_server::LicenseContext::open(
+            "station-1",
+            Some(gate_chain(gate_ent())),
+            Arc::new(FailingSaveStore),
+            time::OffsetDateTime::now_utc(),
+        ));
+        let (base, _, _) = spawn_gated(
+            simulated,
+            Some(ctx),
+            vec![],
+            Arc::new(SigningKey::generate()),
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let job_id = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+        let (status, body) = http_start(&client, &base, &job_id).await;
+        assert_eq!(status, 200, "simulated {simulated}: {body}");
+        let signed = http_wait_for_certificate(&client, &base, &job_id).await;
+        assert_eq!(signed["certificate"]["evaluation"], false, "{signed}");
+        assert!(signed["attestation"].is_object(), "{signed}");
+        let view = get_license(&base).await;
+        assert_eq!(
+            view["status"]["status"], "lease_state_unavailable",
+            "{view}"
+        );
+        assert_eq!(view["new_jobs_refused"], json!(null), "{view}");
+    }
+}
+
+#[tokio::test]
+async fn the_simulated_backend_never_refuses_and_certifies_uncovered_starts_evaluation() {
+    let expired = gate_ctx(wipe_license::Entitlements {
+        not_after: time::OffsetDateTime::now_utc() - time::Duration::days(1),
+        ..gate_ent()
+    });
+    let mut used_up = wipe_license::LeaseState::new(time::OffsetDateTime::now_utc());
+    used_up.license_id = Some("lic-gate".into());
+    used_up.erasures_used = 1;
+    let exhausted = gate_ctx_with_lease(count(1), used_up);
+    for license in [None, Some(expired), Some(exhausted)] {
+        let (base, _, _) =
+            spawn_gated(true, license, vec![], Arc::new(SigningKey::generate())).await;
+        let client = reqwest::Client::new();
+        let job_id = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+        let (status, body) = http_start(&client, &base, &job_id).await;
+        assert_eq!(status, 200, "{body}");
+        let job = http_get_job(&client, &base, &job_id).await;
+        assert_eq!(job["licence"]["evaluation"], true, "{job}");
+        let signed = http_wait_for_certificate(&client, &base, &job_id).await;
+        assert_eq!(signed["certificate"]["evaluation"], true, "{signed}");
+        assert!(signed.get("attestation").is_none(), "{signed}");
+        let view = get_license(&base).await;
+        assert_eq!(view["new_jobs_refused"], json!(null));
+        assert_eq!(view["simulated_backend"], true);
+    }
+}
+
+#[tokio::test]
+async fn a_job_started_before_expiry_and_signed_after_it_is_licensed() {
+    let slow = MockTiming {
+        nvme_sanitize_secs: 6.0,
+        ..gate_timing()
+    };
+    let (base, state, _) =
+        spawn_gated_timed(false, None, vec![], Arc::new(SigningKey::generate()), slow).await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    // The licence runs out a few seconds after the start, mid-erasure.
+    let not_after = time::OffsetDateTime::now_utc() + time::Duration::seconds(3);
+    *state.license.write() = gate_ctx(wipe_license::Entitlements {
+        not_after,
+        ..gate_ent()
+    });
+    let (status, body) = http_start(&client, &base, &job_id).await;
+    assert_eq!(status, 200, "{body}");
+    let mut signed = None;
+    for _ in 0..600 {
+        let (status, body) =
+            http_get(&client, format!("{base}/api/jobs/{job_id}/certificate")).await;
+        if status == 200 {
+            signed = Some(body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let signed = signed.expect("no certificate");
+    assert!(
+        time::OffsetDateTime::now_utc() > not_after,
+        "signed too early"
+    );
+    assert_eq!(get_license(&base).await["status"]["status"], "expired");
+    assert_eq!(signed["certificate"]["evaluation"], false, "{signed}");
+    assert_eq!(
+        signed["attestation"]["license"]["body"]["license_id"],
+        "lic-gate"
+    );
+}
+
+#[tokio::test]
+async fn an_aborted_job_returns_its_credit() {
+    let (base, _, _) = spawn_real(Some(gate_ctx(count(5)))).await;
+    let client = reqwest::Client::new();
+
+    // Aborted while erasing.
+    let running = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    assert_eq!(http_start(&client, &base, &running).await.0, 200);
+    assert_eq!(remaining(&base).await, json!(4));
+    let (status, _) = http_post(&client, format!("{base}/api/jobs/{running}/abort"), None).await;
+    assert_eq!(status, 200);
+    wait_for_remaining(&base, 5).await;
+
+    // Aborted while pending destruction (recorded from the queue).
+    let pending = http_create_reuse_job(&client, &base, "dev-nvme-1", "high").await;
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/jobs/{pending}/record-for-destruction"),
+        Some(attested("shred", http_op())),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let job = http_get_job(&client, &base, &pending).await;
+    assert_eq!(job["licence"]["credits_reserved"], 1, "{job}");
+    assert_eq!(remaining(&base).await, json!(4));
+    let (status, _) = http_post(&client, format!("{base}/api/jobs/{pending}/abort"), None).await;
+    assert_eq!(status, 200);
+    wait_for_remaining(&base, 5).await;
+}
+
+#[tokio::test]
+async fn a_started_job_recorded_for_destruction_keeps_its_decision() {
+    let (base, _, _) = spawn_real(Some(gate_ctx(count(1)))).await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    assert_eq!(http_start(&client, &base, &job_id).await.0, 200);
+    let decided = http_get_job(&client, &base, &job_id).await["licence"].clone();
+    // No credit is left, but no second check or credit is needed.
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/jobs/{job_id}/record-for-destruction"),
+        Some(attested("shred", http_op())),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let job = http_get_job(&client, &base, &job_id).await;
+    assert_eq!(job["licence"], decided);
+    assert_eq!(remaining(&base).await, json!(0));
+}
+
+#[tokio::test]
+async fn a_scanned_group_needs_one_credit_per_drive() {
+    let (base, state, _) = spawn_real(Some(gate_ctx(count(2)))).await;
+    let client = reqwest::Client::new();
+    let mut rx = state.runner.subscribe();
+    let three = json!([{ "serial": "D-1" }, { "serial": "D-2" }, { "serial": "D-3" }]);
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/destruction/records"),
+        Some(group_body(three)),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    let text = body["error"].as_str().unwrap();
+    assert!(text.contains("needs 3 credits"), "{text}");
+    assert!(text.contains("2 left"), "{text}");
+    assert!(http_list_jobs(&client, &base).await.is_empty());
+    assert!(rx.try_recv().is_err());
+    assert_eq!(remaining(&base).await, json!(2));
+
+    let two = json!([{ "serial": "D-1" }, { "serial": "D-2" }]);
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/destruction/records"),
+        Some(group_body(two)),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    for job in http_list_jobs(&client, &base).await {
+        assert_eq!(job["licence"]["credits_reserved"], 1, "{job}");
+        assert_eq!(job["licence"]["evaluation"], false, "{job}");
+    }
+    assert_eq!(remaining(&base).await, json!(0));
+}
+
+#[tokio::test]
+async fn installing_a_licence_lifts_a_refusal_without_a_restart() {
+    let root = wipe_license::VendorRoot::generate();
+    let key = Arc::new(SigningKey::generate());
+    let (base, state, _) = spawn_gated(false, None, vec![root.verifying_key()], key.clone()).await;
+    let client = reqwest::Client::new();
+    let job_id = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    assert_refused(&client, &base, &state, &job_id, &["no licence"]).await;
+
+    let licence = issue_licence(&root, "lic-1", &key.public_key_id(), in_30_days());
+    let (status, view) = post_license(&base, serde_json::to_string(&licence).unwrap()).await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["new_jobs_refused"], json!(null), "{view}");
+    assert_eq!(view["simulated_backend"], false, "{view}");
+
+    let (status, body) = http_start(&client, &base, &job_id).await;
+    assert_eq!(status, 200, "{body}");
+    let signed = http_wait_for_certificate(&client, &base, &job_id).await;
+    assert_eq!(signed["certificate"]["evaluation"], false, "{signed}");
+    assert_eq!(
+        signed["attestation"]["license"]["body"]["license_id"],
+        "lic-1"
+    );
+}
+
+#[tokio::test]
+async fn one_aborted_and_one_certified_job_leave_one_of_two_credits() {
+    let (base, _, _) = spawn_real(Some(gate_ctx(count(2)))).await;
+    let client = reqwest::Client::new();
+    let aborted = http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    let certified = http_create_reuse_job(&client, &base, "dev-nvme-1", "high").await;
+    assert_eq!(http_start(&client, &base, &aborted).await.0, 200);
+    assert_eq!(http_start(&client, &base, &certified).await.0, 200);
+    let (status, _) = http_post(&client, format!("{base}/api/jobs/{aborted}/abort"), None).await;
+    assert_eq!(status, 200);
+    http_wait_for_certificate(&client, &base, &certified).await;
+    wait_for_remaining(&base, 1).await;
+}
+
+/// Decision 4: a licensed destroyed drive that was never erased spends its
+/// credit when its certificate is signed.
+#[tokio::test]
+async fn scanned_drives_destroyed_under_a_licence_spend_their_credits() {
+    let ctx = gate_ctx(count(2));
+    let (base, _, _) = spawn_real(Some(ctx.clone())).await;
+    let client = reqwest::Client::new();
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/destruction/records"),
+        Some(group_body(
+            json!([{ "serial": "D-1" }, { "serial": "D-2" }]),
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let ids: Vec<String> = body["job_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids.len(), 2);
+
+    let run = http_assemble(&client, &base, &ids).await;
+    let run_id = run["id"].as_str().unwrap();
+    let (status, preview) = http_post(
+        &client,
+        format!("{base}/api/manifests/{run_id}/completion/statement"),
+        Some(
+            json!({ "equipment_id": "SHR-2", "criterion": "particles ≤ 2 mm",
+                     "video_ref": "CAM-3 14:02" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{preview}");
+    let mut completion = completion_body();
+    completion["completed_at"] = preview["completed_at"].clone();
+    let (status, done) = http_post(
+        &client,
+        format!("{base}/api/manifests/{run_id}/completion"),
+        Some(completion),
+    )
+    .await;
+    assert_eq!(status, 200, "{done}");
+
+    for id in &ids {
+        let signed = http_wait_for_certificate(&client, &base, id).await;
+        assert_eq!(signed["certificate"]["evaluation"], false, "{signed}");
+        assert!(signed["attestation"].is_object(), "{signed}");
+    }
+    for _ in 0..100 {
+        if ctx.lease_state().erasures_used == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let lease = ctx.lease_state();
+    assert_eq!((lease.erasures_used, lease.credits_reserved), (2, 0));
+}
+
+/// A scanned group the runner rejects after the licence reserved its
+/// credits (a drive matching an open Job) returns the reservation.
+#[tokio::test]
+async fn a_scanned_group_the_runner_rejects_returns_its_reservation() {
+    let ctx = gate_ctx(count(3));
+    let (base, _, _) = spawn_real(Some(ctx.clone())).await;
+    let client = reqwest::Client::new();
+    // A queued Job on an attached drive: its serial marks it open.
+    http_create_reuse_job(&client, &base, "dev-nvme-0", "high").await;
+    let (status, body) = http_post(
+        &client,
+        format!("{base}/api/destruction/records"),
+        Some(group_body(
+            json!([{ "serial": "NEW-1" }, { "serial": "S6ABNX0W123456" }]),
+        )),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("matches open job"),
+        "{body}"
+    );
+    assert_eq!(remaining(&base).await, json!(3));
+    assert_eq!(ctx.lease_state().credits_reserved, 0);
 }

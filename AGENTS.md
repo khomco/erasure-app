@@ -22,7 +22,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
 
 ## Running and verifying
 
-- `cargo test --workspace` — 946 tests, ~30s. Needs `docker compose up -d` first (root
+- `cargo test --workspace` — 1162 tests, ~30s. Needs `docker compose up -d` first (root
   `compose.yaml`: Postgres on `127.0.0.1:55432`, Mailpit SMTP `:1025`, UI/API `:8025`):
   `wipe-hub`'s compose-backed tests fail, never skip, when they are down.
 - Hub (ADR-0007): `docker compose up -d`, then `cargo run -p wipe-hub -- serve` and
@@ -66,7 +66,7 @@ in `docs/adr/`, unbuilt surfaces in `docs/ROADMAP.md`.
   `UPDATE_GOLDENS=1 cargo test -p wipe-license --test feature_listing` and commit the file.
 - Never pipe `cargo test` through `grep`/`awk` to summarize: compile errors are discarded and
   a broken build prints as a clean run (68844bf).
-- Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 385 tests, under a second.
+- Frontend: `cd apps/desktop && pnpm typecheck && pnpm test` — vitest, 422 tests, under a second.
 - Portal (ADR-0006 §1): `pnpm install` at the root, then `pnpm --filter portal build`,
   `pnpm --filter portal typecheck`, `pnpm --filter portal test` (dev server on :5174, proxying
   `/api` to the hub on :7900). `wipe-hub serve` serves `apps/portal/dist` under the working

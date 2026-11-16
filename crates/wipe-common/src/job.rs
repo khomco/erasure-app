@@ -221,6 +221,48 @@ impl JobActivity {
     }
 }
 
+/// The licence decision a Job's start recorded (ADR-0013 §1): whether its
+/// certificate is licensed or `evaluation`, the licence chain to attach, and
+/// the credits reserved for it.
+///
+/// Held on the [`Job`], outside the signed certificate. The chain is opaque
+/// JSON so this crate (and the engine) never depend on `wipe-license`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobLicence {
+    /// The certificate is marked `evaluation`: no licence covered the start
+    /// (only possible on a simulated backend, which is never refused).
+    pub evaluation: bool,
+    /// The licence attestation chain the certificate carries; `None` for an
+    /// evaluation decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<serde_json::Value>,
+    /// The licence the credits were reserved under. Settling a decision
+    /// under another licence changes no count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_id: Option<String>,
+    /// The credits this decision reserved: one per drive on a licensed
+    /// decision, 0 on an evaluation one. A record of the reservation, not a
+    /// live balance: it is unchanged after the credits are spent (the
+    /// certificate is signed) or returned (the Job is aborted).
+    #[serde(default)]
+    pub credits_reserved: u32,
+    #[serde(with = "time::serde::rfc3339")]
+    pub decided_at: OffsetDateTime,
+}
+
+impl JobLicence {
+    /// An `evaluation` decision: no chain, nothing reserved.
+    pub fn evaluation(decided_at: OffsetDateTime) -> Self {
+        Self {
+            evaluation: true,
+            attestation: None,
+            license_id: None,
+            credits_reserved: 0,
+            decided_at,
+        }
+    }
+}
+
 /// The outer, outcome-bearing unit. Processes one Asset (or freeform
 /// `Device + asset_tag` in Simple mode) to a terminal disposition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +276,14 @@ pub struct Job {
     pub manifest_id: Option<Uuid>,
     /// Set once the outer Job's cert has been generated and signed.
     pub certificate_id: Option<String>,
+    /// The licence decision taken when this Job started, or when it was
+    /// recorded for destruction without being started (ADR-0013 §1). The
+    /// certificate is marked from it, however long the work takes. Never
+    /// copied into the signed certificate: it is station bookkeeping.
+    /// `None` until a start decides, and on Jobs started by a caller that
+    /// bypasses the licence check (engine tests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub licence: Option<JobLicence>,
 
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -252,6 +302,7 @@ impl Job {
             activities: Vec::new(),
             manifest_id: None,
             certificate_id: None,
+            licence: None,
             created_at: OffsetDateTime::now_utc(),
             started_at: None,
             ended_at: None,

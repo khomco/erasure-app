@@ -1,8 +1,9 @@
 //! Lease state persistence (ADR-0005 §3a through the ADR-0003 tiers).
 //!
 //! A restart must neither reset the clock watermark nor refill a `Count`
-//! quota, and a lease file that cannot be read or saved must only ever mark
-//! certificates `evaluation` — never stop an erasure or a signature.
+//! quota. A lease file that cannot be read or saved refuses starts on a
+//! licence that counts credits (the reservation cannot be kept), and never
+//! makes a start under an `Unlimited` licence uncovered (ADR-0013).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,13 +12,14 @@ use std::time::Duration as StdDuration;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
+use wipe_common::JobLicence;
 use wipe_common::{Classification, DeviceId, Intent, JobSpec, OperatorRef};
 use wipe_license::{AttestationChain, LeaseState, LeaseStatus, Quota};
 use wipe_server::store::{
     detect_lease_store, lease_state_path, EphemeralLeaseStore, LeaseStore, LocalFileLeaseStore,
     StoreConfig, StoreTier,
 };
-use wipe_server::{AppState, LicenseContext};
+use wipe_server::{AppState, LicenseContext, StartRefusal, StartRequest};
 
 const RESET_WORDING: &str = "quota count and clock-rollback protection reset on reboot";
 
@@ -65,6 +67,22 @@ fn unlimited(license_id: &str) -> AttestationChain {
     chain(license_id, Quota::Unlimited, "ed25519:test")
 }
 
+fn counted(license_id: &str, erasures: u64) -> AttestationChain {
+    chain(license_id, Quota::Count { erasures }, "ed25519:test")
+}
+
+/// A one-drive start on a real backend.
+fn decide(ctx: &LicenseContext, at: OffsetDateTime) -> Result<JobLicence, StartRefusal> {
+    ctx.decide_start(
+        &StartRequest {
+            method: None,
+            drives: 1,
+            simulated: false,
+        },
+        at,
+    )
+}
+
 fn stored(license_id: Option<&str>, used: u64, watermark: OffsetDateTime) -> LeaseState {
     let mut s = LeaseState::new(watermark);
     s.erasures_used = used;
@@ -100,7 +118,7 @@ fn make_read_only(dir: &Path) -> bool {
 // --- matrix rows -------------------------------------------------------------
 
 #[test]
-fn first_start_is_fresh_and_writes_the_file_on_the_first_signing_decision() {
+fn first_start_is_fresh_and_writes_the_file_on_the_first_start_decision() {
     let dir = tmpdir("first");
     let cfg = cfg_in(&dir);
     let path = lease_state_path(&cfg);
@@ -117,10 +135,10 @@ fn first_start_is_fresh_and_writes_the_file_on_the_first_signing_decision() {
     assert_eq!(lease.erasures_used, 0);
     assert_eq!(lease.time_watermark, t);
     assert!(!lease.counter_is_monotonic, "a file is not hardware-backed");
-    assert!(!path.exists(), "nothing written before a signing decision");
+    assert!(!path.exists(), "nothing written before a start decision");
 
-    let decision = ctx.signing_decision(t);
-    assert!(!decision.evaluation, "{:?}", decision.status);
+    let decision = decide(&ctx, t).unwrap();
+    assert!(!decision.evaluation);
     let on_disk: LeaseState =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(on_disk.license_id.as_deref(), Some("lic"));
@@ -177,9 +195,10 @@ fn a_clock_rolled_back_after_restart_is_still_detected() {
         LeaseStatus::ClockRollback { watermark, .. } => assert_eq!(watermark, w),
         other => panic!("expected ClockRollback, got {other:?}"),
     }
-    let decision = ctx.signing_decision(rewound);
-    assert!(decision.evaluation);
-    assert!(matches!(decision.status, LeaseStatus::ClockRollback { .. }));
+    assert!(matches!(
+        decide(&ctx, rewound),
+        Err(StartRefusal::ClockRollback { .. })
+    ));
     assert_eq!(ctx.lease_state().time_watermark, w, "watermark stays W");
 }
 
@@ -235,9 +254,8 @@ fn an_unlicensed_start_leaves_a_licensed_count_alone() {
         .unwrap();
 
     let ctx = LicenseContext::open("station-1", None, detect_lease_store(&cfg), now());
-    let decision = ctx.signing_decision(now());
-    assert!(decision.evaluation);
-    assert_eq!(decision.status, LeaseStatus::Unlicensed);
+    assert_eq!(decide(&ctx, now()), Err(StartRefusal::NoLicence));
+    assert_eq!(ctx.view(now(), false).status, LeaseStatus::Unlicensed);
     let lease = ctx.lease_state();
     assert_eq!(lease.erasures_used, 5);
     assert_eq!(lease.license_id.as_deref(), Some("old"));
@@ -252,7 +270,8 @@ fn an_unlicensed_start_leaves_a_licensed_count_alone() {
 }
 
 #[test]
-fn a_corrupt_lease_file_marks_licensed_certificates_evaluation_and_is_never_overwritten() {
+fn a_corrupt_lease_file_is_reported_and_never_overwritten_and_an_unlimited_licence_stays_licensed()
+{
     let dir = tmpdir("corrupt");
     let cfg = cfg_in(&dir);
     let path = lease_state_path(&cfg);
@@ -264,20 +283,23 @@ fn a_corrupt_lease_file_marks_licensed_certificates_evaluation_and_is_never_over
         detect_lease_store(&cfg),
         now(),
     );
-    let decision = ctx.signing_decision(now());
-    assert!(decision.evaluation);
-    match &decision.status {
+    let decision = decide(&ctx, now()).unwrap();
+    assert!(
+        !decision.evaluation,
+        "a lease fault never uncovers a valid licence"
+    );
+    let status = ctx.view(now(), false).status;
+    match &status {
         LeaseStatus::LeaseStateUnavailable { detail } => {
             assert!(detail.contains(&path.display().to_string()), "{detail}")
         }
         other => panic!("expected LeaseStateUnavailable, got {other:?}"),
     }
-    assert!(decision
-        .status
+    assert!(status
         .operator_message()
         .contains(&path.display().to_string()));
-    ctx.record_erasure();
-    ctx.signing_decision(now());
+    ctx.spend(&decision);
+    decide(&ctx, now()).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), b"not json", "file untouched");
     assert!(ctx
         .lease_persistence()
@@ -287,8 +309,44 @@ fn a_corrupt_lease_file_marks_licensed_certificates_evaluation_and_is_never_over
 
 #[cfg(unix)]
 #[test]
-fn a_failed_save_marks_that_decision_evaluation_and_the_next_save_retries() {
+fn a_count_reservation_that_cannot_be_saved_is_refused_and_the_next_save_retries() {
     let dir = tmpdir("save-fails");
+    let cfg = cfg_in(&dir);
+    let ctx = LicenseContext::open(
+        "station-1",
+        Some(counted("lic", 10)),
+        detect_lease_store(&cfg),
+        now(),
+    );
+    assert!(!decide(&ctx, now()).unwrap().evaluation);
+
+    if !make_read_only(&dir) {
+        return; // mode bits do not stop this user (root)
+    }
+    let failed = decide(&ctx, now());
+    set_mode(&dir, 0o700);
+
+    match failed {
+        Err(StartRefusal::LeaseUnavailable { detail }) => {
+            assert!(detail.contains("lease-state.json"), "{detail}")
+        }
+        other => panic!("expected LeaseUnavailable, got {other:?}"),
+    }
+    assert_eq!(
+        ctx.lease_state().credits_reserved,
+        1,
+        "the refused one undone"
+    );
+
+    // Writable again: the next save succeeds and starts are licensed again.
+    assert!(!decide(&ctx, now()).unwrap().evaluation);
+    assert_eq!(ctx.lease_state().credits_reserved, 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unlimited_licence_whose_save_fails_stays_licensed() {
+    let dir = tmpdir("save-fails-unlimited");
     let cfg = cfg_in(&dir);
     let ctx = LicenseContext::open(
         "station-1",
@@ -296,24 +354,21 @@ fn a_failed_save_marks_that_decision_evaluation_and_the_next_save_retries() {
         detect_lease_store(&cfg),
         now(),
     );
-    assert!(!ctx.signing_decision(now()).evaluation);
-
+    assert!(!decide(&ctx, now()).unwrap().evaluation);
     if !make_read_only(&dir) {
-        return; // mode bits do not stop this user (root)
+        return;
     }
-    let failed = ctx.signing_decision(now());
+    let decision = decide(&ctx, now());
+    let status = ctx.view(now(), false);
     set_mode(&dir, 0o700);
-
-    assert!(failed.evaluation);
-    assert!(
-        matches!(failed.status, LeaseStatus::LeaseStateUnavailable { .. }),
-        "{:?}",
-        failed.status
-    );
-
-    // Writable again: the next save succeeds and licensed signing returns.
-    let recovered = ctx.signing_decision(now());
-    assert!(!recovered.evaluation, "{:?}", recovered.status);
+    let decision = decision.unwrap();
+    assert!(!decision.evaluation);
+    assert!(decision.attestation.is_some());
+    assert!(matches!(
+        status.status,
+        LeaseStatus::LeaseStateUnavailable { .. }
+    ));
+    assert_eq!(status.new_jobs_refused, None);
 }
 
 #[cfg(unix)]
@@ -328,8 +383,8 @@ fn an_unwritable_directory_runs_lease_state_in_ram_and_says_what_resets() {
     assert_eq!(store.tier(), StoreTier::Ephemeral);
 
     let ctx = LicenseContext::open("station-1", Some(unlimited("lic")), store, now());
-    // RAM-only is not a fault: licensed signing still works this boot.
-    assert!(!ctx.signing_decision(now()).evaluation);
+    // RAM-only is not a fault: licensed starts still work this boot.
+    assert!(!decide(&ctx, now()).unwrap().evaluation);
     let p = ctx.lease_persistence();
     assert_eq!(p.tier, StoreTier::Ephemeral);
     assert!(!p.survives_reboot);
@@ -409,14 +464,13 @@ fn a_read_only_directory_holding_a_corrupt_lease_file_is_a_sticky_fault() {
     set_mode(&dir, 0o700);
     assert_eq!(store.tier(), StoreTier::Ephemeral);
 
-    let ctx = LicenseContext::open("station-1", Some(unlimited("lic")), store, now());
-    let decision = ctx.signing_decision(now());
-    assert!(decision.evaluation, "never a fresh licensed lease");
-    match &decision.status {
-        LeaseStatus::LeaseStateUnavailable { detail } => {
+    // A licence that counts credits never counts from a fresh lease.
+    let ctx = LicenseContext::open("station-1", Some(counted("lic", 10)), store, now());
+    match decide(&ctx, now()) {
+        Err(StartRefusal::LeaseUnavailable { detail }) => {
             assert!(detail.contains(&path.display().to_string()), "{detail}")
         }
-        other => panic!("expected LeaseStateUnavailable, got {other:?}"),
+        other => panic!("expected LeaseUnavailable, got {other:?}"),
     }
     assert_eq!(std::fs::read(&path).unwrap(), b"not json", "file untouched");
 }
@@ -491,28 +545,27 @@ impl LeaseStore for GatedStore {
 }
 
 #[test]
-fn a_hung_lease_save_marks_the_decision_evaluation_within_a_bounded_wait() {
+fn a_hung_lease_save_refuses_a_counted_start_within_a_bounded_wait() {
     let store = Arc::new(GatedStore::new());
-    let ctx = LicenseContext::open("station-1", Some(unlimited("lic")), store.clone(), now());
+    let ctx = LicenseContext::open("station-1", Some(counted("lic", 10)), store.clone(), now());
 
     let started = std::time::Instant::now();
-    let decision = ctx.signing_decision(now());
+    let decision = decide(&ctx, now());
     assert!(
         started.elapsed() < StdDuration::from_secs(5),
         "took {:?}",
         started.elapsed()
     );
-    assert!(decision.evaluation);
     assert!(
-        matches!(decision.status, LeaseStatus::LeaseStateUnavailable { .. }),
-        "{:?}",
-        decision.status
+        matches!(decision, Err(StartRefusal::LeaseUnavailable { .. })),
+        "{decision:?}"
     );
+    assert_eq!(ctx.lease_state().credits_reserved, 0);
 
-    // The disk comes back: the queued saves land and licensed signing returns.
+    // The disk comes back: the queued saves land and licensed starts return.
     store.release();
-    let recovered = ctx.signing_decision(now());
-    assert!(!recovered.evaluation, "{:?}", recovered.status);
+    let recovered = decide(&ctx, now()).unwrap();
+    assert!(!recovered.evaluation);
     assert_eq!(
         store.inner.load().unwrap().unwrap().license_id.as_deref(),
         Some("lic")
@@ -560,7 +613,7 @@ fn station_on(
 /// Erase `device` to a signed certificate; returns its `evaluation` flag.
 async fn erase_to_certificate(state: &AppState, device: &str) -> bool {
     let id: Uuid = state.runner.create_job(spec(device)).await.unwrap();
-    state.runner.start(id).unwrap();
+    state.start_job(id).await.unwrap();
     for _ in 0..400 {
         if let Some(signed) = state.certs.read().get(&id) {
             return signed.certificate.evaluation;

@@ -2,12 +2,20 @@
 title: 'Decide licence coverage at the start of each Job'
 type: 'feature'
 created: '2026-11-09'
-status: 'ready-for-dev'
+status: 'done'
+baseline_revision: '3e84583ee3b9fc5032b170a22a3e8a06328033d0'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context: ['{project-root}/docs/adr/0013-licensing-controls-every-erasure.md', '{project-root}/docs/adr/0005-licensing-and-attestation.md', '{project-root}/docs/adr/0011-destruction-by-operator-attestation.md']
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      A credit reserved by a Job is never returned if the certificate generator misses that Job's Aborted broadcast because it lagged.
+    evidence: |-
+      spawn_cert_generator returns reservations only when it receives JobStateChanged into Aborted. On RecvError::Lagged it logs and continues, so skipped broadcasts are lost (the runner's channel holds 1024 events, shared with progress updates). The lag loss itself predates this story and already drops certificates for Erased/Destroyed. This story adds stranded credits as a new consequence: a Count licence shows fewer credits than it has until the station restarts, when open() returns every reservation. Fix by settling credits where the state changes, or by sweeping runner Jobs against reservations after a lag.
+    location: >-
+      crates/wipe-server/src/app.rs:490
+    severity: medium
 ---
 
 <intent-contract>
@@ -208,39 +216,61 @@ deferred: []
 
 ## Review Triage Log
 
-## Design Notes
+### 2026-11-16 — Review pass
+- verdicts: 28 findings — high 0, medium 8, low 14, false 6, maybe-false 0
+- findings:
+  - `[medium]` `[defer]` (blind) A lagging certificate generator skips Aborted broadcasts, stranding reservations until restart — real: the `Lagged` arm at `app.rs:490` continues; the lag loss predates this story (it already drops certificates), so deferred with the frontmatter entry.
+  - `[low]` `[reject]` (blind) Settling by licence id lets an old decision cancel a new reservation after an A→B→A licence reinstall — needs two licence switches while a Job runs; the fix needs a lease generation field, more than a direct correction.
+  - `[low]` `[patch]` (blind) The pinned method makes `ErasureEventSpec.method` read as an operator choice — no operator pin path exists (`JobSpec` has no erasure method), so only the doc was wrong; patched the doc in `erasure_event.rs`.
+  - `[low]` `[reject]` (blind) A started Job recorded for destruction is certified licensed even if the licence excludes destruction — intent decision 6 settles this: the start's answer is final, no second check.
+  - `[low]` `[reject]` (blind) No low-credit warning in the banner — not asked for by the intent; it is new customer-visible copy and an extra branch, and the operator still gets a 409 naming the fix.
+  - `[low]` `[reject]` (blind) "Add credits" refusal text before stations can hold credit grants — the intent's I/O matrix prescribes this fix wording; changing it means editing the spec.
+  - `[low]` `[reject]` (blind) The start probes hardware every time and reports a probe error as an undetected drive — matters only under an `Only` allow-list and a transient enumerate error on the mock; the fix adds error plumbing.
+  - `[false]` `[reject]` (blind) The story's status fields contradict each other — Finalize rewrites `## Auto Run Result
 
-The order inside `decide_start`, under the lease write lock, then save:
+Status: done
 
-```rust
-let status = evaluate(ent, &lease, &fp, now);          // before folding now in
-lease.observe(now);
-// A LeaseStateUnavailable verdict is not itself uncovered: judge the licence's own
-// checks (expiry, not-yet-valid, machine, rollback vs the in-memory watermark).
-// On a Count licence the fault refuses separately (Boundaries).
-let covered = licence_checks_pass(&status) && method_ok && credits_ok(req.drives);
-if !covered && !req.simulated { return Err(refusal) }  // nothing reserved
-if covered { lease.credits_reserved += req.drives }    // then save; Count + save error => undo, refuse
-```
+**Summary:** One start check, `LicenseContext::decide_start`, runs when a Job starts and when drives are recorded for destruction (from a Job that never started, or scanned). On a backend whose `DeviceBackend::is_simulated()` is false, a start the licence does not cover gets 409 `{error}` naming the reason and the fix. The Job stays queued, a scanned group creates nothing, and nothing is broadcast. Otherwise the decision is recorded as `Job.licence` (`wipe_common::JobLicence`), and one credit per drive is reserved under a single lease write lock; on a `Count` licence the reservation is saved before the start proceeds. The certificate generator signs from `Job.licence` only, spends the reservation at signing and returns it at `Aborted`. The start resolves the erasure method and pins it on the run (`JobRunner::start_with`), so the method checked is the method issued. `GET /api/license` drops `lapse_policy` and adds `new_jobs_refused` and `simulated_backend`. The bench banner shows a danger "New jobs are refused" banner with the server's text.
 
-The refusal text pattern is "<what is wrong>. <how to fix it>." For example: "This station's licence expired on 2026-12-31. Install the renewed licence to start new jobs."
+**Files changed:**
+- `crates/wipe-common/src/job.rs`: `JobLicence` and `Job.licence` (serde default/skip, not signed).
+- `crates/wipe-common/src/erasure_event.rs`: doc for the station-pinned method.
+- `crates/wipe-engine/src/backend.rs`, `crates/wipe-engine-mock/src/lib.rs`: `is_simulated` (default false, mock true).
+- `crates/wipe-engine/src/runner.rs`: `start_with`, `record_for_destruction_with`, `record_scanned_for_destruction_with`, and the pinned method passed to `run_job`.
+- `crates/wipe-engine-mock/tests/end_to_end.rs`: test that the pinned method is issued.
+- `crates/wipe-license/src/lease.rs` (+ `tests/attestation.rs`): `credits_reserved`, quota checked against used + reserved, `operator_message` no longer states consequences.
+- `crates/wipe-server/src/licensing.rs`: `decide_start`, `StartRequest`, `StartRefusal`, `spend`/`release`, reservation resets, `view` with `new_jobs_refused`/`simulated_backend`, unit tests.
+- `crates/wipe-server/src/{app,handlers,lib,bootstrap}.rs`: start and record orchestration, 409 refusals, signing from the recorded decision.
+- `crates/wipe-server/tests/{http_e2e,lease_store,topology_store,bootstrap}.rs`: a `RealBackend` wrapper, one HTTP test per matrix row, and tests migrated off `signing_decision`.
+- `crates/wipe-cli/src/main.rs`, `docs/generated/cli/wipestation-serve.txt`: `--license` help.
+- `apps/desktop/src-tauri/src/lib.rs`: passes whether the backend is simulated.
+- `apps/desktop/src/api/{types,licence,licence.test}.ts`, `components/LicenceBanner.{tsx,test.ts}`, `pages/LicencePage{,.flow}.test.ts`: mirrored types and the refusal and lease-fault banners.
+- `CONTEXT.md`, `README.md`, `docs/ROADMAP.md`, `docs/adr/0005-licensing-and-attestation.md` (as-built notes, marked superseded by ADR-0013), `AGENTS.md` (test counts), `.scratch/STATUS.md`.
 
-## Verification
+**Review findings:** 28 findings: 8 medium, 14 low, 6 false.
+- **Patches applied:** 7 findings in 6 entries. At entry verdict, 3 entries were medium and 3 low.
+  - medium: the lease-fault banner on a simulated backend no longer claims evaluation;
+  - medium: tests for a destroyed drive spending its credit and a rejected scanned group returning its reservation;
+  - medium: a test that the pinned method is issued;
+  - low: doc fixes for `ErasureEventSpec.method`, `JobLicence.credits_reserved`, `evaluation_erasures` and the TS lapse-policy comments.
+- **Deferred:** 1 entry (3 findings). A certificate generator that lags past an Aborted broadcast leaves that Job's credits reserved until restart. The root cause, losing broadcasts on lag, predates this story.
+- **Rejected:** 18, each with its reason in the Review Triage Log.
+  - 12 low: unlikely to come up, or settled by the intent (decisions 3, 4, 6 and 7 and the I/O matrix wording).
+  - 6 false.
 
-**Commands:**
-- `docker compose up -d && cargo test --workspace` -- expected: all pass, no output piped through grep.
-- `cargo clippy -p wipe-server -p wipe-license -p wipe-engine -p wipe-common --all-targets` -- expected: no new warnings in touched files.
-- `rustfmt --edition 2021 --check <touched .rs files>` -- expected: clean.
-- `UPDATE_GOLDENS=1 cargo test -p wipe-cli --test help_golden`, then `cargo test -p wipe-server --test route_golden` -- expected: the help goldens regenerated and committed; the route golden unchanged.
-- `cd apps/desktop && pnpm typecheck && pnpm test` -- expected: clean and all pass.
+**Follow-up review recommended: yes.** Three medium entries were patched after the review layers ran. The specific unverified risk is the new lease-fault banner wording on the simulated backend: it is customer-visible copy, no reviewer has read it, and it changes what every shipping station shows when its lease file is faulty.
 
-## Auto Run Result
+**Verification:**
+- `cargo test --workspace --exclude wipestation-desktop --no-fail-fast` in a clean worktree at the baseline with this diff applied, plus `cargo test -p wipestation-desktop` in the main tree: 1162 passed, 0 failed. Compose services were up.
+- In the main checkout, `wipe-hub`'s `health.rs` `silent_smtp_and_database_time_out_within_bound` fails: the probe takes 4–74 s against a 3.5 s bound. It passes in the clean target directory with the same sources and with this story's `wipe-common`/`wipe-license` changes, so the cause is the main `target/` directory's state, not this story. The hub is untouched here.
+- The route and help goldens pass.
+- Clippy on the four named crates shows only the existing `large_enum_variant` on `JobBroadcast`/`WsEnvelope`.
+- `rustfmt --check` differences are all in `job.rs`, `runner.rs` and `ws.rs` and are present at the baseline.
+- Desktop: `pnpm typecheck` is clean and `pnpm test` passes 422.
+- Matrix audit: every I/O matrix row has a passing HTTP or unit test.
 
-Status: ready-for-dev
-Blocking condition: none. Halted after planning, as the invocation directed, so the owner can review the plan before implementation (`spec_checkpoint: true`).
-
-Planning made nine decisions without halting; they are listed under "Autonomous decisions" in the intent contract. The ones to read first:
-- **Decision 1:** a backend counts as simulated only if it says so (`is_simulated`, default false).
-- **Decision 4:** credits are reserved against the licence's own `Count` quota. Reservations are returned at restart, and a failed erasure keeps its credit until it is aborted.
-- **Decision 5:** a lease fault on an unlimited licence is not a refusal reason, and the start is licensed (changed at owner review, 2026-11-11).
-- **Decision 9:** marketing-site and hub lapse-policy copy is left to `controlled-licensing`.
+**Residual risks:**
+- The deferred lag item.
+- Refusals are reached only through a test wrapper, because only the simulated backend exists (ROADMAP §0.1). Every shipping station is simulated and never refuses.
+- Known limits recorded in `CONTEXT.md` §10.2: no revocation reason, no `Failed` state, reservations returned at restart, and credits reserved against the licence's own `Count` quota.
+- The refusal and banner copy is drafted and has not had a vendor copy review.

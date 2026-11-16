@@ -327,8 +327,12 @@ async fn installing_a_licence_after_construction_reaches_the_cert_generator() {
     // A clone taken *before* installation stands in for the spawned task.
     let captured = state.clone();
     assert!(
-        captured.license().signing_decision(now_utc()).evaluation,
-        "a fresh station is free-tier"
+        captured
+            .license()
+            .decide_start(&sim_start(), now_utc())
+            .unwrap()
+            .evaluation,
+        "a fresh station is unlicensed"
     );
 
     let root = wipe_license::VendorRoot::generate();
@@ -356,12 +360,30 @@ async fn installing_a_licence_after_construction_reaches_the_cert_generator() {
     )));
 
     // The pre-installation clone must see it too, or certs go out unmarked.
-    let decision = captured.license().signing_decision(now_utc());
+    let decision = captured
+        .license()
+        .decide_start(&sim_start(), now_utc())
+        .unwrap();
     assert!(!decision.evaluation, "captured clone still unlicensed");
     assert!(decision.attestation.is_some());
-    assert!(!state.license().signing_decision(now_utc()).evaluation);
+    assert!(
+        !state
+            .license()
+            .decide_start(&sim_start(), now_utc())
+            .unwrap()
+            .evaluation
+    );
 }
 
 fn now_utc() -> time::OffsetDateTime {
     time::OffsetDateTime::now_utc()
+}
+
+/// A one-drive start on the simulated backend, which is never refused.
+fn sim_start() -> wipe_server::StartRequest {
+    wipe_server::StartRequest {
+        method: None,
+        drives: 1,
+        simulated: true,
+    }
 }

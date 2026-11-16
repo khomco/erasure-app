@@ -322,6 +322,12 @@ impl DeviceBackend for MockBackend {
             all_passed,
         })
     }
+
+    /// The mock erases nothing, so the licence's start check never refuses
+    /// it (ADR-0013 §2).
+    fn is_simulated(&self) -> bool {
+        true
+    }
 }
 
 fn shannon_entropy_bits_per_byte(data: &[u8]) -> f32 {
