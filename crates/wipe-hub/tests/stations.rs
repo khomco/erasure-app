@@ -306,6 +306,7 @@ async fn registering_a_machine_station_issues_a_licence_it_installs() {
         [
             "credit_balance",
             "credit_balance_reported_at",
+            "credit_report_mismatch_at",
             "credits_granted",
             "entitlement_id",
             "id",
@@ -495,20 +496,22 @@ async fn a_site_station_names_the_entered_site_or_the_organization() {
             site_id: "Dock 4".into()
         }
     );
-    assert_eq!(ent.quota, Quota::Count { erasures: 5000 });
+    assert_eq!(ent.quota, Quota::Pool);
     assert_eq!(ent.features, [Feature::PdfCertificates]);
     assert_eq!(ent.not_after, f.term_end(&f.site).await);
     let now = OffsetDateTime::now_utc();
-    // A site licence binds no machine: any station id is fine.
+    // A site licence binds no machine: any station id is fine. Its credits
+    // are the grant beside it in the file (the pool's default 50).
+    let mut lease = LeaseState::new(now);
+    let grant = wipe_license::parse_license_file(&file)
+        .unwrap()
+        .credit_grant
+        .expect("a default registration carries a grant");
+    lease.add_grant(&grant);
     assert!(matches!(
-        evaluate(
-            Some(ent),
-            &LeaseState::new(now),
-            &machine_fingerprint("anything"),
-            now
-        ),
+        evaluate(Some(ent), &lease, &machine_fingerprint("anything"), now),
         LeaseStatus::Valid {
-            remaining_erasures: Some(5000),
+            remaining_erasures: Some(50),
             ..
         }
     ));
@@ -1258,7 +1261,7 @@ async fn a_site_station_is_reissued_for_the_same_site() {
         let cert = install(&file, &key, &f.root);
         let ent = &cert.body.entitlements;
         assert_eq!(ent.scope, Scope::Site { site_id });
-        assert_eq!(ent.quota, Quota::Count { erasures: 5000 });
+        assert_eq!(ent.quota, Quota::Pool);
         assert_eq!(ent.features, [Feature::PdfCertificates]);
         assert_eq!(ent.not_after, term_end);
         assert_eq!(r["station"]["renewal_available"], false);
@@ -1656,7 +1659,7 @@ async fn a_trial_entitlement_issues_a_licence_with_the_trials_quota() {
         .unwrap();
     let cert = install(&file, &key, &f.root);
     let ent = &cert.body.entitlements;
-    assert_eq!(ent.quota, Quota::Count { erasures: 25 });
+    assert_eq!(ent.quota, Quota::Pool);
     assert_eq!(ent.features, [Feature::PdfCertificates]);
     assert_eq!(ent.not_after, f.term_end(&entitlement).await);
     // Its one seat is used.

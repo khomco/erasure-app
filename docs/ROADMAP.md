@@ -368,6 +368,14 @@ and **0008** (station ↔ hub protocol and the reconciliation contract).
   Still open: loading the collected licence at start-up, next-term licences
   (`controlled-licensing`), and revocation (A2.3).*
 - A2.2 Lease/usage reporting from station to hub, offline-tolerant.
+  *Balance report built 2026-11-16 (ADR-0013 §3, `controlled-licensing` story 4):
+  a balance report (the credits a station may still reserve and its cumulative
+  credits spent, retry-safe) is sent with each credit top-up
+  (`POST /api/station/credits`), and the hub flags a report that does not add up. A
+  top-up happens only below the offering's threshold (or once to learn it), so a
+  station with a healthy reserve does not report. Still open: regular reporting,
+  reporting from stations on unlimited licences, per-Job usage and reconciliation
+  beyond the flag.*
 - A2.3 Revocation list: signed, windowed, pulled when online.
   **Honest limit to document (W2, L3): a station that never connects can never
   learn that its licence was revoked.**
@@ -560,8 +568,11 @@ it: three tiers a customer can buy, activate, renew and outgrow.
   entitlement's erasure quota is an organization credit pool at the hub; owners move
   credits into air-gapped stations' licence files as vendor-signed credit grants, and a
   released station's last reported balance returns to the pool, all in append-only
-  ledgers. Stations do not use grants or report balances yet (story 4), so the licence
-  still carries the whole order quota and the hub's view is grants only.*
+  ledgers. Since 2026-11-16 (story 4) a hub-issued licence on a quota entitlement is
+  `Quota::Pool`: stations hold their grants as a credit reserve, spend them, top up
+  automatically when connected and report their balance and credits spent, and the hub
+  flags reports that do not add up. A wiped or restored lease state is still only
+  flagged, not prevented (D12).*
 
 ### 4.3 The site-licence problem — flagged, not solved
 
@@ -607,7 +618,7 @@ distribution and expiry behaviour).
   screen, and a licence installed at runtime is not persisted.*
 - ~~L1.4 Licence status surface at the bench (O-R9 / O3.5).~~ Shipped 2026-11-08: a persistent banner above every bench page (licence-visibility story 3).
 - ~~L1.5 Expiry warnings and refusing starts a licence does not cover (L-R5, ADR-0013).~~
-  *Expiry warnings shipped 2026-11-08 (licence-visibility story 3); refusing a start the licence does not cover shipped 2026-11-11 (licence-visibility story 5, CONTEXT §10.2), with credits reserved against the licence's own `Count` quota until stations use credit grants (`controlled-licensing` story 4) and no revocation reason (A2.3).*
+  *Expiry warnings shipped 2026-11-08 (licence-visibility story 3); refusing a start the licence does not cover shipped 2026-11-11 (licence-visibility story 5, CONTEXT §10.2), with credits reserved against the licence's own `Count` quota, or since `controlled-licensing` story 4 (2026-11-16) against the station's credit reserve on a `Pool` licence, and no revocation reason (A2.3).*
 - **Exit:** a customer can buy one station, activate it with no network, and
   see licensed certificates — and see plainly when they stop being licensed.
 

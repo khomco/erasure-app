@@ -65,8 +65,11 @@ export interface AdminLicence {
   revocation_reason: string | null;
 }
 
-/** `wipe_license::Quota`. */
-export type Quota = { kind: "unlimited" } | { kind: "count"; erasures: number };
+/**
+ * `wipe_license::Quota`. `pool`: credits come from credit grants the station
+ * holds for the licence's organization, not from the licence itself.
+ */
+export type Quota = { kind: "unlimited" } | { kind: "count"; erasures: number } | { kind: "pool" };
 /** `wipe_license::Scope`. */
 export type LicenceScope = { kind: "machine"; fingerprint: string } | { kind: "site"; site_id: string };
 
@@ -164,7 +167,10 @@ export function isAdminLicence(v: unknown): v is AdminLicence {
 }
 
 function isQuota(v: unknown): v is Quota {
-  return isObject(v) && (v.kind === "unlimited" || (v.kind === "count" && isInt(v.erasures)));
+  return (
+    isObject(v) &&
+    (v.kind === "unlimited" || v.kind === "pool" || (v.kind === "count" && isInt(v.erasures)))
+  );
 }
 
 function isScope(v: unknown): v is LicenceScope {
@@ -268,9 +274,16 @@ export function licenceHolderText(l: AdminLicence): string {
   return label ?? station_id ?? "Station";
 }
 
-/** "Unlimited erasures" or "5,000 erasures". */
+/** "Unlimited erasures", "5,000 erasures" or "Credit pool". */
 export function quotaText(q: Quota): string {
-  return q.kind === "unlimited" ? "Unlimited erasures" : `${q.erasures.toLocaleString("en")} erasures`;
+  switch (q.kind) {
+    case "unlimited":
+      return "Unlimited erasures";
+    case "count":
+      return `${q.erasures.toLocaleString("en")} erasures`;
+    case "pool":
+      return "Credit pool";
+  }
 }
 
 /** "Machine mf1:…" or "Site Floor 2". */

@@ -21,6 +21,8 @@
 //! * [`enrollment`] — what a station signs to enroll with the hub (ADR-0008).
 //! * [`station_request`] — what a station signs on every hub request after
 //!   enrollment, over a hub challenge (ADR-0008 §2).
+//! * [`station_credits`] — the credit top-up's request and answer, shared by
+//!   the hub and the station (ADR-0013 §3).
 //! * [`anchor`] — optional public timestamping seam (not licensing).
 
 pub mod anchor;
@@ -31,6 +33,7 @@ pub mod enrollment;
 pub mod entitlement;
 pub mod install;
 pub mod lease;
+pub mod station_credits;
 pub mod station_request;
 
 pub use chain::*;

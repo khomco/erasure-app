@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod bootstrap;
+pub mod credit_topup;
 pub mod enrollment;
 pub mod handlers;
 pub mod hub_client;

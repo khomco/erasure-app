@@ -14,6 +14,7 @@ use wipe_hub::admin_routes::MSG_NO_OFFERING;
 use wipe_hub::offering_admin::{
     MSG_ANNUAL_QUOTA, MSG_DUPLICATE_NAME, MSG_PUBLISH_NOT_DRAFT, MSG_RETIRED,
     MSG_RETIRE_NOT_PUBLISHED, MSG_TARGET_RESERVE_UNLIMITED, MSG_TERMS_FROZEN,
+    MSG_TOPUP_THRESHOLD_RANGE, MSG_TOPUP_THRESHOLD_UNLIMITED,
 };
 
 const ADMIN_ONLY: &str = "only vendor admins can use the admin area";
@@ -166,11 +167,12 @@ async fn create_returns_a_normalised_draft_and_audits_it_in_full() {
     assert_eq!(o["published_at"], Value::Null);
     assert_eq!(o["retired_at"], Value::Null);
     let keys: Vec<&String> = o.as_object().unwrap().keys().collect();
-    assert_eq!(keys.len(), 14, "{keys:?}");
+    assert_eq!(keys.len(), 15, "{keys:?}");
     // A body without `trial` is not a trial.
     assert_eq!(o["trial"], false);
-    // Unlimited: no credit target reserve.
+    // Unlimited: no credit target reserve and no top-up threshold.
     assert_eq!(o["credit_target_reserve"], Value::Null);
+    assert_eq!(o["credit_topup_threshold"], Value::Null);
 
     let row = f.stored(&id).await;
     assert_eq!(row["status"], "draft");
@@ -1000,4 +1002,88 @@ async fn an_existing_quota_offering_without_a_reserve_reads_as_50() {
     let row = f.stored(&id).await;
     assert_eq!(row["name"], "Old pool renamed");
     assert_eq!(row["credit_target_reserve"], Value::Null);
+}
+
+#[tokio::test]
+async fn the_topup_threshold_defaults_within_the_target_and_is_checked() {
+    let f = fixture().await;
+    let o = f.create(pool_body("Default threshold")).await;
+    assert_eq!(o["credit_topup_threshold"], 10);
+    assert_eq!(f.stored(&id_of(&o)).await["credit_topup_threshold"], 10);
+    let mut b = pool_body("Threshold 20");
+    b["credit_topup_threshold"] = json!(20);
+    assert_eq!(f.create(b).await["credit_topup_threshold"], 20);
+    // A small target reserve caps the default.
+    let mut b = pool_body("Small reserve");
+    b["credit_target_reserve"] = json!(4);
+    assert_eq!(f.create(b).await["credit_topup_threshold"], 4);
+
+    let before = f.audit_count().await;
+    let offerings = f.hub.count("offerings").await;
+    for bad in [0, 60] {
+        let mut b = pool_body("Bad threshold");
+        b["credit_topup_threshold"] = json!(bad);
+        assert_error(
+            f.post("/api/admin/offerings", b).await,
+            StatusCode::BAD_REQUEST,
+            MSG_TOPUP_THRESHOLD_RANGE,
+        )
+        .await;
+    }
+    let mut unlimited = body("Unlimited");
+    unlimited["interval"] = json!("one_off");
+    unlimited["credit_topup_threshold"] = json!(5);
+    assert_error(
+        f.post("/api/admin/offerings", unlimited).await,
+        StatusCode::BAD_REQUEST,
+        MSG_TOPUP_THRESHOLD_UNLIMITED,
+    )
+    .await;
+    assert_eq!(f.audit_count().await, before);
+    assert_eq!(f.hub.count("offerings").await, offerings);
+}
+
+#[tokio::test]
+async fn the_topup_threshold_is_audited_and_freezes_at_publication() {
+    let f = fixture().await;
+    let id = id_of(&f.create(pool_body("Pool")).await);
+    let path = format!("/api/admin/offerings/{id}");
+    let mut b = pool_body("Pool");
+    b["credit_topup_threshold"] = json!(25);
+    let v = ok_json(f.post(&path, b.clone()).await).await;
+    assert_eq!(v["offering"]["credit_topup_threshold"], 25);
+    let (_, detail) = f.audits("admin.offering_updated").await.pop().unwrap();
+    assert_eq!(
+        detail["changes"],
+        json!({"credit_topup_threshold": {"from": 10, "to": 25}})
+    );
+    ok_json(f.publish(&id).await).await;
+    let mut changed = b.clone();
+    changed["credit_topup_threshold"] = json!(26);
+    assert_error(
+        f.post(&path, changed).await,
+        StatusCode::CONFLICT,
+        MSG_TERMS_FROZEN,
+    )
+    .await;
+    ok_json(f.post(&path, b).await).await;
+    // The database freezes it too.
+    let err = sqlx::query("UPDATE offerings SET credit_topup_threshold = 30 WHERE id = $1::uuid")
+        .bind(&id)
+        .execute(&f.hub.db.pool)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("commercial terms cannot change"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn an_existing_quota_offering_without_a_threshold_reads_as_10() {
+    let f = fixture().await;
+    let id = f.hub.published_one_off_offering("Old pool", 12).await;
+    assert_eq!(f.stored(&id).await["credit_topup_threshold"], Value::Null);
+    let v = ok_json(f.get(&format!("/api/admin/offerings/{id}")).await).await;
+    assert_eq!(v["offering"]["credit_topup_threshold"], 10);
 }

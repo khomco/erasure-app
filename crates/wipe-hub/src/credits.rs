@@ -20,7 +20,8 @@
 //!   carry the bare licence only, and a grant nobody receives would strand
 //!   credits until release.
 //! - **Grant** ([`grant`]): signs one grant for the station's key, stores the
-//!   exact file linked to the licence it was issued with, and audits
+//!   exact file linked to the licence it was issued with (none for a
+//!   top-up grant: `credit_grants.licence_id` is NULL), and audits
 //!   `credits.granted {grant_id, entitlement_id, station_id, licence_id,
 //!   credits, available_after}` (subject `entitlement:<id>`), in the caller's
 //!   transaction.
@@ -31,9 +32,10 @@
 //!   The cap means a wrong report can never grow the pool beyond what was
 //!   bought.
 //!
-//! No route writes a station's reported balance yet: story 4's report fills
-//! `stations.credit_balance`. Until then stations ignore grants, and every
-//! release returns 0.
+//! A connected station's top-up ([`crate::station_link::top_up`], story 4)
+//! grants here too, with no licence (`licence_id: None`), and records the
+//! balance the station will hold once the answer lands in
+//! `stations.credit_balance`, which a release returns.
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -55,6 +57,10 @@ pub const MSG_CREDITS_NEGATIVE: &str = "credits must be a whole number, 0 or mor
 /// The target reserve of an offering whose `credit_target_reserve` is NULL
 /// (ADR-0013 §3).
 pub const DEFAULT_TARGET_RESERVE: i64 = 50;
+
+/// The top-up threshold of an offering whose `credit_topup_threshold` is
+/// NULL, capped at its target reserve (ADR-0013 §3).
+pub const DEFAULT_TOPUP_THRESHOLD: i64 = 10;
 
 /// An entitlement's pool, as its organization sees it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,8 +189,9 @@ pub(crate) struct NewGrant<'a> {
     pub purchased: i64,
     /// The `stations` row.
     pub station: Uuid,
-    /// The licence issued with it, in the same transaction.
-    pub licence_id: Uuid,
+    /// The licence issued with it, in the same transaction; `None` for a
+    /// top-up over the station link ([`crate::station_link::top_up`]).
+    pub licence_id: Option<Uuid>,
     pub instance_key_id: &'a str,
     /// > 0, decided by [`decide`].
     pub credits: i64,

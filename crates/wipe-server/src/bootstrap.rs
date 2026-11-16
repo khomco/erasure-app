@@ -720,9 +720,15 @@ fn build_license_context(
             "--license needs --vendor-root-b64: an unverified licence proves nothing"
         ));
     }
-    let license = wipe_license::load_license(&path).map_err(|e| anyhow!("{e}"))?;
+    let file = wipe_license::load_license_file(&path).map_err(|e| anyhow!("{e}"))?;
+    let license = file.license;
     wipe_license::check_installable(&license, station_key_id, roots)
         .map_err(|p| anyhow!("cannot install {}: {p}", path.display()))?;
+    // A file whose credit grant fails is refused whole, as a bad licence is.
+    if let Some(grant) = &file.credit_grant {
+        wipe_license::check_grant_for(grant, station_key_id, roots)
+            .map_err(|p| anyhow!("cannot install {}: {}", path.display(), p.grant_message()))?;
+    }
 
     let ent = &license.body.entitlements;
     report(format!(
@@ -736,6 +742,29 @@ fn build_license_context(
 
     let chain = wipe_license::AttestationChain::new(license);
     let ctx = LicenseContext::open(station_id, Some(chain), lease_store, now);
+    if let Some(grant) = &file.credit_grant {
+        // Checked above; a grant id already held (the same file at every
+        // restart) changes nothing.
+        match ctx.add_grant(grant, station_key_id, roots) {
+            Ok(intake) if intake.added == wipe_license::GrantAdded::Added => {
+                report(format!(
+                    "  credit grant {}: {} credits added to the credit reserve",
+                    grant.body.grant_id, grant.body.credits
+                ));
+                if let Err(fault) = intake.saved {
+                    report(format!("  credit grant held in memory, not saved: {fault}"));
+                }
+            }
+            Ok(_) => {}
+            Err(p) => {
+                return Err(anyhow!(
+                    "cannot install {}: {}",
+                    path.display(),
+                    p.grant_message()
+                ))
+            }
+        }
+    }
     report(format!("  {}", ctx.status(now).operator_message()));
     Ok(ctx)
 }

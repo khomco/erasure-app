@@ -14,13 +14,14 @@
 //! it is the vendor's own site. Subdomain cookie-tossing is the known
 //! weakness, accepted until hosting is decided (CONTEXT §10).
 //!
-//! Four routes are exempt, all called by machines that have no cookie and
+//! Five routes are exempt, all called by machines that have no cookie and
 //! carry their own credential: `POST /api/payments/webhook`, called by the
 //! payment provider, whose signature over the raw body is its credential and
 //! which answers only `{"received":true}`; a station's enrollment start and
 //! poll, `POST /api/enrollments` and `POST /api/enrollments/poll`
-//! (station-enrollment story 1); and a station's licence fetch, `POST
-//! /api/station/licence` (story 5). A station's instance-key signature is
+//! (station-enrollment story 1); a station's licence fetch, `POST
+//! /api/station/licence` (story 5); and its credit top-up, `POST
+//! /api/station/credits` (controlled-licensing story 4). A station's instance-key signature is
 //! its credential. None of them sets or reads a cookie.
 //!
 //! `GET /api/auth/csrf` hands the token to the portal; it is the only place a
@@ -42,7 +43,7 @@ use crate::accounts;
 use crate::auth::{self, ApiError};
 use crate::enrollment_routes::{ENROLLMENT_POLL_PATH, ENROLLMENT_START_PATH};
 use crate::order_routes::PAYMENT_WEBHOOK_PATH;
-use crate::station_link_routes::STATION_LICENCE_PATH;
+use crate::station_link_routes::{STATION_CREDITS_PATH, STATION_LICENCE_PATH};
 use crate::AppState;
 
 /// Name of the CSRF cookie.
@@ -89,7 +90,8 @@ fn is_safe(method: &Method) -> bool {
 
 /// Whether a request needs no token: `POST` to the payment provider's
 /// webhook (its credential is the provider's signature over the body), or
-/// to a station's enrollment start or poll or its licence fetch (its
+/// to a station's enrollment start or poll, its licence fetch or its credit
+/// top-up (its
 /// credential is the instance-key signature). Exact paths only.
 fn is_exempt(method: &Method, path: &str) -> bool {
     *method == Method::POST
@@ -98,6 +100,7 @@ fn is_exempt(method: &Method, path: &str) -> bool {
             ENROLLMENT_START_PATH,
             ENROLLMENT_POLL_PATH,
             STATION_LICENCE_PATH,
+            STATION_CREDITS_PATH,
         ]
         .contains(&path)
 }
@@ -251,10 +254,17 @@ mod tests {
         assert_eq!(ENROLLMENT_START_PATH, concat!("/api", "/enrollments"));
         assert_eq!(ENROLLMENT_POLL_PATH, concat!("/api", "/enrollments/poll"));
         assert_eq!(STATION_LICENCE_PATH, concat!("/api", "/station/licence"));
+        assert_eq!(STATION_CREDITS_PATH, concat!("/api", "/station/credits"));
+        // The path the station's client posts to.
+        assert_eq!(
+            STATION_CREDITS_PATH,
+            wipe_license::station_credits::STATION_CREDITS_PATH
+        );
         for path in [
             ENROLLMENT_START_PATH,
             ENROLLMENT_POLL_PATH,
             STATION_LICENCE_PATH,
+            STATION_CREDITS_PATH,
         ] {
             assert!(is_exempt(&Method::POST, path));
             for (m, p) in [
@@ -277,6 +287,8 @@ mod tests {
         assert!(!is_exempt(&Method::POST, &challenge));
         let license = STATION_LICENCE_PATH.replace("licence", "license");
         assert!(!is_exempt(&Method::POST, &license));
+        let credit = STATION_CREDITS_PATH.replace("credits", "credit");
+        assert!(!is_exempt(&Method::POST, &credit));
     }
 
     #[test]

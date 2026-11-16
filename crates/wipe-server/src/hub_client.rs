@@ -29,6 +29,11 @@
 //!   licence_id}` signed with [`wipe_license::station_request`] over it, the
 //!   hub origin, `POST`, the path and the body. The fetched licence is not
 //!   checked here: the caller checks it with [`check_licence`].
+//! - [`HubClient::top_up`] (controlled-licensing story 4): `POST
+//!   /api/station/credits` with a [`TopUpRequest`] body, signed the same
+//!   way; the hub's [`TopUpAnswer`] carries a credit grant or none,
+//!   unverified (the caller checks it). Both types are
+//!   [`wipe_license::station_credits`]'s, which the hub's route uses too.
 //!
 //! Nothing here gates, delays or interrupts an erasure.
 
@@ -40,6 +45,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use url::{Host, Url};
 use wipe_cert::{SigningKey, VerifyingKey};
+use wipe_license::station_credits::{TopUpAnswer, TopUpRequest};
 use wipe_license::{InstallProblem, LicenseCertificate};
 
 /// How long a connection to the hub may take to open.
@@ -54,6 +60,9 @@ pub const ENROLLMENT_POLL_PATH: &str = "/api/enrollments/poll";
 pub const STATION_CHALLENGE_PATH: &str = "/api/station/challenge";
 /// Where a station fetches its licence (`wipe-hub`'s route).
 pub const STATION_LICENCE_PATH: &str = "/api/station/licence";
+/// Where a station tops up its credit reserve (`wipe-hub`'s route), from
+/// the wire contract both sides share.
+pub use wipe_license::station_credits::STATION_CREDITS_PATH;
 
 /// The rule a hub address must meet, stated in every refusal.
 pub const HUB_ORIGIN_RULE: &str = "A hub address is an https origin such as \
@@ -296,6 +305,19 @@ pub enum FetchOutcome {
     Refused(String),
 }
 
+/// One top-up's outcome ([`HubClient::top_up`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TopUpOutcome {
+    /// 200.
+    Answer(TopUpAnswer),
+    /// 404: no organization has a station with this key.
+    NotRegistered,
+    /// The hub could not be reached, or did not answer in time.
+    Unreachable(String),
+    /// Any other answer: the hub's `error` text, or what was wrong with it.
+    Refused(String),
+}
+
 /// A client for one hub.
 #[derive(Debug, Clone)]
 pub struct HubClient {
@@ -471,30 +493,27 @@ impl HubClient {
             })
     }
 
-    /// Ask the hub for `key`'s latest licence, saying which one the station
-    /// holds (`held_id`). Gets its own challenge first.
-    pub async fn fetch_licence(&self, key: &SigningKey, held_id: Option<&str>) -> FetchOutcome {
-        let challenge = match self.challenge().await {
-            Ok(c) => c,
-            Err(outcome) => return outcome,
-        };
-        let body = serde_json::json!({
-            "instance_public_key": key.verifying_key().to_base64(),
-            "licence_id": held_id,
-        })
-        .to_string();
+    /// `POST path` with `body`, signed with `key` over a fresh challenge:
+    /// the answer's status and text. Gets its own challenge first.
+    async fn signed_post(
+        &self,
+        key: &SigningKey,
+        path: &str,
+        body: String,
+    ) -> Result<(StatusCode, String), FetchOutcome> {
+        let challenge = self.challenge().await?;
         let signed = wipe_license::station_request::sign(
             key,
             &challenge,
             self.origin.as_str(),
             "POST",
-            STATION_LICENCE_PATH,
+            path,
             body.as_bytes(),
         );
         use wipe_license::station_request::{HEADER_CHALLENGE, HEADER_KEY_ID, HEADER_SIGNATURE};
-        let resp = match self
+        let resp = self
             .http
-            .post(self.origin.url(STATION_LICENCE_PATH))
+            .post(self.origin.url(path))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(HEADER_KEY_ID, &signed.instance_key_id)
             .header(HEADER_CHALLENGE, &signed.challenge)
@@ -502,14 +521,54 @@ impl HubClient {
             .body(body)
             .send()
             .await
-        {
-            Ok(r) => r,
-            Err(e) => return FetchOutcome::Unreachable(error_chain(&e)),
-        };
+            .map_err(|e| FetchOutcome::Unreachable(error_chain(&e)))?;
         let status = resp.status();
-        let text = match resp.text().await {
-            Ok(t) => t,
-            Err(e) => return FetchOutcome::Unreachable(error_chain(&e)),
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| FetchOutcome::Unreachable(error_chain(&e)))?;
+        Ok((status, text))
+    }
+
+    /// Ask the hub to top up `key`'s credit reserve, reporting it. The
+    /// request's `instance_public_key` is `key`'s, whatever `report` says.
+    pub async fn top_up(&self, key: &SigningKey, report: &TopUpRequest) -> TopUpOutcome {
+        let body = serde_json::to_string(&TopUpRequest {
+            instance_public_key: key.verifying_key().to_base64(),
+            ..report.clone()
+        })
+        .expect("a top-up request serializes");
+        let (status, text) = match self.signed_post(key, STATION_CREDITS_PATH, body).await {
+            Ok(answer) => answer,
+            Err(FetchOutcome::Unreachable(why)) => return TopUpOutcome::Unreachable(why),
+            Err(FetchOutcome::Refused(why)) => return TopUpOutcome::Refused(why),
+            Err(other) => return TopUpOutcome::Refused(format!("{other:?}")),
+        };
+        match status {
+            StatusCode::OK => match serde_json::from_str::<TopUpAnswer>(&text) {
+                Ok(answer) => TopUpOutcome::Answer(answer),
+                Err(e) => TopUpOutcome::Refused(format!("an answer this station cannot read: {e}")),
+            },
+            StatusCode::NOT_FOUND => TopUpOutcome::NotRegistered,
+            other => TopUpOutcome::Refused(format!(
+                "HTTP {}: {}",
+                other.as_u16(),
+                error_text(&text, other)
+            )),
+        }
+    }
+
+    /// Ask the hub for `key`'s latest licence, saying which one the station
+    /// holds (`held_id`). Gets its own challenge first.
+    pub async fn fetch_licence(&self, key: &SigningKey, held_id: Option<&str>) -> FetchOutcome {
+        let body = serde_json::json!({
+            "instance_public_key": key.verifying_key().to_base64(),
+            "licence_id": held_id,
+        })
+        .to_string();
+        let (status, text) = match self.signed_post(key, STATION_LICENCE_PATH, body).await {
+            Ok(answer) => answer,
+            Err(outcome) => return outcome,
         };
         match status {
             StatusCode::NO_CONTENT => FetchOutcome::Current,

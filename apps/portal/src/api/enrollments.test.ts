@@ -51,6 +51,7 @@ const station: Station = {
   credit_balance: null,
   credit_balance_reported_at: null,
   credits_granted: 0,
+  credit_report_mismatch_at: null,
 };
 
 interface Call {

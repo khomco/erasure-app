@@ -372,6 +372,11 @@ export interface LicenseInfo {
   fingerprint: string;
   /** Absent until the station has checked with a saved platform address. */
   hub_check?: HubCheck;
+  /**
+   * The station's latest credit top-up from its organization's credit pool
+   * (ADR-0013 §3); absent until one has run. Never stops a start.
+   */
+  credit_top_up?: HubCheck;
 }
 
 /**
@@ -491,6 +496,11 @@ export interface JobLicence {
   attestation?: AttestationChain;
   license_id?: string;
   credits_reserved: number;
+  /**
+   * The organization whose credit pool the start reserved from (a `pool`
+   * licence); absent otherwise.
+   */
+  credit_pool?: string;
   decided_at: string;
 }
 

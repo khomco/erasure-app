@@ -464,8 +464,8 @@ impl LeaseStore for LocalFileLeaseStore {
 
     fn detail(&self) -> String {
         format!(
-            "Licence quota count, evaluation erasure count and clock-rollback watermark are \
-             saved to {} on this station. Survives reboot.",
+            "Licence quota count, credit reserve, evaluation erasure count and clock-rollback \
+             watermark are saved to {} on this station. Survives reboot.",
             self.path.display()
         )
     }
@@ -603,14 +603,18 @@ impl LeaseStore for EphemeralLeaseStore {
             return format!(
                 "{} Lease state was read from that file at start-up and is held in memory \
                  only: changes made this boot are lost, and on reboot the station returns to \
-                 that file's quota count, evaluation erasure count and clock watermark.",
+                 that file's quota count, evaluation erasure count and clock watermark. \
+                 Credits held for a pool licence that were taken this boot are lost too: a \
+                 top-up after the reboot takes a fresh grant from the organization's pool.",
                 self.reason
             );
         }
         format!(
             "{} Lease state is held in memory only, so the licence quota count and \
              clock-rollback protection reset on reboot. The evaluation erasure count \
-             resets too.",
+             resets too, and on a pool licence the credits this station holds are lost at \
+             every restart: its next top-up takes a fresh grant from the organization's \
+             pool.",
             self.reason
         )
     }

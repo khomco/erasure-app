@@ -96,6 +96,16 @@ export function creditsText(s: Station): string {
 }
 
 /**
+ * "Reported credits did not add up on 2026-11-10" once a station's credit
+ * report did not add up at the hub; `null` if never.
+ */
+export function creditMismatchText(s: Station): string | null {
+  return s.credit_report_mismatch_at === null
+    ? null
+    : `Reported credits did not add up on ${day(s.credit_report_mismatch_at)}`;
+}
+
+/**
  * A whole number of credits from a form field, or `null` when it is not one
  * (blank, negative, fractional or not a number).
  */
@@ -408,6 +418,9 @@ export function StationRow({
       <td className="py-1 pr-3">{stationState(s)}</td>
       <td className="py-1 pr-3">
         {pool === "unknown" ? "…" : pool ? creditsText(s) : "Unlimited"}
+        {s.credit_report_mismatch_at !== null && (
+          <span className="block text-amber-400">{creditMismatchText(s)}</span>
+        )}
       </td>
       <td className="space-x-3 py-1 whitespace-nowrap">
         {s.licence && !released && s.licence.status !== "revoked" && (

@@ -14,6 +14,7 @@ const priced: Offering = {
   trial: false,
   grants: { scope: "machine", seats: 1, quota_erasures: null, features: [], term_months: 12 },
   credit_target_reserve: null,
+  credit_topup_threshold: null,
   status: "draft",
   created_at: "2026-11-10T10:00:00Z",
   updated_at: "2026-11-10T10:00:00Z",
@@ -29,6 +30,7 @@ const trial: Offering = {
   trial: true,
   grants: { scope: "site", seats: 1, quota_erasures: 25, features: [], term_months: 1 },
   credit_target_reserve: 50,
+  credit_topup_threshold: 20,
 };
 
 function render(initial?: Offering, termsLocked = false): string {
@@ -133,6 +135,7 @@ describe("the body the form sends", () => {
         trial: true,
         grants: trial.grants,
         credit_target_reserve: 50,
+        credit_topup_threshold: 20,
       },
     });
   });
@@ -151,6 +154,39 @@ describe("the body the form sends", () => {
     expect(offeringBody({ ...pooled, reserve: "1.5" })).toEqual({
       error: "The credit target reserve is a whole number.",
     });
+  });
+
+  it("sends the top-up threshold only with a counted quota", () => {
+    const pooled = { ...fields, trial: false, interval: "one_off" as const, quota: "500" };
+    expect(offeringBody({ ...pooled, threshold: "20" })).toMatchObject({
+      body: { credit_topup_threshold: 20 },
+    });
+    // Blank leaves the hub's default.
+    const blank = offeringBody({ ...pooled, threshold: " " });
+    expect("body" in blank && "credit_topup_threshold" in blank.body).toBe(false);
+    // Unlimited never sends one.
+    const unlimited = offeringBody({ ...pooled, unlimited: true, threshold: "20" });
+    expect("body" in unlimited && "credit_topup_threshold" in unlimited.body).toBe(false);
+    expect(offeringBody({ ...pooled, threshold: "2.5" })).toEqual({
+      error: "The top-up threshold is a whole number.",
+    });
+  });
+
+  it("shows the top-up threshold field only with a counted quota", () => {
+    expect(tag(render(trial), "threshold")).toContain('value="20"');
+    expect(render(trial)).toContain(
+      "A connected station tops up when it has fewer credits available than this. Blank uses 10, or the target reserve when that is smaller.",
+    );
+    expect(render(priced)).not.toContain('name="threshold"');
+  });
+
+  it("leaves the threshold blank for a new counted offering, so the hub's default applies", () => {
+    const input = tag(render({ ...trial, credit_topup_threshold: null }), "threshold");
+    expect(input).toContain('value=""');
+    // A blank threshold is not sent: the hub stores min(10, target reserve).
+    const pooled = { ...fields, trial: false, interval: "one_off" as const, quota: "500" };
+    const built = offeringBody({ ...pooled, reserve: "5", threshold: "" });
+    expect("body" in built && "credit_topup_threshold" in built.body).toBe(false);
   });
 
   it("shows the target reserve field only with a counted quota", () => {

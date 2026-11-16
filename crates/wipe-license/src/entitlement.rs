@@ -17,19 +17,29 @@ pub enum Quota {
     /// A hard count. Only meaningfully enforceable with online
     /// reconciliation (ADR-0005 §4); offline this is best-effort.
     Count { erasures: u64 },
+    /// Credits come from credit grants held by the station for the
+    /// licence's organization (`customer_id`), not from the licence
+    /// (ADR-0013 §3): the hub issues this for every station licence on an
+    /// entitlement with an erasure quota. The station judges it against its
+    /// credit reserve ([`crate::lease::evaluate`]), so [`permits`] and
+    /// [`remaining`], which see only a used count, do not limit it.
+    ///
+    /// [`permits`]: Self::permits
+    /// [`remaining`]: Self::remaining
+    Pool,
 }
 
 impl Quota {
     pub fn permits(&self, used: u64) -> bool {
         match self {
-            Self::Unlimited => true,
+            Self::Unlimited | Self::Pool => true,
             Self::Count { erasures } => used < *erasures,
         }
     }
 
     pub fn remaining(&self, used: u64) -> Option<u64> {
         match self {
-            Self::Unlimited => None,
+            Self::Unlimited | Self::Pool => None,
             Self::Count { erasures } => Some(erasures.saturating_sub(used)),
         }
     }

@@ -136,6 +136,9 @@ describe("guards", () => {
         },
       }),
     ).toBe(true);
+    expect(
+      isLicenseBody({ ...body, entitlements: { ...body.entitlements, quota: { kind: "pool" } } }),
+    ).toBe(true);
     // No lapse policy on the record (retired, ADR-0013 §5); an old file's is still parsed.
     expect("lapse_policy" in vendorLicence).toBe(false);
     expect(isAdminLicence({ ...vendorLicence, lapse_policy: "stop" })).toBe(true);
@@ -153,6 +156,9 @@ describe("guards", () => {
     expect(isLicenseBody({ ...body, entitlements: { ...body.entitlements, quota: { kind: "count" } } })).toBe(
       false,
     );
+    expect(
+      isLicenseBody({ ...body, entitlements: { ...body.entitlements, quota: { kind: "credits" } } }),
+    ).toBe(false);
     expect(isLicenseBody({ ...body, license_id: 7 })).toBe(false);
     expect(isLicenseBody({ ...body, lapse_policy: "sometimes" })).toBe(false);
     expect(
@@ -211,6 +217,7 @@ describe("text", () => {
     expect(licenceHolderText(stationLicence)).toBe("Bench 1 (bench-1)");
     expect(quotaText({ kind: "unlimited" })).toBe("Unlimited erasures");
     expect(quotaText({ kind: "count", erasures: 5000 })).toBe("5,000 erasures");
+    expect(quotaText({ kind: "pool" })).toBe("Credit pool");
     expect(scopeText({ kind: "machine", fingerprint: "mf1:abc" })).toBe("Machine mf1:abc");
     expect(scopeText({ kind: "site", site_id: "Floor 2" })).toBe("Site Floor 2");
     expect(expiryAfter(30, new Date("2026-11-08T10:00:00Z"))).toBe("2026-12-08");

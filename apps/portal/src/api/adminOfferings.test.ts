@@ -36,6 +36,7 @@ const input: OfferingInput = {
 const offering: Offering = {
   ...input,
   credit_target_reserve: null,
+  credit_topup_threshold: null,
   id: "0f8fad5b-d9cb-469f-a165-70867728950e",
   status: "draft",
   created_at: "2026-11-08T10:00:00Z",
@@ -171,6 +172,22 @@ describe("offering calls", () => {
     expect((err as Error).message).toBe("offering list returned an unexpected body (HTTP 200)");
     const bad2 = respond(200, { offering: { ...offering, status: "archived" } });
     expect(await rejection(fetchOffering(offering.id, bad2.impl))).toBeInstanceOf(Error);
+  });
+
+  it("needs the credit top-up threshold in the hub's answer", async () => {
+    const counted = {
+      ...offering,
+      grants: { ...offering.grants, quota_erasures: 500 },
+      credit_target_reserve: 50,
+      credit_topup_threshold: 10,
+    };
+    const ok = respond(200, { offering: counted });
+    expect(await fetchOffering(offering.id, ok.impl)).toEqual(counted);
+    const { credit_topup_threshold: _dropped, ...noThreshold } = counted;
+    const bad = respond(200, { offering: noThreshold });
+    expect(await rejection(fetchOffering(offering.id, bad.impl))).toBeInstanceOf(Error);
+    const wrong = respond(200, { offering: { ...counted, credit_topup_threshold: "10" } });
+    expect(await rejection(fetchOffering(offering.id, wrong.impl))).toBeInstanceOf(Error);
   });
 
   it("fetches one by encoded id", async () => {

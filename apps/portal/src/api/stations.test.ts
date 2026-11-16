@@ -49,6 +49,7 @@ const station: Station = {
   credit_balance: null,
   credit_balance_reported_at: null,
   credits_granted: 0,
+  credit_report_mismatch_at: null,
 };
 
 interface Call {
@@ -119,6 +120,7 @@ describe("guards", () => {
         credit_balance: 30,
         credit_balance_reported_at: "2026-11-10T00:00:00Z",
         credits_granted: 50,
+        credit_report_mismatch_at: "2026-11-11T00:00:00Z",
       }),
     ).toBe(true);
     expect(isCreditGrant({ id: "g", credits: 50 })).toBe(true);
@@ -129,6 +131,8 @@ describe("guards", () => {
     expect(isStation({ ...station, credits_granted: 1.5 })).toBe(false);
     expect(isStation({ ...station, credit_balance: "30" })).toBe(false);
     expect(isStation({ ...station, credit_balance_reported_at: undefined })).toBe(false);
+    expect(isStation({ ...station, credit_report_mismatch_at: undefined })).toBe(false);
+    expect(isStation({ ...station, credit_report_mismatch_at: 1 })).toBe(false);
     expect(isCreditGrant({ id: "g", credits: "50" })).toBe(false);
     expect(isCreditGrant(null)).toBe(false);
   });

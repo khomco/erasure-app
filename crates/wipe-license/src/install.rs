@@ -47,6 +47,18 @@ pub fn load_license(path: &Path) -> LicenseResult<LicenseCertificate> {
     })
 }
 
+/// Load a licence file from disk in either form ([`parse_license_file`]):
+/// the licence and the credit grant beside it, if any. Not trusting, as
+/// [`load_license`]; errors name the path.
+pub fn load_license_file(path: &Path) -> LicenseResult<LicenseFile> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| LicenseError::Encoding(format!("reading {}: {e}", path.display())))?;
+    parse_license_file(&raw).map_err(|e| match e {
+        LicenseError::Encoding(why) => LicenseError::Encoding(format!("{}: {why}", path.display())),
+        other => other,
+    })
+}
+
 /// Parse a licence file's JSON, as read from disk or received over the API.
 ///
 /// Like [`load_license`], parsing is not trusting: the caller still has to
@@ -112,6 +124,20 @@ impl std::fmt::Display for InstallProblem {
                  {expected}. A licence is bound to one key; reissue it for this station."
             ),
             Self::NotTrusted(reason) => write!(f, "licence did not verify: {reason}"),
+        }
+    }
+}
+
+impl InstallProblem {
+    /// The problem worded for a credit grant ([`crate::check_grant_for`])
+    /// rather than a licence.
+    pub fn grant_message(&self) -> String {
+        match self {
+            Self::WrongInstanceKey { expected, found } => format!(
+                "credit grant was issued to instance key {found}, but this station's signing \
+                 key is {expected}. A credit grant is bound to one key; it cannot be used here."
+            ),
+            Self::NotTrusted(reason) => format!("credit grant did not verify: {reason}"),
         }
     }
 }

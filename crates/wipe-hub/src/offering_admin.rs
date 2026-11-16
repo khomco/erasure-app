@@ -29,6 +29,11 @@
 //!   counted quota (absent: [`crate::credits::DEFAULT_TARGET_RESERVE`]),
 //!   frozen at publication; an unlimited offering has none. A stored NULL
 //!   reads as the default.
+//! - **Credit top-up threshold** (`credit_topup_threshold`, ADR-0013 §3): a
+//!   connected station is topped up when its balance falls below this. Only
+//!   with a counted quota, between 1 and the target reserve (absent:
+//!   `min(`[`crate::credits::DEFAULT_TOPUP_THRESHOLD`]`, target reserve)`),
+//!   frozen at publication. A stored NULL reads as that default.
 //! - **No annual offering with a counted quota**: what happens to unused
 //!   credits at renewal is undecided (ADR-0013, DECISIONS D17), so offerings
 //!   with credits are one-off. Refused by this validator only.
@@ -64,6 +69,10 @@ pub const TARGET_RESERVE_MAX: i64 = 1_000_000_000;
 
 pub const MSG_TARGET_RESERVE_UNLIMITED: &str =
     "credit_target_reserve applies only to an offering with an erasure quota";
+pub const MSG_TOPUP_THRESHOLD_UNLIMITED: &str =
+    "credit_topup_threshold applies only to an offering with an erasure quota";
+pub const MSG_TOPUP_THRESHOLD_RANGE: &str =
+    "credit_topup_threshold must be between 1 and the target reserve";
 pub const MSG_ANNUAL_QUOTA: &str = "grants.quota_erasures must be unlimited for an annual \
      offering: offerings with erasure credits are one-off until unused credits at renewal are \
      decided";
@@ -116,6 +125,10 @@ pub struct OfferingRequest {
     /// Credits a station is given by default; only with a counted quota.
     #[serde(default)]
     pub credit_target_reserve: Option<i64>,
+    /// A station is topped up below this balance; only with a counted
+    /// quota.
+    #[serde(default)]
+    pub credit_topup_threshold: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -160,6 +173,8 @@ pub struct NewOffering {
     pub grants: Grants,
     /// `Some` exactly when the quota is counted.
     pub credit_target_reserve: Option<i64>,
+    /// `Some` exactly when the quota is counted.
+    pub credit_topup_threshold: Option<i64>,
 }
 
 fn in_range(field: &str, v: i64, lo: i64, hi: i64) -> Result<i64, String> {
@@ -240,6 +255,13 @@ pub fn validate(req: &OfferingRequest) -> Result<NewOffering, String> {
         (Some(_), None) => Some(crate::credits::DEFAULT_TARGET_RESERVE),
         (Some(_), Some(n)) => Some(in_range("credit_target_reserve", n, 1, TARGET_RESERVE_MAX)?),
     };
+    let credit_topup_threshold = match (credit_target_reserve, req.credit_topup_threshold) {
+        (None, None) => None,
+        (None, Some(_)) => return Err(MSG_TOPUP_THRESHOLD_UNLIMITED.into()),
+        (Some(target), None) => Some(crate::credits::DEFAULT_TOPUP_THRESHOLD.min(target)),
+        (Some(target), Some(n)) if (1..=target).contains(&n) => Some(n),
+        (Some(_), Some(_)) => return Err(MSG_TOPUP_THRESHOLD_RANGE.into()),
+    };
     let mut features = BTreeSet::new();
     for f in &g.features {
         // `wipe_license::Feature` decides; FEATURES only words the error.
@@ -272,6 +294,7 @@ pub fn validate(req: &OfferingRequest) -> Result<NewOffering, String> {
             term_months: term_months as i32,
         },
         credit_target_reserve,
+        credit_topup_threshold,
     })
 }
 
@@ -296,6 +319,9 @@ pub struct Offering {
     /// Credits a station is given by default (ADR-0013 §3); `None` exactly
     /// when the quota is unlimited.
     pub credit_target_reserve: Option<i64>,
+    /// A station is topped up below this balance (ADR-0013 §3); `None`
+    /// exactly when the quota is unlimited.
+    pub credit_topup_threshold: Option<i64>,
     /// RFC 3339, UTC.
     pub created_at: String,
     pub updated_at: String,
@@ -313,6 +339,7 @@ impl Offering {
             && self.trial == new.trial
             && self.grants == new.grants
             && self.credit_target_reserve == new.credit_target_reserve
+            && self.credit_topup_threshold == new.credit_topup_threshold
     }
 
     /// `{field: {from, to}}` for every field `new` changes; `grants` is one
@@ -344,6 +371,11 @@ impl Offering {
             json!(self.credit_target_reserve),
             json!(new.credit_target_reserve),
         );
+        diff(
+            "credit_topup_threshold",
+            json!(self.credit_topup_threshold),
+            json!(new.credit_topup_threshold),
+        );
         out
     }
 }
@@ -370,6 +402,7 @@ struct Row {
     features: Vec<String>,
     term_months: i32,
     credit_target_reserve: Option<i64>,
+    credit_topup_threshold: Option<i64>,
     created_at: String,
     updated_at: String,
     published_at: Option<String>,
@@ -395,6 +428,7 @@ impl From<Row> for Offering {
                 term_months: r.term_months,
             },
             credit_target_reserve: r.credit_target_reserve,
+            credit_topup_threshold: r.credit_topup_threshold,
             created_at: r.created_at,
             updated_at: r.updated_at,
             published_at: r.published_at,
@@ -437,12 +471,18 @@ fn select() -> String {
                 COALESCE(credit_target_reserve, \
                          CASE WHEN quota_erasures IS NOT NULL THEN {DEFAULT_RESERVE} END) \
                     AS credit_target_reserve, \
+                COALESCE(credit_topup_threshold, \
+                         CASE WHEN quota_erasures IS NOT NULL \
+                              THEN LEAST({DEFAULT_THRESHOLD}, \
+                                         COALESCE(credit_target_reserve, {DEFAULT_RESERVE})) \
+                         END) AS credit_topup_threshold, \
                 to_char(created_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS created_at, \
                 to_char(updated_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS updated_at, \
                 to_char(published_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS published_at, \
                 to_char(retired_at AT TIME ZONE 'UTC', {RFC3339_UTC}) AS retired_at \
          FROM offerings",
-        DEFAULT_RESERVE = crate::credits::DEFAULT_TARGET_RESERVE
+        DEFAULT_RESERVE = crate::credits::DEFAULT_TARGET_RESERVE,
+        DEFAULT_THRESHOLD = crate::credits::DEFAULT_TOPUP_THRESHOLD
     )
 }
 
@@ -532,8 +572,8 @@ pub async fn create(
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO offerings (name, description, price_minor, currency, billing_interval, \
                                 scope, seats, quota_erasures, features, term_months, created_by, \
-                                trial, credit_target_reserve) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id",
+                                trial, credit_target_reserve, credit_topup_threshold) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id",
     )
     .bind(&new.name)
     .bind(&new.description)
@@ -548,6 +588,7 @@ pub async fn create(
     .bind(admin.user_id())
     .bind(new.trial)
     .bind(new.credit_target_reserve)
+    .bind(new.credit_topup_threshold)
     .fetch_one(&mut *conn)
     .await?;
     let offering = fetch(conn, id).await?;
@@ -602,6 +643,8 @@ pub async fn update(
                 features = $10, term_months = $11, trial = $12, \
                 credit_target_reserve = CASE WHEN status = 'draft' THEN $13 \
                                              ELSE credit_target_reserve END, \
+                credit_topup_threshold = CASE WHEN status = 'draft' THEN $14 \
+                                              ELSE credit_topup_threshold END, \
                 updated_at = now() \
          WHERE id = $1",
     )
@@ -618,6 +661,7 @@ pub async fn update(
     .bind(new.grants.term_months)
     .bind(new.trial)
     .bind(new.credit_target_reserve)
+    .bind(new.credit_topup_threshold)
     .execute(&mut *conn)
     .await?;
     audit_read(
@@ -865,6 +909,7 @@ mod tests {
             status: "draft".into(),
             grants: new.grants.clone(),
             credit_target_reserve: None,
+            credit_topup_threshold: None,
             created_at: String::new(),
             updated_at: String::new(),
             published_at: None,
@@ -969,6 +1014,35 @@ mod tests {
         assert_eq!(
             err(|r| r.credit_target_reserve = Some(80)),
             MSG_TARGET_RESERVE_UNLIMITED
+        );
+    }
+
+    #[test]
+    fn the_topup_threshold_defaults_within_the_target_and_is_refused_without_a_quota() {
+        let one_off = |reserve: Option<i64>, threshold: Option<i64>| {
+            let mut r = req();
+            r.interval = "one_off".into();
+            r.grants.quota_erasures = Some(Some(500));
+            r.credit_target_reserve = reserve;
+            r.credit_topup_threshold = threshold;
+            validate(&r)
+        };
+        let threshold =
+            |reserve, threshold| one_off(reserve, threshold).map(|o| o.credit_topup_threshold);
+        assert_eq!(threshold(None, None), Ok(Some(10)));
+        assert_eq!(threshold(Some(5), None), Ok(Some(5)));
+        assert_eq!(threshold(None, Some(20)), Ok(Some(20)));
+        assert_eq!(threshold(None, Some(50)), Ok(Some(50)));
+        for bad in [0, -1, 51] {
+            assert_eq!(
+                threshold(None, Some(bad)),
+                Err(MSG_TOPUP_THRESHOLD_RANGE.to_string())
+            );
+        }
+        assert_eq!(validate(&req()).unwrap().credit_topup_threshold, None);
+        assert_eq!(
+            err(|r| r.credit_topup_threshold = Some(5)),
+            MSG_TOPUP_THRESHOLD_UNLIMITED
         );
     }
 }

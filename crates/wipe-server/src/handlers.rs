@@ -979,6 +979,7 @@ pub async fn license(State(state): State<AppState>) -> Json<crate::licensing::Li
         .license()
         .view(time::OffsetDateTime::now_utc(), state.simulated());
     view.hub_check = state.licence_fetch.last();
+    view.credit_top_up = state.credit_topup.last();
     Json(view)
 }
 
@@ -986,7 +987,8 @@ pub async fn license(State(state): State<AppState>) -> Json<crate::licensing::Li
 /// JSON, taken as raw bytes so a body that is not UTF-8 or not JSON gets the
 /// same reasoned 422 as one that is not a licence. 409 when the station trusts no vendor root;
 /// 422 when the licence cannot be parsed, does not verify, or names another
-/// station's key. On any error the installed licence is unchanged.
+/// station's key, or the file's credit grant does not verify or names
+/// another station's key. On any error the installed licence is unchanged.
 pub async fn install_license(
     State(state): State<AppState>,
     body: axum::body::Bytes,

@@ -6,6 +6,7 @@ import type { Entitlement } from "@/api/orders";
 import type { Station } from "@/api/stations";
 import {
   AddCreditsAction,
+  creditMismatchText,
   creditsText,
   installCommand,
   parseCredits,
@@ -74,6 +75,7 @@ const station: Station = {
   credit_balance: null,
   credit_balance_reported_at: null,
   credits_granted: 0,
+  credit_report_mismatch_at: null,
 };
 
 /** The markup's text with tags removed. */
@@ -377,6 +379,16 @@ describe("credits", () => {
     const member = renderRow(pooled, false, true);
     expect(member).toContain("50 granted");
     expect(member).not.toContain("Add credits");
+  });
+
+  it("flags a station whose reported credits did not add up", () => {
+    expect(creditMismatchText(pooled)).toBeNull();
+    expect(renderRow(pooled, true, true)).not.toContain("did not add up");
+    const flagged = { ...pooled, credit_report_mismatch_at: "2026-11-12T14:30:00Z" };
+    expect(creditMismatchText(flagged)).toBe("Reported credits did not add up on 2026-11-12");
+    const t = renderRow(flagged, true, true);
+    expect(t).toContain("50 granted · Not reported yet");
+    expect(t).toContain("Reported credits did not add up on 2026-11-12");
   });
 
   it("shows Unlimited and no Add credits for an unlimited station", () => {

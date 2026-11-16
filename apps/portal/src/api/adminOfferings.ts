@@ -58,6 +58,12 @@ export const TRIAL_DEFAULT_QUOTA_ERASURES = 25;
  */
 export const DEFAULT_TARGET_RESERVE = 50;
 
+/**
+ * The credit top-up threshold the hub uses when none is entered, capped at
+ * the target reserve (`wipe_hub::credits::DEFAULT_TOPUP_THRESHOLD`, ADR-0013 §3).
+ */
+export const DEFAULT_TOPUP_THRESHOLD = 10;
+
 /** What an offering grants its buyer. */
 export interface Grants {
   scope: Scope;
@@ -88,6 +94,13 @@ export interface OfferingInput {
    * unlimited one. An annual offering cannot have a numeric quota.
    */
   credit_target_reserve?: number | null;
+  /**
+   * A connected station tops up from the pool when it holds fewer credits
+   * than this: only with a numeric `quota_erasures`, from 1 to the target
+   * reserve (omitted: the hub uses the smaller of 10 and the target reserve),
+   * never with an unlimited one.
+   */
+  credit_topup_threshold?: number | null;
 }
 
 /** An offering. Timestamps are RFC 3339 UTC; absent values are `null`. */
@@ -95,6 +108,8 @@ export interface Offering extends OfferingInput {
   id: string;
   /** Set exactly when the quota is numeric. */
   credit_target_reserve: number | null;
+  /** Set exactly when the quota is numeric. */
+  credit_topup_threshold: number | null;
   status: OfferingStatus;
   created_at: string;
   updated_at: string;
@@ -137,6 +152,7 @@ export function isOffering(v: unknown): v is Offering {
     oneOf(OFFERING_STATUSES, v.status) &&
     isGrants(v.grants) &&
     (v.credit_target_reserve === null || isInt(v.credit_target_reserve)) &&
+    (v.credit_topup_threshold === null || isInt(v.credit_topup_threshold)) &&
     typeof v.created_at === "string" &&
     typeof v.updated_at === "string" &&
     isNullableString(v.published_at) &&

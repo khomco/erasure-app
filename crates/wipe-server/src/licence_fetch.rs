@@ -23,6 +23,9 @@
 //!   is logged with `tracing::warn`, and its message says the current
 //!   licence still applies.
 //!
+//! After each check the loop tops up the credit reserve when it is due
+//! ([`crate::credit_topup`]).
+//!
 //! **The check never blocks a job.** It runs on its own task, holds no lock
 //! across an `.await`, and never touches `start_job` or the runner: an
 //! unreachable or hanging hub changes nothing but the status line.
@@ -99,7 +102,13 @@ impl Drop for LicenceFetchSlot {
 
 /// The hub address saved in the station settings, if it passes the rule.
 pub fn saved_hub(state: &AppState) -> Option<HubOrigin> {
-    let settings = load_station_settings(state.settings_path.as_deref()?).ok()??;
+    saved_hub_at(state.settings_path.as_deref())
+}
+
+/// The hub address saved in the station settings at `settings_path`, if it
+/// passes the rule.
+pub fn saved_hub_at(settings_path: Option<&std::path::Path>) -> Option<HubOrigin> {
+    let settings = load_station_settings(settings_path?).ok()??;
     HubOrigin::parse(settings.hub_origin.as_deref()?).ok()
 }
 
@@ -242,10 +251,12 @@ fn not_installed(o: &str, e: EnrollError) -> String {
 }
 
 /// Check now, then every [`CHECK_INTERVAL`] by `clock`, for as long as the
-/// task runs.
+/// task runs. Each check is followed by a credit top-up when one is due
+/// ([`crate::credit_topup::top_up_once`]).
 pub async fn run_loop(state: AppState, clock: &mut dyn Clock) {
     loop {
         check_once(&state).await;
+        crate::credit_topup::top_up_once(&state).await;
         clock.sleep(CHECK_INTERVAL).await;
     }
 }

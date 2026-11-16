@@ -1387,3 +1387,98 @@ async fn a_station_balance_is_never_negative_and_has_a_report_time() {
         "{checks:?}"
     );
 }
+
+/// Migration 0023 (controlled-licensing story 4): an offering's top-up
+/// threshold exists only with a counted quota, lies between 1 and the
+/// target reserve (NULL reading as 50) and freezes at publication.
+#[tokio::test]
+async fn an_offering_topup_threshold_needs_a_quota_and_freezes_at_publication() {
+    let t = TestDb::migrated().await;
+    let pool = &t.pool;
+    let insert = |quota: Option<i64>, reserve: Option<i64>, threshold: Option<i64>| {
+        sqlx::query_scalar::<_, uuid::Uuid>(
+            "INSERT INTO offerings (name, price_minor, currency, billing_interval, scope, seats, \
+                                    quota_erasures, term_months, credit_target_reserve, \
+                                    credit_topup_threshold) \
+             VALUES ('Pool ' || gen_random_uuid(), 1000, 'USD', 'one_off', 'site', 1, $1, 12, \
+                     $2, $3) RETURNING id",
+        )
+        .bind(quota)
+        .bind(reserve)
+        .bind(threshold)
+    };
+    for (quota, reserve, threshold) in [
+        (None, None, Some(5)),
+        (Some(500), None, Some(0)),
+        (Some(500), None, Some(51)),
+        (Some(500), Some(20), Some(21)),
+    ] {
+        let err = insert(quota, reserve, threshold)
+            .fetch_one(pool)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.as_database_error().and_then(|d| d.constraint()),
+            Some("offerings_credit_topup_threshold_check"),
+            "{quota:?} {reserve:?} {threshold:?}"
+        );
+    }
+    insert(Some(500), None, None).fetch_one(pool).await.unwrap();
+    insert(Some(500), None, Some(50))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let id = insert(Some(500), Some(20), Some(20))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE offerings SET credit_topup_threshold = 15 WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE offerings SET status = 'published', published_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let m = refused(
+        pool,
+        "UPDATE offerings SET credit_topup_threshold = 16 WHERE id = $1",
+        id,
+    )
+    .await;
+    assert!(m.contains("commercial terms cannot change"), "{m}");
+}
+
+/// Migration 0023: a top-up grant has no licence, a station's reported
+/// spent count is never negative, and the mismatch flag is nullable.
+#[tokio::test]
+async fn a_topup_grant_needs_no_licence_and_spent_reports_are_never_negative() {
+    let t = TestDb::migrated().await;
+    let pool = &t.pool;
+    let nullable: Vec<(String, String)> = sqlx::query_as(
+        "SELECT table_name::text, column_name::text FROM information_schema.columns \
+         WHERE ((table_name = 'credit_grants' AND column_name = 'licence_id') \
+                OR (table_name = 'stations' AND column_name IN \
+                    ('credit_spent_reported', 'credit_report_mismatch_at'))) \
+           AND is_nullable = 'YES' ORDER BY 1, 2",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(nullable.len(), 3, "{nullable:?}");
+    let checks: Vec<String> = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+         WHERE conrelid = 'stations'::regclass AND contype = 'c'",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.contains("credit_spent_reported >= 0")),
+        "{checks:?}"
+    );
+}

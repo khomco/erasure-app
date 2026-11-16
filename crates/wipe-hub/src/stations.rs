@@ -15,8 +15,10 @@
 //!   `licence.issued`) in the caller's transaction. Nothing is written on
 //!   any refusal.
 //! - **The licence mirrors the entitlement exactly:** `customer_id` /
-//!   `customer_name` are the organization's id and name, the quota is the
-//!   order's `quota_erasures` (`None` is unlimited), the features its feature
+//!   `customer_name` are the organization's id and name, the quota is
+//!   `Unlimited` when the order's `quota_erasures` is `None`, else `Pool`
+//!   (credits come from grants out of the organization's pool, ADR-0013 §3,
+//!   controlled-licensing story 4), the features its feature
 //!   names, every method is allowed, `not_before` = `issued_at` = now and
 //!   `not_after` = the entitlement's `term_end`. A machine entitlement's
 //!   licence names `machine_fingerprint(station_id)` (the bench's
@@ -199,6 +201,10 @@ pub struct Station {
     pub credit_balance_reported_at: Option<String>,
     /// The credits granted to this station from its entitlement's pool.
     pub credits_granted: i64,
+    /// When a balance the station reported did not add up (it claimed more
+    /// than it was granted, or its spent count went backwards); sticky.
+    /// `None` when every report added up.
+    pub credit_report_mismatch_at: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -224,6 +230,7 @@ struct StationRow {
     credit_balance: Option<i64>,
     credit_balance_reported_at: Option<String>,
     credits_granted: i64,
+    credit_report_mismatch_at: Option<String>,
 }
 
 impl From<StationRow> for Station {
@@ -259,6 +266,7 @@ impl From<StationRow> for Station {
             credit_balance: r.credit_balance,
             credit_balance_reported_at: r.credit_balance_reported_at,
             credits_granted: r.credits_granted,
+            credit_report_mismatch_at: r.credit_report_mismatch_at,
         }
     }
 }
@@ -301,7 +309,9 @@ fn select_stations() -> String {
                 to_char(s.credit_balance_reported_at AT TIME ZONE 'UTC', {RFC3339_UTC}) \
                     AS credit_balance_reported_at, \
                 COALESCE((SELECT sum(g.credits) FROM credit_grants g \
-                          WHERE g.station_id = s.id), 0)::bigint AS credits_granted \
+                          WHERE g.station_id = s.id), 0)::bigint AS credits_granted, \
+                to_char(s.credit_report_mismatch_at AT TIME ZONE 'UTC', {RFC3339_UTC}) \
+                    AS credit_report_mismatch_at \
          FROM stations s \
          JOIN entitlements e ON e.id = s.entitlement_id \
          JOIN orders o ON o.id = e.order_id \
@@ -514,12 +524,11 @@ fn licence_entitlements(
                 .map_err(|_| StationError::Issue(format!("unknown feature {f:?} on {}", ent.id)))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // A quota entitlement is a pool for the whole organization: the licence
+    // carries no count of its own, and the station spends credit grants.
     let quota = match ent.quota_erasures {
         None => Quota::Unlimited,
-        Some(n) => Quota::Count {
-            erasures: u64::try_from(n)
-                .map_err(|_| StationError::Issue(format!("negative quota on {}", ent.id)))?,
-        },
+        Some(_) => Quota::Pool,
     };
     let scope = match ent.scope.as_str() {
         "machine" => Scope::Machine {
@@ -738,7 +747,7 @@ async fn issue_licence(
                     entitlement_id: ent.id,
                     purchased,
                     station: req.station,
-                    licence_id: id,
+                    licence_id: Some(id),
                     instance_key_id: req.instance_key_id,
                     credits,
                     issued_at: now,

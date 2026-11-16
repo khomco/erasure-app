@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import {
   ANNUAL_TERM_MONTHS,
   DEFAULT_TARGET_RESERVE,
+  DEFAULT_TOPUP_THRESHOLD,
   FEATURES,
   TRIAL_DEFAULT_QUOTA_ERASURES,
   FEATURE_LABELS,
@@ -54,6 +55,11 @@ export interface OfferingFields {
   term: string;
   /** The credit target reserve; blank leaves the hub's default (50). */
   reserve?: string;
+  /**
+   * The credit top-up threshold; blank leaves the hub's default (10, or the
+   * target reserve when that is smaller).
+   */
+  threshold?: string;
 }
 
 /**
@@ -78,6 +84,7 @@ export function offeringBody(
         trial: locked.trial,
         grants: locked.grants,
         credit_target_reserve: locked.credit_target_reserve,
+        credit_topup_threshold: locked.credit_topup_threshold,
       },
     };
   }
@@ -107,6 +114,12 @@ export function offeringBody(
   if (quotaCount !== null && reserveText !== "" && reserve === null) {
     return { error: "The credit target reserve is a whole number." };
   }
+  const thresholdText = f.threshold?.trim() ?? "";
+  const threshold =
+    quotaCount === null || thresholdText === "" ? null : wholeNumber(thresholdText);
+  if (quotaCount !== null && thresholdText !== "" && threshold === null) {
+    return { error: "The top-up threshold is a whole number." };
+  }
   return {
     body: {
       name: f.name,
@@ -123,6 +136,7 @@ export function offeringBody(
         term_months: termMonths,
       },
       ...(reserve === null ? {} : { credit_target_reserve: reserve }),
+      ...(threshold === null ? {} : { credit_topup_threshold: threshold }),
     },
   };
 }
@@ -167,6 +181,11 @@ export function OfferingForm({
   const [reserve, setReserve] = useState(
     String(initial?.credit_target_reserve ?? DEFAULT_TARGET_RESERVE),
   );
+  // Blank applies the hub's default (10, or the target reserve when that is
+  // smaller), so a small target reserve is never refused for the default.
+  const [threshold, setThreshold] = useState(
+    initial?.credit_topup_threshold == null ? "" : String(initial.credit_topup_threshold),
+  );
   const [localError, setLocalError] = useState<string | null>(null);
 
   const annual = !trial && interval === "annual";
@@ -200,6 +219,7 @@ export function OfferingForm({
         features,
         term,
         reserve,
+        threshold,
       },
       termsLocked ? initial : undefined,
     );
@@ -384,6 +404,23 @@ export function OfferingForm({
             <span className="block text-xs text-slate-400">
               Credits a station is given from the organization's pool when its owner chooses
               none.
+            </span>
+          </label>
+        )}
+        {(!unlimited || trial) && (
+          <label className="block space-y-1 text-sm">
+            <span className="text-slate-300">Top-up threshold</span>
+            <input
+              name="threshold"
+              type="number"
+              min={1}
+              step={1}
+              value={threshold}
+              onChange={(e) => setThreshold(e.target.value)}
+              className={inputClass}
+            />
+            <span className="block text-xs text-slate-400">
+              {`A connected station tops up when it has fewer credits available than this. Blank uses ${DEFAULT_TOPUP_THRESHOLD}, or the target reserve when that is smaller.`}
             </span>
           </label>
         )}

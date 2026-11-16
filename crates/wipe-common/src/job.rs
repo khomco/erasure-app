@@ -246,6 +246,13 @@ pub struct JobLicence {
     /// certificate is signed) or returned (the Job is aborted).
     #[serde(default)]
     pub credits_reserved: u32,
+    /// On a licence that draws credits from its organization's pool
+    /// (ADR-0013 §3), the organization (`customer_id`) whose credits in the
+    /// station's credit reserve were reserved. Settled from the reserve by
+    /// organization, whatever licence is installed then. `None` on a
+    /// licence that counts its own credits, or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_pool: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub decided_at: OffsetDateTime,
 }
@@ -258,6 +265,7 @@ impl JobLicence {
             attestation: None,
             license_id: None,
             credits_reserved: 0,
+            credit_pool: None,
             decided_at,
         }
     }

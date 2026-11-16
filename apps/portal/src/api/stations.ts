@@ -68,6 +68,13 @@ export interface Station {
   credit_balance_reported_at: string | null;
   /** Credits granted to this station from its entitlement's pool. */
   credits_granted: number;
+  /**
+   * When a credit report from this station last did not add up (it claimed
+   * more credits than it was ever granted, or its spent count went
+   * backwards); `null` if never. Sticky: a report that adds up never clears
+   * it, and each mismatch moves it to the latest.
+   */
+  credit_report_mismatch_at: string | null;
 }
 
 /** A credit grant issued with a licence: its id and how many credits. */
@@ -153,7 +160,8 @@ export function isStation(v: unknown): v is Station {
     typeof v.renewal_available === "boolean" &&
     isNullableInt(v.credit_balance) &&
     isNullableString(v.credit_balance_reported_at) &&
-    isInt(v.credits_granted)
+    isInt(v.credits_granted) &&
+    isNullableString(v.credit_report_mismatch_at)
   );
 }
 

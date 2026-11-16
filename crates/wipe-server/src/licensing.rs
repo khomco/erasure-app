@@ -17,11 +17,14 @@
 //! that started covered stays licensed however long it runs. A running Job
 //! is never interrupted.
 //!
-//! Credits (ADR-0013 §3, against the licence's own `Count` quota until the
-//! organization pool reaches the station): a licensed start reserves one
-//! credit per drive, a signed certificate spends it
-//! ([`spend`](LicenseContext::spend)) and an abort returns it
-//! ([`release`](LicenseContext::release)).
+//! Credits (ADR-0013 §3): a licensed start reserves one credit per drive, a
+//! signed certificate spends it ([`spend`](LicenseContext::spend)) and an
+//! abort returns it ([`release`](LicenseContext::release)). A `Count`
+//! licence counts its own credits. A `Pool` licence draws on the station's
+//! **credit reserve**: the verified credit grants kept in its lease state
+//! for the licence's organization ([`add_grant`](LicenseContext::add_grant)).
+//! Pool reservations are settled by organization, whatever licence is
+//! installed then, and a licence switch keeps the reserve.
 //!
 //! Lease state is loaded from a [`LeaseStore`] at start-up and saved after
 //! every start decision, settlement and status check, so a restart neither
@@ -44,8 +47,9 @@ use time::OffsetDateTime;
 
 use wipe_common::{JobLicence, Method};
 use wipe_license::{
-    evaluate, machine_fingerprint, AllowedMethods, AttestationChain, Entitlements, LeaseState,
-    LeaseStatus, MethodClass, Quota,
+    check_grant_for, evaluate, machine_fingerprint, AllowedMethods, AttestationChain, CreditGrant,
+    CreditTerms, Entitlements, GrantAdded, InstallProblem, LeaseState, LeaseStatus, MethodClass,
+    Quota,
 };
 
 use crate::store::{EphemeralLeaseStore, LeasePersistence, LeaseStore, StoreError};
@@ -177,6 +181,7 @@ impl LicenseContext {
             }
         };
         lease.credits_reserved = 0;
+        lease.pool_credits_reserved = 0;
         if let Some(id) = license_id {
             adopt_licence(&mut lease, &id);
         }
@@ -408,6 +413,7 @@ impl LicenseContext {
             simulated_backend: simulated,
             fingerprint: self.fingerprint.clone(),
             hub_check: None,
+            credit_top_up: None,
         }
     }
 
@@ -445,8 +451,10 @@ impl LicenseContext {
     /// Under one write lock on the lease: judge the licence against the
     /// stored watermark, fold `now` in, check the method and the credits,
     /// and reserve one credit per drive, so two concurrent starts cannot
-    /// both take the last credit. Then save. On a `Count` licence the save
-    /// must land within [`LEASE_SAVE_TIMEOUT`], or the reservation is undone
+    /// both take the last credit (on a `Pool` licence, from the station's
+    /// credit reserve for the licence's organization, recorded as the
+    /// decision's `credit_pool`). Then save. On a `Count` or `Pool` licence
+    /// the save must land within [`LEASE_SAVE_TIMEOUT`], or the reservation is undone
     /// and the start refused; on an `Unlimited` one a lease fault changes
     /// nothing (only the rollback watermark is at stake, checked here
     /// against the one in RAM).
@@ -475,6 +483,7 @@ impl LicenseContext {
         let ent = &chain.license.body.entitlements;
         let license_id = chain.license.body.license_id.clone();
         let counted = counts_credits(ent);
+        let pool = matches!(ent.quota, Quota::Pool).then(|| ent.customer_id.clone());
         let drives = u64::from(req.drives);
 
         let checked = {
@@ -494,6 +503,11 @@ impl LicenseContext {
                 .or_else(|| credit_refusal(ent, &lease, drives));
             match refusal {
                 Some(refusal) => Err(refusal),
+                None if pool.is_some() => {
+                    lease.pool_credits_reserved =
+                        lease.pool_credits_reserved.saturating_add(drives);
+                    Ok(())
+                }
                 None => {
                     lease.credits_reserved = lease.credits_reserved.saturating_add(drives);
                     Ok(())
@@ -507,7 +521,7 @@ impl LicenseContext {
         }
         if let Err(detail) = self.persist_checked() {
             if counted {
-                self.unreserve(&license_id, drives);
+                self.unreserve(&license_id, pool.is_some(), drives);
                 return uncovered(StartRefusal::LeaseUnavailable { detail });
             }
         }
@@ -516,6 +530,7 @@ impl LicenseContext {
             attestation: serde_json::to_value(chain).ok(),
             license_id: Some(license_id),
             credits_reserved: req.drives,
+            credit_pool: pool,
             decided_at: now,
         })
     }
@@ -524,7 +539,9 @@ impl LicenseContext {
     /// §3), including one for a destroyed drive that was never erased. The
     /// reserved credits become used ones, and the lease is saved, best
     /// effort. Nothing for an `evaluation` decision, or one taken under a
-    /// licence the lease no longer counts for.
+    /// `Count` licence the lease no longer counts for. A pool decision
+    /// spends from its organization's grants, oldest first, whatever
+    /// licence is installed now.
     pub fn spend(&self, decision: &JobLicence) {
         self.settle(decision, true);
     }
@@ -544,6 +561,17 @@ impl LicenseContext {
             return;
         };
         let n = u64::from(decision.credits_reserved);
+        if let Some(organization_id) = decision.credit_pool.as_deref() {
+            {
+                let mut lease = self.lease.write();
+                lease.pool_credits_reserved = lease.pool_credits_reserved.saturating_sub(n);
+                if spent {
+                    lease.spend_pool(organization_id, n);
+                }
+            }
+            self.persist();
+            return;
+        }
         {
             let mut lease = self.lease.write();
             if lease.license_id.as_deref() != Some(license_id) {
@@ -557,18 +585,106 @@ impl LicenseContext {
         self.persist();
     }
 
-    /// Undo a reservation that was not saved. Only under the same licence:
-    /// a licence switch meanwhile already cleared it.
-    fn unreserve(&self, license_id: &str, drives: u64) {
+    /// Undo a reservation that was not saved. A `Count` one only under the
+    /// same licence: a licence switch meanwhile already cleared it. A pool
+    /// one always: a switch keeps the reserve.
+    fn unreserve(&self, license_id: &str, pool: bool, drives: u64) {
         let mut lease = self.lease.write();
-        if lease.license_id.as_deref() == Some(license_id) {
+        if pool {
+            lease.pool_credits_reserved = lease.pool_credits_reserved.saturating_sub(drives);
+        } else if lease.license_id.as_deref() == Some(license_id) {
             lease.credits_reserved = lease.credits_reserved.saturating_sub(drives);
         }
     }
+
+    /// Take a credit grant into the station's credit reserve (ADR-0013 §3),
+    /// once it verifies against `roots` and is bound to `station_key_id`
+    /// (`wipe_license::check_grant_for`); a grant that does not is refused
+    /// and nothing changes. A grant id already held is
+    /// [`GrantAdded::AlreadyHeld`], nothing changed. A new one is added and
+    /// saved: a failed save is reported in [`GrantIntake::saved`], and the
+    /// grant stays in RAM for the next save to write.
+    pub fn add_grant(
+        &self,
+        grant: &CreditGrant,
+        station_key_id: &str,
+        roots: &[wipe_cert::VerifyingKey],
+    ) -> Result<GrantIntake, InstallProblem> {
+        check_grant_for(grant, station_key_id, roots)?;
+        let added = self.lease.write().add_grant(grant);
+        let saved = match added {
+            GrantAdded::AlreadyHeld => Ok(()),
+            GrantAdded::Added => self.persist_checked(),
+        };
+        if added == GrantAdded::Added {
+            tracing::info!(grant_id = %grant.body.grant_id, credits = grant.body.credits,
+                organization = %grant.body.organization_id, "credit grant added to the reserve");
+        }
+        Ok(GrantIntake { added, saved })
+    }
+
+    /// The credit reserve the installed licence draws on; `None` unless it
+    /// is a `Pool` licence.
+    pub fn pool_reserve(&self) -> Option<PoolReserve> {
+        let ent = self.entitlements()?;
+        if !matches!(ent.quota, Quota::Pool) {
+            return None;
+        }
+        let o = ent.customer_id.as_str();
+        let lease = self.lease.read();
+        Some(PoolReserve {
+            organization_id: o.to_owned(),
+            balance: lease.pool_balance(o),
+            spent: lease.pool_spent(o),
+            available: lease.pool_available(o),
+            terms: lease.credit_terms,
+            last_topup_grant_id: lease.last_topup_grant_id.clone(),
+        })
+    }
+
+    /// Record a top-up answer: the hub's `terms`, and the id of the grant it
+    /// delivered when one was added. Saved, best effort.
+    pub fn record_top_up(&self, terms: CreditTerms, grant_id: Option<&str>) {
+        {
+            let mut lease = self.lease.write();
+            lease.credit_terms = Some(terms);
+            if let Some(id) = grant_id {
+                lease.last_topup_grant_id = Some(id.to_owned());
+            }
+        }
+        self.persist();
+    }
 }
 
+/// What [`LicenseContext::add_grant`] did with a verified grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantIntake {
+    pub added: GrantAdded,
+    /// Whether the lease was saved with it; `Err` names the fault. The grant
+    /// is held in RAM either way.
+    pub saved: Result<(), String>,
+}
+
+/// The station's credit reserve for the installed `Pool` licence's
+/// organization ([`LicenseContext::pool_reserve`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolReserve {
+    pub organization_id: String,
+    /// Held and not spent, counting credits reserved by running Jobs.
+    pub balance: u64,
+    /// Spent by signed certificates, over the life of the reserve.
+    pub spent: u64,
+    /// What a start may reserve now.
+    pub available: u64,
+    /// The hub's last answered threshold and target; `None` before any.
+    pub terms: Option<CreditTerms>,
+    pub last_topup_grant_id: Option<String>,
+}
+
+/// A licence whose starts reserve credits and so need lease state: `Count`
+/// and `Pool`.
 fn counts_credits(ent: &Entitlements) -> bool {
-    matches!(ent.quota, Quota::Count { .. })
+    matches!(ent.quota, Quota::Count { .. } | Quota::Pool)
 }
 
 /// The refusal a licence status gives, judged on the licence's own checks
@@ -617,6 +733,13 @@ fn method_refusal(allowed: &AllowedMethods, method: Option<&Method>) -> Option<S
 /// On a `Count` licence, are `drives` credits left once every spent and
 /// reserved one is counted?
 fn credit_refusal(ent: &Entitlements, lease: &LeaseState, drives: u64) -> Option<StartRefusal> {
+    if let Quota::Pool = ent.quota {
+        let left = lease.pool_available(&ent.customer_id);
+        return (left < drives).then_some(StartRefusal::NoPoolCredits {
+            needed: drives,
+            left,
+        });
+    }
     let Quota::Count { erasures } = ent.quota else {
         return None;
     };
@@ -672,7 +795,13 @@ pub enum StartRefusal {
         needed: u64,
         left: u64,
     },
-    /// A `Count` licence's lease state could not be read, or the
+    /// A `Pool` licence, and the station's credit reserve for its
+    /// organization holds too few credits, counting reserved ones.
+    NoPoolCredits {
+        needed: u64,
+        left: u64,
+    },
+    /// A `Count` or `Pool` licence's lease state could not be read, or the
     /// reservation could not be saved. `detail` names the file and error.
     LeaseUnavailable {
         detail: String,
@@ -727,6 +856,16 @@ impl StartRefusal {
             Self::NoCredits { needed, left } => format!(
                 "This start needs {needed} credits, and this station's licence has {left} left. \
                  Add credits, or install a licence with credits, to start it."
+            ),
+            Self::NoPoolCredits { needed, left: 0 } if *needed <= 1 => {
+                "This station has no credits left. Connect it to the platform so it can top up, \
+                 or install a licence file carrying credits, to start new jobs."
+                    .into()
+            }
+            Self::NoPoolCredits { needed, left } => format!(
+                "This start needs {needed} credits, and this station holds {left}. Connect it to \
+                 the platform so it can top up, or install a licence file carrying credits, to \
+                 start it."
             ),
             Self::LeaseUnavailable { detail } => format!(
                 "This station's licence counts credits, but its lease state could not be used \
@@ -787,6 +926,10 @@ pub struct LicenseView {
     /// saved).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hub_check: Option<crate::licence_fetch::HubCheck>,
+    /// The latest credit top-up with the platform (ADR-0013 §3), filled in
+    /// by `GET /api/license`; absent when none has run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credit_top_up: Option<crate::licence_fetch::HubCheck>,
 }
 
 /// Who a licence is issued to.
@@ -1324,6 +1467,8 @@ mod tests {
             StartRefusal::MethodUnresolvable,
             StartRefusal::NoCredits { needed: 1, left: 0 },
             StartRefusal::NoCredits { needed: 3, left: 2 },
+            StartRefusal::NoPoolCredits { needed: 1, left: 0 },
+            StartRefusal::NoPoolCredits { needed: 3, left: 2 },
             StartRefusal::LeaseUnavailable { detail: "x".into() },
         ] {
             let msg = refusal.message();
@@ -1336,6 +1481,7 @@ mod tests {
                     "Check",
                     "Add",
                     "Fix",
+                    "Connect",
                     "Start new jobs from"
                 ]
                 .iter()
@@ -1343,5 +1489,117 @@ mod tests {
                 "{msg}"
             );
         }
+    }
+
+    fn pool_chain(license_id: &str) -> AttestationChain {
+        chain_with(license_id, entitlements(Quota::Pool, AllowedMethods::All))
+    }
+
+    fn with_grant(credits: u64) -> LeaseState {
+        let mut s = stored(None, 0, 0);
+        s.credit_grants.push(wipe_license::HeldGrant {
+            grant_id: "g-1".into(),
+            organization_id: "c".into(),
+            credits,
+            spent: 0,
+        });
+        s
+    }
+
+    #[test]
+    fn a_pool_start_reserves_from_the_reserve_and_settles_by_organization() {
+        let ctx = LicenseContext::open(
+            "st",
+            Some(pool_chain("lic-a")),
+            MemStore::holding(Some(with_grant(3))),
+            now(),
+        );
+        let d = ctx.decide_start(&real(2), now()).unwrap();
+        assert_eq!(d.credit_pool.as_deref(), Some("c"));
+        assert_eq!(d.credits_reserved, 2);
+        assert_eq!(ctx.lease_state().pool_credits_reserved, 2);
+        assert_eq!(ctx.lease_state().credits_reserved, 0);
+        assert_eq!(
+            ctx.decide_start(&real(2), now()).unwrap_err(),
+            StartRefusal::NoPoolCredits { needed: 2, left: 1 }
+        );
+        // A licence switch keeps the reserve and the reservation.
+        let switched = ctx.with_chain(pool_chain("lic-b"));
+        assert_eq!(switched.lease_state().pool_credits_reserved, 2);
+        switched.spend(&d);
+        let l = switched.lease_state();
+        assert_eq!((l.pool_credits_reserved, l.credit_grants[0].spent), (0, 2));
+        assert_eq!(
+            switched.view(now(), false).status,
+            LeaseStatus::Valid {
+                remaining_erasures: Some(1),
+                days_remaining: 29
+            }
+        );
+        // An abort returns it.
+        let d = switched.decide_start(&real(1), now()).unwrap();
+        switched.release(&d);
+        assert_eq!(switched.lease_state().pool_credits_reserved, 0);
+        assert_eq!(switched.pool_reserve().unwrap().available, 1);
+    }
+
+    #[test]
+    fn a_pool_reservation_that_is_not_saved_is_undone_and_refused() {
+        let ctx = LicenseContext::open(
+            "st",
+            Some(pool_chain("lic-a")),
+            MemStore::failing_saves(),
+            now(),
+        );
+        // In RAM only: the grant cannot be saved either.
+        let g = wipe_license::VendorRoot::generate();
+        let grant = g
+            .issue_credit_grant("g-1", "c", "ed25519:k", 5, now())
+            .unwrap();
+        let intake = ctx
+            .add_grant(&grant, "ed25519:k", &[g.verifying_key()])
+            .unwrap();
+        assert_eq!(intake.added, wipe_license::GrantAdded::Added);
+        assert!(intake.saved.is_err());
+        assert!(matches!(
+            ctx.decide_start(&real(1), now()).unwrap_err(),
+            StartRefusal::LeaseUnavailable { .. }
+        ));
+        assert_eq!(ctx.lease_state().pool_credits_reserved, 0);
+        // A grant for another key, or from another root, is refused.
+        assert!(ctx
+            .add_grant(&grant, "ed25519:other", &[g.verifying_key()])
+            .is_err());
+        assert!(ctx
+            .add_grant(
+                &grant,
+                "ed25519:k",
+                &[wipe_license::VendorRoot::generate().verifying_key()]
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn open_returns_pool_reservations() {
+        let mut s = with_grant(5);
+        s.pool_credits_reserved = 4;
+        let ctx = LicenseContext::open(
+            "st",
+            Some(pool_chain("lic-a")),
+            MemStore::holding(Some(s)),
+            now(),
+        );
+        assert_eq!(ctx.lease_state().pool_credits_reserved, 0);
+        assert_eq!(ctx.pool_reserve().unwrap().available, 5);
+        assert_eq!(
+            LicenseContext::open(
+                "st",
+                Some(count_chain("lic-a", 5)),
+                MemStore::holding(None),
+                now()
+            )
+            .pool_reserve(),
+            None
+        );
     }
 }

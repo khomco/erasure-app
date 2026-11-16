@@ -93,6 +93,9 @@ pub struct AppState {
     /// state, so it runs until the runtime shuts down; the slot's abort on
     /// drop only applies once that task is gone.
     pub licence_fetch: Arc<crate::licence_fetch::LicenceFetchSlot>,
+    /// The latest credit top-up with the platform and whether one is in
+    /// flight ([`crate::credit_topup`]).
+    pub credit_topup: Arc<crate::credit_topup::CreditTopUpSlot>,
 }
 
 impl AppState {
@@ -145,6 +148,7 @@ impl AppState {
             instance_key_kept: false,
             enrollment: Arc::new(crate::enrollment::EnrollmentSlot::default()),
             licence_fetch: Arc::new(crate::licence_fetch::LicenceFetchSlot::default()),
+            credit_topup: Arc::new(crate::credit_topup::CreditTopUpSlot::default()),
         };
         state.spawn_cert_generator();
         state
@@ -202,6 +206,8 @@ impl AppState {
     /// (`POST /api/license`). Without any, runtime install is refused.
     pub fn with_vendor_roots(mut self, roots: Vec<wipe_cert::VerifyingKey>) -> Self {
         self.vendor_roots = Arc::new(roots);
+        self.credit_topup
+            .configure(self.settings_path.clone(), self.vendor_roots.clone());
         self
     }
 
@@ -216,6 +222,8 @@ impl AppState {
     /// there and its licence beside it. Without one, nothing is saved.
     pub fn with_settings_path(mut self, path: Option<PathBuf>) -> Self {
         self.settings_path = path;
+        self.credit_topup
+            .configure(self.settings_path.clone(), self.vendor_roots.clone());
         self
     }
 
@@ -228,14 +236,19 @@ impl AppState {
 
     /// Install a licence while the station runs (`POST /api/license`).
     ///
-    /// `raw` is the licence file's JSON. It must pass the start-up checks
+    /// `raw` is the licence file's JSON, a bare licence or a licence with a
+    /// credit grant beside it. The licence must pass the start-up checks
     /// (`wipe_license::check_installable`) against [`vendor_roots`] and this
-    /// station's signing key id. On success the new context, which keeps the
-    /// running lease ([`LicenseContext::with_chain`]), replaces the old one in
-    /// the shared cell, so the certificate generator signs with it from its
-    /// next decision; the result is what `GET /api/license` now reports. On
-    /// any error nothing changes. The licence is held in memory only: a
-    /// restart goes back to the `--license` licence, or to evaluation.
+    /// station's signing key id, and a grant `wipe_license::check_grant_for`;
+    /// a file whose grant fails is refused whole. On success the new
+    /// context, which keeps the running lease ([`LicenseContext::with_chain`]),
+    /// replaces the old one in the shared cell, so the certificate generator
+    /// signs with it from its next decision, and the grant joins the
+    /// station's credit reserve (a grant id already held changes nothing);
+    /// the result is what `GET /api/license` now reports. On any error
+    /// nothing changes. The licence is held in memory only: a restart goes
+    /// back to the `--license` licence, or to evaluation. Grants are kept in
+    /// the lease state.
     ///
     /// [`vendor_roots`]: Self::vendor_roots
     /// [`LicenseContext::with_chain`]: crate::licensing::LicenseContext::with_chain
@@ -246,16 +259,18 @@ impl AppState {
         if self.vendor_roots.is_empty() {
             return Err(LicenseInstallError::NoVendorRoot);
         }
-        let licence = wipe_license::parse_license(raw).map_err(|e| match e {
+        let file = wipe_license::parse_license_file(raw).map_err(|e| match e {
             wipe_license::LicenseError::Encoding(why) => LicenseInstallError::Unparseable(why),
             other => LicenseInstallError::Unparseable(other.to_string()),
         })?;
-        wipe_license::check_installable(
-            &licence,
-            &self.signing_key.public_key_id(),
-            &self.vendor_roots,
-        )
-        .map_err(LicenseInstallError::NotInstallable)?;
+        let key_id = self.signing_key.public_key_id();
+        wipe_license::check_installable(&file.license, &key_id, &self.vendor_roots)
+            .map_err(LicenseInstallError::NotInstallable)?;
+        if let Some(grant) = &file.credit_grant {
+            wipe_license::check_grant_for(grant, &key_id, &self.vendor_roots)
+                .map_err(LicenseInstallError::GrantNotInstallable)?;
+        }
+        let licence = file.license;
         let license_id = licence.body.license_id.clone();
         let chain = wipe_license::AttestationChain::new(licence);
         let installed = {
@@ -267,6 +282,21 @@ impl AppState {
             installed
         };
         info!(%license_id, "licence installed at runtime");
+        if let Some(grant) = &file.credit_grant {
+            match installed.add_grant(grant, &key_id, &self.vendor_roots) {
+                Ok(intake) => {
+                    if let Err(fault) = intake.saved {
+                        warn!(%fault, "credit grant held in memory, not saved");
+                    }
+                }
+                // Checked above against the same key and roots.
+                Err(problem) => warn!(problem = %problem.grant_message(), "credit grant not added"),
+            }
+        }
+        // A just-installed pool licence (an install, an enrollment or a
+        // fetched renewal) tops up now if it is due, not at the next daily
+        // check.
+        crate::credit_topup::nudge(self);
         Ok(installed.view(time::OffsetDateTime::now_utc(), self.simulated()))
     }
 
@@ -406,9 +436,22 @@ impl AppState {
         })
         .await
         {
-            Ok(Ok(decision)) => Ok(decision),
+            Ok(Ok(decision)) => {
+                if decision.credit_pool.is_some() {
+                    crate::credit_topup::nudge(self);
+                }
+                Ok(decision)
+            }
             Ok(Err(refusal)) => {
                 info!(reason = %refusal, "start refused by the licence");
+                if matches!(
+                    refusal,
+                    crate::licensing::StartRefusal::NoPoolCredits { .. }
+                ) {
+                    // A station that ran dry tops up now, not at the next
+                    // daily check. The refusal stands either way.
+                    crate::credit_topup::nudge(self);
+                }
                 Err(JobStartError::Refused(refusal))
             }
             Err(e) => Err(JobStartError::Runner(wipe_common::WipeError::Backend(
@@ -603,6 +646,7 @@ impl AppState {
                         // erased.
                         let license = state.license();
                         let evaluation = decision.evaluation;
+                        let pool = decision.credit_pool.is_some();
                         let erased = job.latest_erasure().is_some();
                         if let Err(e) = tokio::task::spawn_blocking(move || {
                             if !evaluation {
@@ -615,6 +659,9 @@ impl AppState {
                         {
                             tracing::error!(?e, %job_id, evaluation,
                                 "certificate not counted against the lease");
+                        }
+                        if pool {
+                            crate::credit_topup::nudge(&state);
                         }
                         info!(%job_id, ?new_state, evaluation,
                               "certificate signed and stored");
@@ -654,6 +701,9 @@ pub enum LicenseInstallError {
     Unparseable(String),
     /// The licence did not verify, or was issued to another station's key.
     NotInstallable(wipe_license::InstallProblem),
+    /// The file's credit grant did not verify, or was issued to another
+    /// station's key: the whole file is refused.
+    GrantNotInstallable(wipe_license::InstallProblem),
 }
 
 impl std::fmt::Display for LicenseInstallError {
@@ -666,6 +716,7 @@ impl std::fmt::Display for LicenseInstallError {
             ),
             Self::Unparseable(why) => write!(f, "{why}"),
             Self::NotInstallable(problem) => write!(f, "{problem}"),
+            Self::GrantNotInstallable(problem) => write!(f, "{}", problem.grant_message()),
         }
     }
 }

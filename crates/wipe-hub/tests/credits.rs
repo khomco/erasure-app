@@ -287,15 +287,12 @@ async fn a_default_registration_puts_the_target_reserve_in_the_licence_file() {
     assert_eq!(grant.body.credits, 50);
     assert_eq!(grant.body.grant_id, grant_id);
     assert_eq!(grant.body.organization_id, f.org_id.to_string());
-    // The licence inside is the stored one, unchanged, and still counts the
-    // order quota (story 4 marks it pool-backed).
+    // The licence inside is the stored one, unchanged, and draws its
+    // credits from the pool (story 4): it carries no count of its own.
     let stored: LicenseCertificate =
         serde_json::from_str(&f.stored_document(&licence_id).await).unwrap();
     assert_eq!(file.license, stored);
-    assert_eq!(
-        file.license.body.entitlements.quota,
-        Quota::Count { erasures: 5000 }
-    );
+    assert_eq!(file.license.body.entitlements.quota, Quota::Pool);
     // The licence-only parser takes the same file.
     assert_eq!(parse_license(&text).unwrap(), stored);
     let value: Value = serde_json::from_str(&text).unwrap();

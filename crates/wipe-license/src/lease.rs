@@ -68,6 +68,56 @@ pub struct LeaseState {
     /// clock) and resets the count. `None` until a licence has been seen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license_id: Option<String>,
+    /// The station's **credit reserve** (ADR-0013 §3): every verified credit
+    /// grant it has taken, oldest first, with what it has spent of each.
+    /// Kept for good, never pruned, so a grant id seen before is always
+    /// recognised and never counted twice. Tied to the organization, not the
+    /// licence: a licence switch keeps it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credit_grants: Vec<HeldGrant>,
+    /// Pool credits reserved by Jobs that have started but are not yet
+    /// certified or aborted, on a [`Quota::Pool`](crate::Quota::Pool)
+    /// licence. Returned at start-up like
+    /// [`credits_reserved`](Self::credits_reserved), but not cleared by a
+    /// licence switch: they are settled by organization.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pool_credits_reserved: u64,
+    /// The id of the last grant a top-up from the hub delivered, sent with
+    /// the next top-up so the hub can resend an answer that was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_topup_grant_id: Option<String>,
+    /// The threshold and target reserve the hub last answered a top-up
+    /// with; `None` until it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_terms: Option<CreditTerms>,
+}
+
+/// One credit grant in the station's credit reserve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldGrant {
+    pub grant_id: String,
+    /// The organization whose pool it came from.
+    pub organization_id: String,
+    pub credits: u64,
+    /// Credits of this grant spent by signed certificates.
+    #[serde(default)]
+    pub spent: u64,
+}
+
+/// When a connected station tops its credit reserve up, and to how much:
+/// below `threshold` credits, up to `target` (the offering's terms).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreditTerms {
+    pub threshold: u64,
+    pub target: u64,
+}
+
+/// Whether [`LeaseState::add_grant`] took a grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantAdded {
+    Added,
+    /// A grant with this id is already held: nothing changed.
+    AlreadyHeld,
 }
 
 impl LeaseState {
@@ -79,6 +129,10 @@ impl LeaseState {
             evaluation_erasures: 0,
             counter_is_monotonic: false,
             license_id: None,
+            credit_grants: Vec::new(),
+            pool_credits_reserved: 0,
+            last_topup_grant_id: None,
+            credit_terms: None,
         }
     }
 
@@ -97,6 +151,77 @@ impl LeaseState {
     /// Credits spent or reserved: what a `Count` quota is checked against.
     pub fn credits_committed(&self) -> u64 {
         self.erasures_used.saturating_add(self.credits_reserved)
+    }
+
+    fn grants_of<'a>(&'a self, organization_id: &'a str) -> impl Iterator<Item = &'a HeldGrant> {
+        self.credit_grants
+            .iter()
+            .filter(move |g| g.organization_id == organization_id)
+    }
+
+    /// Credits ever granted to this station for `organization_id`.
+    pub fn pool_held(&self, organization_id: &str) -> u64 {
+        self.grants_of(organization_id)
+            .fold(0u64, |n, g| n.saturating_add(g.credits))
+    }
+
+    /// Credits of `organization_id`'s grants spent by signed certificates.
+    pub fn pool_spent(&self, organization_id: &str) -> u64 {
+        self.grants_of(organization_id)
+            .fold(0u64, |n, g| n.saturating_add(g.spent))
+    }
+
+    /// Credits held for `organization_id` and not spent, counting those
+    /// reserved by running Jobs (they are still held).
+    pub fn pool_balance(&self, organization_id: &str) -> u64 {
+        self.pool_held(organization_id)
+            .saturating_sub(self.pool_spent(organization_id))
+    }
+
+    /// Credits a start may reserve for `organization_id`: the balance less
+    /// every pool credit reserved. What a top-up reports as its balance and
+    /// compares with the threshold.
+    pub fn pool_available(&self, organization_id: &str) -> u64 {
+        self.pool_balance(organization_id)
+            .saturating_sub(self.pool_credits_reserved)
+    }
+
+    /// Whether a grant with this id is held.
+    pub fn holds_grant(&self, grant_id: &str) -> bool {
+        self.credit_grants.iter().any(|g| g.grant_id == grant_id)
+    }
+
+    /// Take a verified grant into the reserve. Verify it first
+    /// ([`crate::check_grant_for`]): this only refuses an id already held.
+    pub fn add_grant(&mut self, grant: &crate::CreditGrant) -> GrantAdded {
+        if self.holds_grant(&grant.body.grant_id) {
+            return GrantAdded::AlreadyHeld;
+        }
+        self.credit_grants.push(HeldGrant {
+            grant_id: grant.body.grant_id.clone(),
+            organization_id: grant.body.organization_id.clone(),
+            credits: grant.body.credits,
+            spent: 0,
+        });
+        GrantAdded::Added
+    }
+
+    /// Spend `n` credits of `organization_id`'s grants, oldest first. Credits
+    /// beyond what the grants hold are dropped (saturating).
+    pub fn spend_pool(&mut self, organization_id: &str, n: u64) {
+        let mut left = n;
+        for g in self
+            .credit_grants
+            .iter_mut()
+            .filter(|g| g.organization_id == organization_id)
+        {
+            if left == 0 {
+                break;
+            }
+            let take = g.credits.saturating_sub(g.spent).min(left);
+            g.spent += take;
+            left -= take;
+        }
     }
 }
 
@@ -273,7 +398,9 @@ pub enum LeaseStatus {
         not_before: OffsetDateTime,
     },
     /// Every credit of a `Count` quota is spent or reserved by a running
-    /// Job (`used` counts both). Best-effort offline.
+    /// Job (`used` counts both). Best-effort offline. On a `Pool` licence:
+    /// the station's credit reserve for the organization is spent or
+    /// reserved (`allowed` is every credit granted to it).
     QuotaExhausted { used: u64, allowed: u64 },
     /// Licence is bound to a different machine.
     WrongMachine { expected: String, actual: String },
@@ -384,6 +511,23 @@ pub fn evaluate(
     if now > ent.not_after {
         return LeaseStatus::Expired {
             not_after: ent.not_after,
+        };
+    }
+
+    if let crate::entitlement::Quota::Pool = ent.quota {
+        let o = ent.customer_id.as_str();
+        let available = state.pool_available(o);
+        if available == 0 {
+            return LeaseStatus::QuotaExhausted {
+                used: state
+                    .pool_spent(o)
+                    .saturating_add(state.pool_credits_reserved),
+                allowed: state.pool_held(o),
+            };
+        }
+        return LeaseStatus::Valid {
+            remaining_erasures: Some(available),
+            days_remaining: (ent.not_after - now).whole_days(),
         };
     }
 

@@ -194,6 +194,48 @@ describe("LicenceStatus", () => {
     expect(html).toContain("Licensed - unlimited, 300 days left");
   });
 
+  it("shows no credit top-up before one has run", () => {
+    const html = renderToStaticMarkup(createElement(LicenceStatus, { info }));
+    expect(html).not.toContain("Last credit top-up");
+  });
+
+  it("shows a successful credit top-up in local time beside the platform check", () => {
+    const checked_at = "2026-11-10T09:45:00Z";
+    const html = renderToStaticMarkup(
+      createElement(LicenceStatus, {
+        info: {
+          ...info,
+          hub_check: { checked_at: "2026-11-10T09:30:00Z", ok: true, message: "Up to date." },
+          credit_top_up: { checked_at, ok: true, message: "Topped up: this station now holds 50 credits." },
+        },
+      }),
+    );
+    expect(html).toContain("Last check with the platform:");
+    expect(html).toContain(
+      `Last credit top-up: ${new Date(checked_at).toLocaleString()} — Topped up: this station now holds 50 credits.`,
+    );
+    expect(html).not.toContain("text-amber-200");
+  });
+
+  it("shows a failed credit top-up, which leaves the licence in force", () => {
+    const html = renderToStaticMarkup(
+      createElement(LicenceStatus, {
+        info: {
+          ...info,
+          credit_top_up: {
+            checked_at: "2026-11-10T09:45:00Z",
+            ok: false,
+            message: "Could not reach the platform at https://hub.example (timed out).",
+          },
+        },
+      }),
+    );
+    expect(html).toContain("Last credit top-up:");
+    expect(html).toContain("Could not reach the platform at https://hub.example (timed out).");
+    expect(html).toContain("text-amber-200");
+    expect(html).toContain("Licensed - unlimited, 300 days left");
+  });
+
   it("says so when the licence cannot be read", () => {
     const html = renderToStaticMarkup(createElement(LicenceStatus, { error: true }));
     expect(html).toContain("could not report its licence");

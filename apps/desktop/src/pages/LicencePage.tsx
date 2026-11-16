@@ -120,6 +120,7 @@ export function LicenceStatus({ info, error }: { info?: LicenseInfo; error?: boo
         </p>
       )}
       {info.hub_check && <HubCheckLine check={info.hub_check} />}
+      {info.credit_top_up && <CreditTopUpLine check={info.credit_top_up} />}
     </div>
   );
 }
@@ -130,13 +131,29 @@ export function LicenceStatus({ info, error }: { info?: LicenseInfo; error?: boo
  * still applies.
  */
 function HubCheckLine({ check }: { check: HubCheck }) {
-  const at = new Date(check.checked_at);
-  const when = Number.isNaN(at.getTime()) ? check.checked_at : at.toLocaleString();
   return (
     <p className={check.ok ? "text-slate-400" : "text-amber-200"}>
-      Last check with the platform: {when} — {check.message}
+      Last check with the platform: {localTime(check.checked_at)} — {check.message}
     </p>
   );
+}
+
+/**
+ * The latest credit top-up from the organization's credit pool, in the
+ * bench's local time. A failure never stops a start while credits remain.
+ */
+function CreditTopUpLine({ check }: { check: HubCheck }) {
+  return (
+    <p className={check.ok ? "text-slate-400" : "text-amber-200"}>
+      Last credit top-up: {localTime(check.checked_at)} — {check.message}
+    </p>
+  );
+}
+
+/** An RFC 3339 time in the bench's local time; as given when unparseable. */
+function localTime(rfc3339: string): string {
+  const at = new Date(rfc3339);
+  return Number.isNaN(at.getTime()) ? rfc3339 : at.toLocaleString();
 }
 
 export interface EnrollmentPanelProps {
