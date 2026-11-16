@@ -61,5 +61,6 @@ Re-planned 2026-11-05 after ADR-0006, ADR-0007 and ADR-0011.
 2. **Commercial platform**, all verifiable on a laptop: `hub-foundation`, `portal-accounts`, `lead-capture`, `offerings-and-payments`, `licence-delivery`, `software-downloads`, `commerce-end-to-end`.
 3. **Station trust:** `docs-truth-up`, `destruction-cert-integrity`, `destruction-attestation`, `licensing-as-built`, `licence-visibility`, `station-enrollment` (ADR-0008), `controlled-licensing` (ADR-0013).
 4. **Station usability:** `desktop-parity`, `bench-throughput-inbox`, `drift-tests`.
+5. **Hardening before real hardware:** `hardening` (13 stories from the 2026-11-16 assessment, `.scratch/hardening/assessment.md`; owner decisions D18–D20 split out).
 
 Everything after these needs at least one decision from `DECISIONS.md`.

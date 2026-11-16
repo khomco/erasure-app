@@ -1,0 +1,71 @@
+- id: "1"
+  title: CI and build hygiene
+  description: >-
+    CAP-1. GitHub Actions (rust with services, msrv, web, fmt on changed
+    files, demo), dependabot, rust-version in every crate, layering guard,
+    clippy fixes, root-cause the flaky health test.
+- id: "2"
+  title: Station API lockdown
+  description: >-
+    CAP-2. Drop permissive CORS; Host allow-list; Origin and client header on
+    mutating routes and the WebSocket; JSON-only licence install; Tauri CSP.
+- id: "3"
+  title: Runner integrity and bounded job logs
+  description: >-
+    CAP-3. Progress out of the signed log, one active Job per device, failed
+    events with reasons, abort/issue races, abort refused on a destruction
+    run, verification honours the JobSpec.
+- id: "4"
+  title: Settlement survives lag
+  description: >-
+    CAP-4. Generator sweep on lag and on a tick, supervised generator,
+    WebSocket lag and close handling.
+- id: "5"
+  title: Hub account and enrollment hardening
+  description: >-
+    CAP-5. Pre-registration hijack, verification audit, dummy-hash test,
+    enrollment expiry edge, verify_strict, enrollment start nonce.
+- id: "6"
+  title: Hub production guards
+  description: >-
+    CAP-6. File root with Stripe refused, seed permissions, Fake loopback
+    only, trusted proxies, trailing-slash 404, .part cleanup, secret-safe
+    Debug, currency allow-list, refunds trim grace.
+- id: "7"
+  title: Station licence durability
+  description: >-
+    CAP-7. Load the enrolled licence at start-up, tolerant Feature reader,
+    data-dir lock, seed permissions, corrupt-layout backup.
+- id: "8"
+  title: Bench exception visibility and frontend resilience
+  description: >-
+    CAP-8. Honest slot states, queued Jobs in the Inbox, error boundaries,
+    typed ApiError, header merge, happy-dom render tests, labels.
+- id: "9"
+  title: Deterministic hub tests
+  description: >-
+    CAP-9. Injectable hub Clock, no sleep-to-separate or sleep-then-absent,
+    wipe-engine runner tests.
+- id: "10"
+  title: End-to-end and portal interaction tests
+  description: >-
+    CAP-10. Playwright smoke on the compose stack, portal happy-dom flows,
+    pinned demo output, concurrence-policy wiring test.
+- id: "11"
+  title: Observability and shared contracts
+  description: >-
+    CAP-11. TraceLayer and request ids, ApiError in error.rs, one
+    require_owner, generated TypeScript types with a golden test.
+- id: "12"
+  title: A backend seam ready for real hardware
+  description: >-
+    CAP-12. Backend factory and mock feature, typed BackendError,
+    CancelOutcome, poll retry, BlockingOp, cached inventory.
+  spec_checkpoint: true
+- id: "13"
+  title: Docs and copy truth-up
+  description: >-
+    CAP-13. CONTEXT §12 verification wording, storage copy without the
+    control plane, remaining honest limits. The owner approves the
+    finished story.
+  done_checkpoint: true

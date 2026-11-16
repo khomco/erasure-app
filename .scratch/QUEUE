@@ -27,3 +27,6 @@ controlled-licensing
 desktop-parity
 bench-throughput-inbox
 drift-tests
+
+# 5. Hardening before real hardware (2026-11-16 assessment, .scratch/hardening/assessment.md).
+hardening
