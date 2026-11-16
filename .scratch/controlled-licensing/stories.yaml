@@ -19,13 +19,10 @@
   description: >-
     CAP-4. Needs licence-visibility story 5 and station-enrollment story 3.
 - id: "5"
-  title: Renewals charged 30 days early
+  title: Renewal grace on auto-renewing licences
   description: >-
-    CAP-5 (ADR-0013 §4). Stripe timing, next-term licences, late payment,
-    new checkout wording.
-  spec_checkpoint: true
-- id: "6"
-  title: Station holds and switches to its next-term licence
-  description: >-
-    CAP-6. Next licence stored alongside the current one; switch at start
-    with no gap.
+    CAP-5 (ADR-0013 §4, amended 2026-11-16). Charged when due; licences on
+    an active subscription valid 30 days past the paid term, with
+    paid_through; cancel trims connected stations; overdue banner. The
+    earlier story 6 (hold the next-term licence) was dropped: a renewed
+    licence starts as soon as it is paid.

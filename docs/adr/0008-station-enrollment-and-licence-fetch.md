@@ -81,7 +81,7 @@ as normal. A stolen licence file is useless without the key, as before.
 
 A station that enrolled online, or whose operator later points it at the hub, checks for a
 newer licence when it starts and every 24 hours while running. If its entitlement has renewed and
-the station's licence is behind (renewals are charged and issued 30 days early, ADR-0013 §4), the
+the station's licence is behind (renewed licences carry a 30-day grace, ADR-0013 §4), the
 hub **reissues automatically** (the same `stations::reissue` path the owner's button uses,
 audited with the station as actor) and returns the new licence. The station verifies and
 installs it. If the latest licence is revoked, the fetch returns nothing new in this slice:

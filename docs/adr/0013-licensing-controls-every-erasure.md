@@ -1,11 +1,11 @@
-# Licensing controls every erasure: checked at job start, credits from a pool, renewals charged early
+# Licensing controls every erasure: checked at job start, credits from a pool, renewal grace
 
 **Status:** accepted (2026-11-09)
 
 **Supersedes [ADR-0012](0012-opt-in-hard-stop-on-licence-lapse.md)** (the stop becomes universal,
 not an opt-in). **Reverses ROADMAP §0.2 and amends [ADR-0005](0005-licensing-and-attestation.md)
 §4 and §5**, stated explicitly: licensing now decides whether a new erasure may start. Resolves
-DECISIONS D13. Amends D15's renewal timing and the approved auto-renewal wording.
+DECISIONS D13. Amends D15 with a renewal grace period (§4, amended 2026-11-16).
 
 ## Context
 
@@ -84,34 +84,42 @@ stop a bench for no real reason. Neither should ever happen.
   hardware counter exists (ADR-0005, D12). The hub flags a station whose reported spending does
   not add up.
 
-### 4. Renewals are charged 30 days early, with no gap and no grace period
+### 4. Renewals are charged when due, and licence files carry a 30-day grace period
 
-- **Charged early.** An annual subscription's renewal is charged 30 days before the current term
-  ends. The new term starts the moment the old one ends, so the customer still gets 12 months
-  for 12 months' price.
-- **Delivered early.** When the charge succeeds, the hub issues each registered station its
-  next-term licence, valid from the old licence's end. Connected stations collect it at once
-  (ADR-0008 §3). A station holds its current and its next licence and switches when the next one
-  starts. A Job's start decides by the licence valid at that moment (§1).
-- **A failed charge** leaves 30 days to fix it: Stripe retries, the customer can update their
-  card, and the portal and emails say so. If it is paid before the current term ends, nothing
-  changes for the stations. If it is still unpaid at the end, the current licence expires and new
-  starts are refused (§1).
-- **Paid late**, after the term ended, the new term starts **on the day of payment** and runs 12
-  months, so a customer never pays for days their benches could not run. The following renewal is
-  charged 30 days before that new end.
-- **No grace period** is added to licence files. Early charging is what prevents the gap.
-- **Cancelling** before a renewal is charged stops future charges, and the current term runs to
-  its end. **A renewal already charged is not refunded** (owner decision, 2026-11-09), because
-  its licence may already sit on stations that cannot be reached. Exceptions go through support.
-- **The checkout wording** (owner-approved 2026-11-09, replacing the 2026-11-08 text): "**Renews
-  automatically every year at {price} until you cancel.** Your first year runs to {date}. We
-  charge each renewal 30 days before your year ends, so your stations receive the new licence in
-  good time, and we email you before we charge. Cancel from Billing in your account before a
-  renewal is charged: your current year still runs to its end, and you will not be charged again.
-  A renewal already charged is not refunded."
-- The reminder email goes before the charge, not before the anniversary (Stripe's
-  upcoming-renewal email, timed to the charge).
+*Amended 2026-11-16 (owner decision). The first version of this section charged renewals 30 days
+early. Stripe Checkout cannot take a full first-year payment and also move the renewal date, so
+every way of doing it needed a post-checkout workaround visible to customers (a "free trial"
+label, a hub-created subscription, or a reduced first charge). Charging when due with a grace
+period gives the same result with nothing unusual in Stripe.*
+
+- **Charged on the anniversary,** as Stripe subscriptions do by default (D15). Nothing about
+  checkout or Stripe's renewal changes.
+- **Grace in the licence file.** While an annual subscription is active and set to renew, every
+  licence issued for it is valid until **30 days after the paid term ends**. The signed licence
+  also records the paid-through date (an optional field, serde default, so older files still
+  verify), so the bench can say when renewal is due as well as when the licence ends.
+- **A successful renewal** extends the entitlement 12 months from the anniversary and makes a
+  renewed licence (again with 30 days' grace) available at once. Connected stations collect it
+  within a day (ADR-0008 §3). Air-gapped stations have the 30-day grace to install the file.
+  The term always stays on its anniversary: benches kept working through the grace days.
+- **A failed charge** leaves the 30-day grace to fix it: Stripe retries, the customer can update
+  their card, and the portal and emails say so, with the date new starts will be refused. Stripe's
+  retry schedule must end inside 30 days. If Stripe gives up, the subscription ends; buying again
+  starts a new year from that day.
+- **Cancelling** stops the next renewal, and the current term runs to its end. The hub then
+  reissues the organization's licences to end at the paid-through date, without the grace, and
+  connected stations collect the shorter licence. A station that is offline keeps the grace it
+  already holds: the accepted exposure is at most 30 unpaid days.
+- **Not a grace for anything else.** One-off purchases, trials and vendor-issued licences end
+  exactly when their term ends.
+- **The checkout wording** stays the owner-approved 2026-11-08 text, already live: "**Renews
+  automatically every year at {price} until you cancel.** Your first year runs to {date}. Cancel
+  any time from Billing in your account: your current year still runs to its end, and you will
+  not be charged again. We email you before each renewal." The 2026-11-09 wording about early
+  charging is withdrawn.
+- **Bench warnings** (30, 7 and 1 days) count down to the licence's own end, and while the
+  paid-through date has passed, the banner says the renewal payment is overdue and when new
+  starts will be refused.
 
 ### 5. The lapse-policy setting is retired
 
@@ -122,8 +130,8 @@ is affected: nothing has been sold yet.
 ## Consequences
 
 - A bench can stop: on a missed renewal payment, an air-gapped site whose next licence file was
-  not installed, or an empty credit reserve with no connection. The mitigations are early
-  charging, early delivery, top-ups, warnings at 30, 7 and 1 days (ROADMAP L-R5), and refusal
+  not installed, or an empty credit reserve with no connection. The mitigations are the
+  30-day renewal grace, automatic licence fetch, top-ups, warnings at 30, 7 and 1 days (ROADMAP L-R5), and refusal
   messages that say exactly how to fix it.
 - "Licensing never blocks erasure" is no longer true. The marketing site, CONTEXT §9, ROADMAP
   §0.2 and L-R1, and the `bmad-build-auto` invariant change with this ADR.
@@ -131,8 +139,8 @@ is affected: nothing has been sold yet.
 - The free-tier evaluation count (`licensing-as-built` story 3) remains as a record but no longer
   matters for real backends.
 - Built by `licence-visibility` story 5 (the start check, refusals, start-time decision and
-  per-licence credits) and `.scratch/controlled-licensing` (trials, the pool and grants, early
-  renewal, retiring the setting, copy).
+  per-licence credits) and `.scratch/controlled-licensing` (trials, the pool and grants, the
+  renewal grace, retiring the setting, copy).
 
 ## Not decided here
 

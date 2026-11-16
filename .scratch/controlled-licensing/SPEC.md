@@ -10,7 +10,7 @@ sources: []
 
 ## Why
 
-Owner decision, 2026-11-09 (ADR-0013): control is the baseline. No station erases without a licence, evaluation included. Erasure quotas are a pool the whole organization draws on, held on each station as a reserve so a start never waits on the network. Renewals are charged 30 days early so no bench ever stops on renewal day. `licence-visibility` story 5 builds the station's start gate; this epic builds everything around it at the hub, the portal, the station's credit reserve and the public copy.
+Owner decision, 2026-11-09 (ADR-0013): control is the baseline. No station erases without a licence, evaluation included. Erasure quotas are a pool the whole organization draws on, held on each station as a reserve so a start never waits on the network. Renewals are charged when due, and licence files carry a 30-day grace so no bench ever stops on renewal day. `licence-visibility` story 5 builds the station's start gate; this epic builds everything around it at the hub, the portal, the station's credit reserve and the public copy.
 
 ## Capabilities
 
@@ -46,21 +46,17 @@ Owner decision, 2026-11-09 (ADR-0013): control is the baseline. No station erase
     - A top-up failure never refuses a start while credits remain; with none left, the refusal says to connect the station or install a licence file carrying credits.
     - Tests cover a grant in a licence file, duplicate grants, a foreign grant, top-up at threshold, an empty pool, an unreachable hub, and a restart keeping the reserve.
 - **CAP-5**
-  - **intent:** Annual renewals are charged 30 days before the term ends, and the next term's licences are issued as soon as the charge succeeds.
+  - **intent:** No bench stops on renewal day: licences for an auto-renewing annual subscription carry a 30-day grace past the paid term, and renewals are charged when due (ADR-0013 §4, amended 2026-11-16).
   - **success:**
-    - The Stripe subscription is set up so each renewal invoice is issued and charged 30 days before the entitlement's term end, while the first purchase is charged at checkout and the first term runs 12 months from purchase. The Fake provider simulates the same timing, and the local Stripe mock covers it.
-    - A paid renewal extends the entitlement by 12 months from the current term end, and issues each registered station a next-term licence valid from that end. Connected stations collect it (ADR-0008 §3); the portal offers it as a file for air-gapped stations.
-    - A failed renewal charge is shown in the portal and emailed, with the date new starts will be refused. If paid before the term ends, nothing changes for stations. If paid after it ended, the new term runs 12 months from the payment date and the next renewal is charged 30 days before that end.
-    - Cancelling before a renewal is charged stops future charges; a charged renewal is not refunded by the hub.
-    - The checkout notice is the ADR-0013 §4 wording, verbatim, on `/buy`, the test checkout and Stripe's checkout page; `renewal_notice` and its tests change with it.
-    - The README names the Stripe settings this needs (upcoming-renewal email timed to the charge, retry schedule within 30 days).
-  - **checkpoint:** the Stripe mechanism for charging 30 days early (billing cycle anchor and how the first invoice is charged) must be confirmed against Stripe's documentation and the local mock before building.
-- **CAP-6**
-  - **intent:** A station holds its next-term licence and switches to it when it starts, with no gap.
-  - **success:**
-    - The station stores a next licence alongside its current one (installed by file or collected from the hub), verified the same way; installing a licence whose validity starts in the future stores it as next instead of replacing the current one.
-    - At each start the gate uses whichever licence is valid at that moment; when the next licence becomes valid it becomes current, without a restart, and `GET /api/license` and the banner show both.
-    - Tests cover a Job started on the last minute of the current term, a start on the first minute of the next, a next licence for another machine, and a restart in between.
+    - `wipe-license`'s licence body gains an optional `paid_through` date (`#[serde(default, skip_serializing_if = …)]`); existing licence files and fixtures still verify.
+    - Issuing or reissuing a licence for an annual entitlement whose subscription is active and set to renew signs `not_after` = term end + 30 days and `paid_through` = term end. One-off purchases, trials and vendor-issued licences get no grace and no `paid_through` (or `paid_through` = `not_after`).
+    - A paid renewal makes a renewed licence available at once (the existing `renewal_available` / reissue path, and the ADR-0008 fetch); the term stays on its anniversary.
+    - Cancelling (or Stripe ending the subscription after failed retries) reissues the organization's active station licences to end at `paid_through` without grace, audited; the ADR-0008 fetch delivers a licence with an earlier `not_after` when the hub has superseded the station's copy, and the station installs it.
+    - A failed renewal charge is shown in the portal and emailed, with the date new starts will be refused (term end + 30 days).
+    - The bench banner (`GET /api/license`) shows `paid_through` when it has passed: "Renewal payment overdue since {date}. New jobs will be refused from {not_after} unless it is paid." Expiry warnings count down to `not_after`.
+    - The checkout notice stays the 2026-11-08 wording already live; nothing about early charging ships.
+    - The README names the Stripe setting this relies on: the retry schedule must end within 30 days.
+    - Tests: grace on an active subscription, none on one-off/trial/vendor licences, renewal keeps the anniversary, cancel trims connected stations, a station offline at cancel keeps its grace, the overdue banner, and an old licence file without `paid_through` still verifying.
 
 ## Constraints
 
@@ -75,4 +71,4 @@ Owner decision, 2026-11-09 (ADR-0013): control is the baseline. No station erase
 
 ## Success signal
 
-- A prospect signs up, takes the trial, registers a bench and erases 25 drives; the 26th start is refused with a message pointing at the pricing page. A paying customer's annual renewal is charged a month ahead, every connected bench shows the next term's dates within a day, and no bench ever refuses a start on renewal day.
+- A prospect signs up, takes the trial, registers a bench and erases 25 drives; the 26th start is refused with a message pointing at the pricing page. A paying customer's annual renewal is charged on the anniversary, every connected bench shows the new dates within a day, and no bench ever refuses a start on renewal day.

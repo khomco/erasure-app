@@ -545,9 +545,10 @@ it: three tiers a customer can buy, activate, renew and outgrow.
   owner approves it in the portal (`station-enrollment`).
 - **L-R5 Expiry and renewal.** Warn at 30, 7 and 1 days. A start after expiry is
   refused; a Job started before expiry is certified as licensed (ADR-0013 §1).
-  Annual offerings renew as Stripe subscriptions (D15), charged 30 days before the
-  term ends; the next-term licence is issued at once and connected stations
-  collect it (ADR-0013 §4, ADR-0008, `controlled-licensing`). Since 2026-11-08 an
+  Annual offerings renew as Stripe subscriptions (D15), charged when due; while a
+  subscription is set to renew, its licences stay valid 30 days past the paid term,
+  so connected stations collect the renewal and air-gapped sites can install it
+  with no gap (ADR-0013 §4, amended 2026-11-16; `controlled-licensing`). Since 2026-11-08 an
   owner can also reissue a renewed station's licence from the portal and install
   it by hand (licence-delivery story 2).
 - **L-R6 Revocation** with its honest limit stated in the docs (A2.3).
