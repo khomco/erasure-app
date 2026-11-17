@@ -1,0 +1,12 @@
+- id: "1"
+  title: The PDF renderer
+  description: >-
+    CAP-1. wipe-cert-pdf renders a verified certificate to PDF/A-3b with the
+    signed JSON attached byte-for-byte; deterministic bytes; veraPDF script.
+    The owner approves the finished story's wording.
+  done_checkpoint: true
+- id: "2"
+  title: Getting the PDF
+  description: >-
+    CAP-2. wipestation cert-pdf, GET /api/jobs/{id}/certificate.pdf, Download
+    PDF on the Certificate page.

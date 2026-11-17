@@ -1,0 +1,33 @@
+- id: "1"
+  title: Docs framework and drift gates
+  description: >-
+    CAP-1. Content collection with a capability-checked schema, no-JS docs
+    layout and navigation, build-time checks for unknown commands, flags,
+    routes and licence features.
+- id: "2"
+  title: Generated reference pages and example certificates
+  description: >-
+    CAP-2. CLI, HTTP API and licence-feature references read from the
+    goldens; route descriptions with a coverage test; deterministic example
+    certificate golden.
+- id: "3"
+  title: Getting started
+  description: >-
+    CAP-3. Overview, install, operating modes, quick start (commands tested),
+    glossary checked against CONTEXT §14. The owner approves the finished
+    story's wording.
+  done_checkpoint: true
+- id: "4"
+  title: Operating guides
+  description: >-
+    CAP-4. Configure a bench, run an erasure, record a destruction,
+    certificate anatomy with a field-coverage test. The owner approves the
+    finished story's wording.
+  done_checkpoint: true
+- id: "5"
+  title: Verification and licensing
+  description: >-
+    CAP-5. Verify a certificate with only the vendor root; licensing and
+    activation in customer terms. The owner approves the finished story's
+    wording.
+  done_checkpoint: true

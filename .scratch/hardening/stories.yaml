@@ -66,6 +66,7 @@
   title: Docs and copy truth-up
   description: >-
     CAP-13. CONTEXT §12 verification wording, storage copy without the
-    control plane, remaining honest limits. The owner approves the
+    control plane, remaining honest limits, ROADMAP struck where the hub
+    already shipped it (A1.3 parts, A1.4 audit log). The owner approves the
     finished story.
   done_checkpoint: true

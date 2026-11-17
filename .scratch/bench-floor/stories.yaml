@@ -1,0 +1,29 @@
+- id: "1"
+  title: Restart recovery notice
+  description: >-
+    CAP-1. Minimal in-flight record (job id, bay, start time, method) on
+    tier-1 stations; interruptions in the Inbox and bay map until
+    acknowledged; note on RAM-only stations. The owner approves the finished
+    story's wording.
+  done_checkpoint: true
+- id: "2"
+  title: Certificate labels with an offline QR
+  description: >-
+    CAP-2. Print label per certificate and per tray; WSC1 QR payload; three
+    size presets; "Check a label" on /verify/ via wipe-verify; Tauri print
+    checked.
+- id: "3"
+  title: Wall-board view
+  description: >-
+    CAP-3. Full-screen read-only /wallboard with live bay states, counts and
+    licence state, legible across a room.
+- id: "4"
+  title: Gloved hands and high contrast
+  description: >-
+    CAP-4. Bench mode (56 px targets) and a 7:1 high-contrast theme as
+    Tailwind variants, remembered per browser.
+- id: "5"
+  title: Accessibility audit and fixes
+  description: >-
+    CAP-5. axe on every desktop route in Playwright, keyboard-only flows,
+    fixes; WCAG 2.1 AA.

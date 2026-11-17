@@ -1,0 +1,19 @@
+- id: "1"
+  title: Root-only verification
+  description: >-
+    CAP-1. Instance public key in the attestation chain bound by key id;
+    verify-cert needs only the vendor root for licensed certificates; old
+    certificates still verify; ADR-0005 gap 4 closed.
+- id: "2"
+  title: One verification core that also builds for the browser
+  description: >-
+    CAP-2. wipe-verify crate with verify_document and a serde report; the
+    CLI uses it; wasm-bindgen build script; expected-report golden shared by
+    Rust and a Node vitest; CI builds the module.
+- id: "3"
+  title: The verification page
+  description: >-
+    CAP-3. /verify/ on the marketing site: paste a certificate, verify in the
+    browser with no network call, noscript CLI fallback. The owner approves
+    the finished story's wording.
+  done_checkpoint: true

@@ -166,6 +166,7 @@ It also confirmed 24 still-open deferred review items. Each story below closes a
 
       The control-plane variant (tier 2, a configured but unusable control plane) keeps naming it.
     - The honest limits recorded in `assessment.md` that remain after this epic are listed in CONTEXT §11.
+    - ROADMAP is truthed up against the hub as built: A1.3's shipped parts and A1.4 (every hub change is audited, ADR-0007 §6) are struck with their shipping stories, leaving only what is really open (for example, the admin view of an organization's orders and entitlements).
   - **checkpoint:** customer-visible copy; the owner approves the finished story.
 
 ## Constraints

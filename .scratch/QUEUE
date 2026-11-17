@@ -30,3 +30,10 @@ drift-tests
 
 # 5. Hardening before real hardware (2026-11-16 assessment, .scratch/hardening/assessment.md).
 hardening
+
+# 6. Buildable without decisions (specced 2026-11-16): verification first, since
+# docs-site, bench-floor and certificate-pdf build on wipe-verify.
+cert-verification
+docs-site
+bench-floor
+certificate-pdf

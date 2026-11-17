@@ -62,5 +62,6 @@ Re-planned 2026-11-05 after ADR-0006, ADR-0007 and ADR-0011.
 3. **Station trust:** `docs-truth-up`, `destruction-cert-integrity`, `destruction-attestation`, `licensing-as-built`, `licence-visibility`, `station-enrollment` (ADR-0008), `controlled-licensing` (ADR-0013).
 4. **Station usability:** `desktop-parity`, `bench-throughput-inbox`, `drift-tests`.
 5. **Hardening before real hardware:** `hardening` (13 stories from the 2026-11-16 assessment, `.scratch/hardening/assessment.md`; owner decisions D18–D20 split out).
+6. **Buildable without decisions** (specced 2026-11-16): `cert-verification` (root-only verification, closing ADR-0005 gap 4; a shared `wipe-verify` core built for the browser; the `/verify/` page, ROADMAP W3.2), `docs-site` (W1.5, W2.1–W2.6, W-R13), `bench-floor` (O2.3 restart notice, O2.4 labels with an offline QR, O3.1 wall-board, O3.2 gloved hands and high contrast, O3.4 accessibility), `certificate-pdf` (O4.3 PDF/A-3b). Wording stories stop for owner approval.
 
 Everything after these needs at least one decision from `DECISIONS.md`.
